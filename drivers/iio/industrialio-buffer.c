@@ -766,10 +766,14 @@ static int iio_storage_bytes_for_timestamp(struct iio_dev *indio_dev)
 }
 
 static int iio_compute_scan_bytes(struct iio_dev *indio_dev,
-				  const unsigned long *mask, bool timestamp)
+				  const unsigned long *mask, bool timestamp,
+				  unsigned int *timestamp_offset)
 {
 	unsigned int bytes = 0;
 	int length, i, largest = 0;
+
+	if (timestamp_offset)
+		*timestamp_offset = 0;
 
 	/* How much space will the demuxed element take? */
 	for_each_set_bit(i, mask, iio_get_masklength(indio_dev)) {
@@ -788,12 +792,15 @@ static int iio_compute_scan_bytes(struct iio_dev *indio_dev,
 			return length;
 
 		bytes = ALIGN(bytes, length);
+
+		if (timestamp_offset)
+			*timestamp_offset = bytes;
+
 		bytes += length;
 		largest = max(largest, length);
 	}
 
-	bytes = ALIGN(bytes, largest);
-	return bytes;
+	return ALIGN(bytes, largest);
 }
 
 static void iio_buffer_activate(struct iio_dev *indio_dev,
@@ -847,7 +854,7 @@ static void iio_buffer_update_bytes_per_datum(struct iio_dev *indio_dev,
 		return;
 
 	bytes = iio_compute_scan_bytes(indio_dev, buffer->scan_mask,
-				       buffer->scan_timestamp);
+				       buffer->scan_timestamp, NULL);
 
 	buffer->access->set_bytes_per_datum(buffer, bytes);
 }
@@ -884,6 +891,7 @@ struct iio_device_config {
 	unsigned int watermark;
 	const unsigned long *scan_mask;
 	unsigned int scan_bytes;
+	unsigned int scan_timestamp_offset;
 	bool scan_timestamp;
 };
 
@@ -988,7 +996,8 @@ static int iio_verify_update(struct iio_dev *indio_dev,
 	}
 
 	config->scan_bytes = iio_compute_scan_bytes(indio_dev,
-						    scan_mask, scan_timestamp);
+						    scan_mask, scan_timestamp,
+						    &config->scan_timestamp_offset);
 	config->scan_mask = scan_mask;
 	config->scan_timestamp = scan_timestamp;
 
@@ -1143,6 +1152,7 @@ static int iio_enable_buffers(struct iio_dev *indio_dev,
 	indio_dev->active_scan_mask = config->scan_mask;
 	ACCESS_PRIVATE(indio_dev, scan_timestamp) = config->scan_timestamp;
 	indio_dev->scan_bytes = config->scan_bytes;
+	ACCESS_PRIVATE(indio_dev, scan_timestamp_offset) = config->scan_timestamp_offset;
 	iio_dev_opaque->currentmode = config->mode;
 
 	iio_update_demux(indio_dev);
