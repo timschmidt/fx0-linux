@@ -53,6 +53,7 @@ struct inv_sensors_timestamp_acc {
  * @new_mult:		new set internal period multiplier (not yet effective)
  * @period:		measured current period of the sensor
  * @chip_period:	accumulator for computing internal chip period
+ * @init:		first interrupt has initialized timestamp alignment
  */
 struct inv_sensors_timestamp {
 	struct inv_sensors_timestamp_chip chip;
@@ -66,6 +67,7 @@ struct inv_sensors_timestamp {
 	u32 new_mult;
 	u32 period;
 	struct inv_sensors_timestamp_acc chip_period;
+	bool init;
 };
 
 void inv_sensors_timestamp_init(struct inv_sensors_timestamp *ts,
@@ -94,7 +96,7 @@ static inline void inv_sensors_timestamp_reset(struct inv_sensors_timestamp *ts)
 	ts->it = interval_init;
 	ts->delta = interval_init;
 	ts->delta_counter = 0;
-	ts->timestamp = 0;
+	ts->init = false;
 }
 
 #endif
