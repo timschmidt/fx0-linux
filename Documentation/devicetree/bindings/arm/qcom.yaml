@@ -74,6 +74,7 @@ properties:
       - items:
           - enum:
               - htc,memul
+              - lg,madai
               - microsoft,superman-lte
               - microsoft,tesla
               - motorola,peregrine
