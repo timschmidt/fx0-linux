@@ -24,6 +24,17 @@
 	};
 
 	reserved-memory {
+		fx0_wcnss_mem: wcnss@d200000 {
+			reg = <0x0d200000 0xa00000>;
+			no-map;
+		};
+
+		/* Stock firmware excludes 5 MiB here; the first MiB is SMEM. */
+		reserved@fb00000 {
+			reg = <0x0fb00000 0x400000>;
+			no-map;
+		};
+
 		smem_region: smem@fa00000 {
 			reg = <0x0fa00000 0x100000>;
 			no-map;
@@ -32,6 +43,14 @@
 };
 
 &blsp1_uart3 {
+	status = "okay";
+};
+
+&mba_region {
+	status = "okay";
+};
+
+&mpss_region {
 	status = "okay";
 };
 
