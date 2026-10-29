@@ -73,10 +73,22 @@
 	regulators {
 		compatible = "qcom,rpm-pm8226-regulators";
 
+		pm8226_l4: l4 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-allow-set-load;
+		};
+
 		pm8226_l6: l6 {
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
 			regulator-always-on;
+			regulator-allow-set-load;
+		};
+
+		pm8226_l8: l8 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
 			regulator-allow-set-load;
 		};
 
@@ -166,5 +178,55 @@
 			reg = <0x12>;
 			syna,sensor-type = <1>;
 		};
+	};
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdd-supply = <&pm8226_l28>;
+	vdda-supply = <&pm8226_l4>;
+	vddio-supply = <&pm8226_l8>;
+
+	panel@0 {
+		compatible = "lg,fx0-panel";
+		reg = <0>;
+		vdd-supply = <&pm8226_l28>;
+		reset-gpios = <&tlmm 25 GPIO_ACTIVE_LOW>;
+		io-enable-gpios = <&tlmm 113 GPIO_ACTIVE_HIGH>;
+		positive-enable-gpios = <&tlmm 111 GPIO_ACTIVE_HIGH>;
+		negative-enable-gpios = <&tlmm 112 GPIO_ACTIVE_HIGH>;
+		backlight = <&pm8226_wled>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&panel_in>;
+};
+
+&mdss_dsi0_phy {
+	vddio-supply = <&pm8226_l8>;
+};
+
+&pm8226_1 {
+	pm8226_wled: backlight@d800 {
+		compatible = "qcom,pm8941-wled";
+		reg = <0xd800>;
+		qcom,cs-out;
+		qcom,current-limit = <20>;
+		qcom,current-boost-limit = <805>;
+		qcom,switching-freq = <800>;
+		qcom,ovp = <35>;
+		qcom,num-strings = <1>;
+		qcom,enabled-strings = <0>;
+		default-brightness = <512>;
 	};
 };
