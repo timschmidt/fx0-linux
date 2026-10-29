@@ -57,3 +57,30 @@ required:
   - port
 
 additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    dsi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        panel@0 {
+            compatible = "lg,fx0-panel";
+            reg = <0>;
+
+            vdd-supply = <&pm8226_l28>;
+            reset-gpios = <&tlmm 25 GPIO_ACTIVE_LOW>;
+            io-enable-gpios = <&tlmm 113 GPIO_ACTIVE_HIGH>;
+            positive-enable-gpios = <&tlmm 111 GPIO_ACTIVE_HIGH>;
+            negative-enable-gpios = <&tlmm 112 GPIO_ACTIVE_HIGH>;
+            backlight = <&pm8226_wled>;
+
+            port {
+                endpoint {
+                    remote-endpoint = <&mdss_dsi0_out>;
+                };
+            };
+        };
+    };
