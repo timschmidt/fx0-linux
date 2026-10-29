@@ -226,8 +226,15 @@
 		qcom,current-boost-limit = <805>;
 		qcom,switching-freq = <800>;
 		qcom,ovp = <35>;
-		qcom,num-strings = <1>;
 		qcom,enabled-strings = <0>;
 		default-brightness = <512>;
 	};
+};
+
+&mdp_iommu {
+	status = "okay";
+};
+
+&mdss_mdp {
+	iommus = <&mdp_iommu 0>;
 };

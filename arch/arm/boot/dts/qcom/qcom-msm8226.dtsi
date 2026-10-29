@@ -1277,6 +1277,30 @@
 			};
 		};
 
+
+		mdp_iommu: iommu@fd928000 {
+			compatible = "qcom,msm8226-mdp-iommu";
+			reg = <0xfd928000 0x2600>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			#iommu-cells = <1>;
+			ranges = <0 0xfd930000 0x1000>;
+
+			clocks = <&mmcc MDSS_AHB_CLK>,
+				 <&mmcc MDSS_AXI_CLK>;
+			clock-names = "iface", "bus";
+			power-domains = <&mmcc MDSS_GDSC>;
+			qcom,iommu-secure-id = <1>;
+
+			status = "disabled";
+
+			iommu-ctx@0 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x0 0x1000>;
+				interrupts = <GIC_SPI 47 IRQ_TYPE_LEVEL_HIGH>;
+			};
+		};
+
 		cci: cci@fda0c000 {
 			compatible = "qcom,msm8226-cci";
 			reg = <0xfda0c000 0x1000>;
