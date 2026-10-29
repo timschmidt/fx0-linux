@@ -28,6 +28,7 @@
  *
  * @supplies: Array of voltage regulators
  * @startup_delay: Milliseconds to pause after powering up the regulators
+ * @reset_gpio: Optional GPIO held asserted while the device is powered off
  */
 struct rmi_i2c_xport {
 	struct rmi_transport_dev xport;
@@ -188,6 +189,9 @@ MODULE_DEVICE_TABLE(of, rmi_i2c_of_match);
 static void rmi_i2c_regulator_bulk_disable(void *data)
 {
 	struct rmi_i2c_xport *rmi_i2c = data;
+
+	if (rmi_i2c->reset_gpio)
+		gpiod_set_value_cansleep(rmi_i2c->reset_gpio, 1);
 
 	regulator_bulk_disable(ARRAY_SIZE(rmi_i2c->supplies),
 			       rmi_i2c->supplies);
