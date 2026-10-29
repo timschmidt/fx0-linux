@@ -54,6 +54,20 @@
 	status = "okay";
 };
 
+&pm8226_vadc {
+	channel@6 {
+		reg = <VADC_VBAT_SNS>;
+		label = "vbat_sns";
+	};
+
+	channel@30 {
+		reg = <VADC_LR_MUX1_BAT_THERM>;
+		label = "batt_therm";
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+	};
+};
+
 &rpm_requests {
 	regulators {
 		compatible = "qcom,rpm-pm8226-regulators";
