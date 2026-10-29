@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/panel/lg,fx0-panel.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: LG Fx0 JDI 720x1280 in-cell panel
+
+maintainers:
+  - Timothy Schmidt <timschmidt@gmail.com>
+
+description:
+  Four-lane RGB888 DSI video-mode JDI panel used by production LG Fx0
+  handsets. The IO switch and the positive and negative display bias
+  enables are individually controlled, in that order, before reset.
+
+allOf:
+  - $ref: panel-common.yaml#
+
+properties:
+  compatible:
+    const: lg,fx0-panel
+
+  reg:
+    maxItems: 1
+
+  vdd-supply:
+    description: Main 3.1 V analogue supply.
+
+  reset-gpios:
+    maxItems: 1
+
+  io-enable-gpios:
+    maxItems: 1
+    description: Active-high enable for the panel IO supply switch.
+
+  positive-enable-gpios:
+    maxItems: 1
+    description: Active-high enable for the positive display bias.
+
+  negative-enable-gpios:
+    maxItems: 1
+    description: Active-high enable for the negative display bias.
+
+  backlight: true
+  port: true
+
+required:
+  - compatible
+  - reg
+  - vdd-supply
+  - reset-gpios
+  - io-enable-gpios
+  - positive-enable-gpios
+  - negative-enable-gpios
+  - backlight
+  - port
+
+additionalProperties: false
