@@ -127,7 +127,7 @@ power_off:
 	return ret;
 }
 
-static int lg_fx0_unprepare(struct drm_panel *panel)
+static int lg_fx0_disable(struct drm_panel *panel)
 {
 	struct lg_fx0 *priv = to_lg_fx0(panel);
 	struct mipi_dsi_multi_context ctx = { .dsi = priv->dsi };
@@ -138,9 +138,15 @@ static int lg_fx0_unprepare(struct drm_panel *panel)
 	mipi_dsi_msleep(&ctx, 20);
 	mipi_dsi_dcs_enter_sleep_mode_multi(&ctx);
 	mipi_dsi_msleep(&ctx, 80);
-	lg_fx0_power_off(priv);
 
 	return ctx.accum_err;
+}
+
+static int lg_fx0_unprepare(struct drm_panel *panel)
+{
+	lg_fx0_power_off(to_lg_fx0(panel));
+
+	return 0;
 }
 
 static const struct drm_display_mode lg_fx0_mode = {
@@ -177,6 +183,7 @@ static int lg_fx0_get_modes(struct drm_panel *panel,
 
 static const struct drm_panel_funcs lg_fx0_funcs = {
 	.prepare = lg_fx0_prepare,
+	.disable = lg_fx0_disable,
 	.unprepare = lg_fx0_unprepare,
 	.get_modes = lg_fx0_get_modes,
 };
