@@ -1325,6 +1325,8 @@
 			clock-names = "camss_top_ahb",
 				      "cci_ahb",
 				      "cci";
+			assigned-clocks = <&mmcc CCI_CLK_SRC>;
+			assigned-clock-rates = <19200000>;
 
 			pinctrl-names = "default", "sleep";
 			pinctrl-0 = <&cci_default>;
