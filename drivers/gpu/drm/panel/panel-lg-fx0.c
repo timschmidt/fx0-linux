@@ -25,6 +25,8 @@ struct lg_fx0 {
 	struct gpio_desc *io_enable;
 	struct gpio_desc *positive_enable;
 	struct gpio_desc *negative_enable;
+	bool vdd_enabled;
+	bool cleanup_pending;
 };
 
 static inline struct lg_fx0 *to_lg_fx0(struct drm_panel *panel)
@@ -73,15 +75,34 @@ static int lg_fx0_on(struct lg_fx0 *priv)
 	return ctx.accum_err;
 }
 
-static void lg_fx0_power_off(struct lg_fx0 *priv)
+static int lg_fx0_power_off(struct lg_fx0 *priv)
 {
-	gpiod_direction_output(priv->reset, 1);
-	gpiod_direction_output(priv->negative_enable, 0);
+	int ret, error;
+
+	ret = gpiod_direction_output(priv->reset, 1);
+	error = gpiod_direction_output(priv->negative_enable, 0);
+	if (!ret)
+		ret = error;
 	usleep_range(10000, 11000);
-	gpiod_direction_output(priv->positive_enable, 0);
+	error = gpiod_direction_output(priv->positive_enable, 0);
+	if (!ret)
+		ret = error;
 	usleep_range(10000, 11000);
-	gpiod_direction_output(priv->io_enable, 0);
-	regulator_disable(priv->vdd);
+	error = gpiod_direction_output(priv->io_enable, 0);
+	if (!ret)
+		ret = error;
+	if (priv->vdd_enabled) {
+		error = regulator_disable(priv->vdd);
+		if (!error)
+			priv->vdd_enabled = false;
+		if (!ret)
+			ret = error;
+	}
+	priv->cleanup_pending = ret != 0;
+	if (ret)
+		dev_err(&priv->dsi->dev, "Failed to power off panel: %d\n", ret);
+
+	return ret;
 }
 
 static int lg_fx0_prepare(struct drm_panel *panel)
@@ -89,10 +110,17 @@ static int lg_fx0_prepare(struct drm_panel *panel)
 	struct lg_fx0 *priv = to_lg_fx0(panel);
 	int ret;
 
+	/* Finish a rejected cleanup before acquiring another supply reference. */
+	if (priv->cleanup_pending) {
+		ret = lg_fx0_power_off(priv);
+		if (ret)
+			return ret;
+	}
 	ret = regulator_enable(priv->vdd);
 	if (ret)
 		return ret;
 
+	priv->vdd_enabled = true;
 	ret = gpiod_direction_output(priv->reset, 1);
 	if (ret)
 		goto power_off;
@@ -144,9 +172,7 @@ static int lg_fx0_disable(struct drm_panel *panel)
 
 static int lg_fx0_unprepare(struct drm_panel *panel)
 {
-	lg_fx0_power_off(to_lg_fx0(panel));
-
-	return 0;
+	return lg_fx0_power_off(to_lg_fx0(panel));
 }
 
 static const struct drm_display_mode lg_fx0_mode = {
