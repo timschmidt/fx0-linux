@@ -31,6 +31,7 @@ properties:
               - qcom,msm8976-iommu
           - const: qcom,msm-iommu-v2
       - enum:
+          - qcom,msm8226-mdp-iommu
           - qcom,msm8974-gpu-iommu
           - qcom,msm8974-mdp-iommu
           - qcom,msm8974-venus-iommu
