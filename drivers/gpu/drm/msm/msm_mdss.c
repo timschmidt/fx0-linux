@@ -515,8 +515,15 @@ static int mdss_probe(struct platform_device *pdev)
 	 * level parent: MDSS, and children: MDP5/DPU, DSI, HDMI, eDP etc.
 	 * Populate the children devices, find the MDP5/DPU node, and then add
 	 * the interfaces to our components list.
+	 * Keep resources active while children register suppliers in this domain.
 	 */
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0) {
+		msm_mdss_destroy(mdss);
+		return ret;
+	}
 	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
+	pm_runtime_put_sync(dev);
 	if (ret) {
 		DRM_DEV_ERROR(dev, "failed to populate children devices\n");
 		msm_mdss_destroy(mdss);
