@@ -1284,7 +1284,7 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 			#iommu-cells = <1>;
-			ranges = <0 0xfd930000 0x1000>;
+			ranges = <0 0xfd930000 0x3000>;
 
 			clocks = <&mmcc MDSS_AHB_CLK>,
 				 <&mmcc MDSS_AXI_CLK>;
@@ -1297,6 +1297,18 @@
 			iommu-ctx@0 {
 				compatible = "qcom,msm-iommu-v1-ns";
 				reg = <0x0 0x1000>;
+				interrupts = <GIC_SPI 47 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			iommu-ctx@1000 {
+				compatible = "qcom,msm-iommu-v1-sec";
+				reg = <0x1000 0x1000>;
+				interrupts = <GIC_SPI 47 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			iommu-ctx@2000 {
+				compatible = "qcom,msm-iommu-v1-sec";
+				reg = <0x2000 0x1000>;
 				interrupts = <GIC_SPI 47 IRQ_TYPE_LEVEL_HIGH>;
 			};
 		};
