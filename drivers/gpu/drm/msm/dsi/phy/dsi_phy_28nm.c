@@ -827,7 +827,9 @@ static int dsi_28nm_phy_enable(struct msm_dsi_phy *phy,
 		writel(0, base + REG_DSI_28nm_PHY_LN_CFG_1(i));
 		writel(0, base + REG_DSI_28nm_PHY_LN_CFG_2(i));
 		writel(0, base + REG_DSI_28nm_PHY_LN_CFG_3(i));
-		writel(0, base + REG_DSI_28nm_PHY_LN_CFG_4(i));
+		writel(phy->cfg->quirks & DSI_PHY_28NM_QUIRK_PHY_8226 ?
+		       (i << 2) | i : 0,
+		       base + REG_DSI_28nm_PHY_LN_CFG_4(i));
 		writel(0, base + REG_DSI_28nm_PHY_LN_TEST_DATAPATH(i));
 		writel(0, base + REG_DSI_28nm_PHY_LN_DEBUG_SEL(i));
 		writel(0x1, base + REG_DSI_28nm_PHY_LN_TEST_STR_0(i));
