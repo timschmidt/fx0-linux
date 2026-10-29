@@ -51,12 +51,25 @@
 	};
 };
 
+&smbb {
+	qcom,fast-charge-safe-current = <1500000>;
+	qcom,fast-charge-current-limit = <1200000>;
+	qcom,fast-charge-safe-voltage = <4380000>;
+	qcom,fast-charge-high-threshold-voltage = <4350000>;
+	qcom,auto-recharge-threshold-voltage = <4280000>;
+	qcom,minimum-input-voltage = <4350000>;
+
+	status = "okay";
+};
+
 &usb {
+	extcon = <&smbb>;
 	dr_mode = "peripheral";
 	status = "okay";
 };
 
 &usb_hs_phy {
+	extcon = <&smbb>;
 	v1p8-supply = <&pm8226_l10>;
 	v3p3-supply = <&pm8226_l20>;
 };
