@@ -39,9 +39,21 @@
 	regulators {
 		compatible = "qcom,rpm-pm8226-regulators";
 
+		pm8226_l6: l6 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-always-on;
+		};
+
 		pm8226_l10: l10 {
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
+		};
+
+		pm8226_l17: l17 {
+			regulator-min-microvolt = <2950000>;
+			regulator-max-microvolt = <2950000>;
+			regulator-always-on;
 		};
 
 		pm8226_l20: l20 {
@@ -49,6 +61,19 @@
 			regulator-max-microvolt = <3075000>;
 		};
 	};
+};
+
+&sdhc_1 {
+	vmmc-supply = <&pm8226_l17>;
+	vqmmc-supply = <&pm8226_l6>;
+
+	bus-width = <8>;
+	non-removable;
+	max-frequency = <200000000>;
+	mmc-hs200-1_8v;
+	mmc-ddr-1_8v;
+
+	status = "okay";
 };
 
 &smbb {
