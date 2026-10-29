@@ -203,7 +203,7 @@ dsi_get_config(struct msm_dsi_host *msm_host)
 {
 	const struct msm_dsi_cfg_handler *cfg_hnd = NULL;
 	struct device *dev = &msm_host->pdev->dev;
-	struct clk *ahb_clk;
+	struct clk *ahb_clk, *bus_clk;
 	int ret;
 	u32 major = 0, minor = 0;
 
@@ -214,12 +214,27 @@ dsi_get_config(struct msm_dsi_host *msm_host)
 		goto exit;
 	}
 
-	pm_runtime_get_sync(dev);
+	bus_clk = devm_clk_get_optional(dev, "bus");
+	if (IS_ERR(bus_clk)) {
+		dev_err_probe(dev, PTR_ERR(bus_clk), "%s: cannot get bus clock\n",
+			      __func__);
+		goto exit;
+	}
+
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0)
+		goto exit;
+
+	ret = clk_prepare_enable(bus_clk);
+	if (ret) {
+		dev_err_probe(dev, ret, "%s: unable to enable bus_clk\n", __func__);
+		goto runtime_put;
+	}
 
 	ret = clk_prepare_enable(ahb_clk);
 	if (ret) {
 		dev_err_probe(dev, ret, "%s: unable to enable ahb_clk\n", __func__);
-		goto runtime_put;
+		goto disable_bus;
 	}
 
 	ret = dsi_get_version(msm_host->ctrl_base, &major, &minor);
@@ -234,6 +249,8 @@ dsi_get_config(struct msm_dsi_host *msm_host)
 
 disable_clks:
 	clk_disable_unprepare(ahb_clk);
+disable_bus:
+	clk_disable_unprepare(bus_clk);
 runtime_put:
 	pm_runtime_put_sync(dev);
 exit:
