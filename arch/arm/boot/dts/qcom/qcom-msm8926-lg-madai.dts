@@ -76,6 +76,7 @@
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
 			regulator-always-on;
+			regulator-allow-set-load;
 		};
 
 		pm8226_l10: l10 {
@@ -87,6 +88,7 @@
 			regulator-min-microvolt = <2950000>;
 			regulator-max-microvolt = <2950000>;
 			regulator-always-on;
+			regulator-allow-set-load;
 		};
 
 		pm8226_l20: l20 {
