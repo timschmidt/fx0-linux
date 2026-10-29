@@ -3,6 +3,8 @@
  * IOMMU API for QCOM secure IOMMUs.  Somewhat based on arm-smmu.c
  *
  * Copyright (C) 2013 ARM Limited
+ * Copyright (c) 2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2026 Timothy Schmidt
  * Copyright (C) 2017 Red Hat
  */
 
@@ -1215,6 +1217,37 @@ static const struct qcom_iommu_cfg msm8974_gpu_cfg = {
 	.num_sids = ARRAY_SIZE(msm8974_gpu_sids),
 };
 
+static const struct qcom_iommu_bfb_reg msm8226_mdp_bfb[] = {
+	{ 0x04c, 0xffffffff },
+	{ 0x050, 0x00000000 },
+	{ 0x514, 0x00000004 },
+	{ 0x540, 0x00000010 },
+	{ 0x56c, 0x00000000 },
+	{ 0x0ac, 0x00000000 },
+	{ 0x15c, 0x00000013 },
+	{ 0x20c, 0x00000017 },
+	{ 0x314, 0x00000000 },
+	{ 0x394, 0x00000013 },
+	{ 0x414, 0x00000023 },
+	{ 0x008, 0x00000000 },
+	{ 0x00c, 0x00000000 },
+	{ 0x010, 0x00000000 },
+	{ 0x014, 0x00000000 },
+	{ 0x018, 0x00000000 },
+	{ 0x01c, 0x00000000 },
+	{ 0x020, 0x00000000 },
+};
+
+static const struct qcom_iommu_cfg msm8226_mdp_cfg = {
+	.halt = true,
+	.no_stall = true,
+	.fmt = ARM_V7S,
+	.no_afe = true,
+	.ctx_restore = true,
+	.bfb = msm8226_mdp_bfb,
+	.num_bfb = ARRAY_SIZE(msm8226_mdp_bfb),
+};
+
 static const struct qcom_iommu_bfb_reg msm8974_mdp_bfb[] = {
 	{ 0x04c, 0xffffffff },
 	{ 0x050, 0x00000000 },
@@ -1287,6 +1320,7 @@ static const struct of_device_id qcom_iommu_of_match[] = {
 	{ .compatible = "qcom,msm-iommu-v1" },
 	{ .compatible = "qcom,msm-iommu-v2" },
 	{ .compatible = "qcom,msm8974-gpu-iommu", .data = &msm8974_gpu_cfg },
+	{ .compatible = "qcom,msm8226-mdp-iommu", .data = &msm8226_mdp_cfg },
 	{ .compatible = "qcom,msm8974-mdp-iommu", .data = &msm8974_mdp_cfg },
 	{ .compatible = "qcom,msm8974-venus-iommu", .data = &msm8974_venus_cfg },
 	{ /* sentinel */ }
