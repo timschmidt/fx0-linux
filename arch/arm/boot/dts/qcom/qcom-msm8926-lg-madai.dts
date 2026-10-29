@@ -8,6 +8,8 @@
 #include "qcom-msm8226.dtsi"
 #include "pm8226.dtsi"
 
+/delete-node/ &smem_region;
+
 / {
 	model = "LG Fx0";
 	compatible = "lg,madai", "qcom,msm8926", "qcom,msm8226";
@@ -19,6 +21,13 @@
 
 	chosen {
 		stdout-path = "serial0";
+	};
+
+	reserved-memory {
+		smem_region: smem@fa00000 {
+			reg = <0x0fa00000 0x100000>;
+			no-map;
+		};
 	};
 };
 
