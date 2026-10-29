@@ -24,6 +24,17 @@
 		stdout-path = "serial0";
 	};
 
+	cam_vio: regulator-camera-io {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_io_1v8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 64 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+		off-on-delay-us = <10000>;
+	};
+
 	reserved-memory {
 		fx0_wcnss_mem: wcnss@d200000 {
 			reg = <0x0d200000 0xa00000>;
