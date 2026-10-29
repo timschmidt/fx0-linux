@@ -7,6 +7,7 @@
 
 #include "qcom-msm8226.dtsi"
 #include "pm8226.dtsi"
+#include <dt-bindings/gpio/gpio.h>
 
 /delete-node/ &smem_region;
 
@@ -95,6 +96,12 @@
 			regulator-min-microvolt = <3075000>;
 			regulator-max-microvolt = <3075000>;
 		};
+
+		pm8226_l28: l28 {
+			regulator-min-microvolt = <3100000>;
+			regulator-max-microvolt = <3100000>;
+			regulator-allow-set-load;
+		};
 	};
 };
 
@@ -132,4 +139,32 @@
 	extcon = <&smbb>;
 	v1p8-supply = <&pm8226_l10>;
 	v3p3-supply = <&pm8226_l20>;
+};
+
+&blsp1_i2c5 {
+	status = "okay";
+
+	touchscreen@20 {
+		compatible = "syna,rmi4-i2c";
+		reg = <0x20>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <17 IRQ_TYPE_EDGE_FALLING>;
+		reset-gpios = <&tlmm 16 GPIO_ACTIVE_LOW>;
+		vdd-supply = <&pm8226_l28>;
+		vio-supply = <&pm8226_l6>;
+		syna,startup-delay-ms = <60>;
+		syna,reset-delay-ms = <10>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		rmi4-f01@1 {
+			reg = <0x01>;
+			syna,nosleep-mode = <1>;
+		};
+
+		rmi4-f12@12 {
+			reg = <0x12>;
+			syna,sensor-type = <1>;
+		};
+	};
 };
