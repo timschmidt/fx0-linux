@@ -572,12 +572,8 @@ static int cm_get_target_status(struct charger_manager *cm)
 	if (!is_ext_pwr_online(cm))
 		return POWER_SUPPLY_STATUS_DISCHARGING;
 
-	if (cm_check_thermal_status(cm)) {
-		/* Check if discharging duration exceeds limit. */
-		if (check_charging_duration(cm))
-			goto charging_ok;
+	if (cm_check_thermal_status(cm))
 		return POWER_SUPPLY_STATUS_NOT_CHARGING;
-	}
 
 	switch (cm->battery_status) {
 	case POWER_SUPPLY_STATUS_CHARGING:
@@ -593,7 +589,6 @@ static int cm_get_target_status(struct charger_manager *cm)
 		break;
 	}
 
-charging_ok:
 	/* Charging is allowed. */
 	return POWER_SUPPLY_STATUS_CHARGING;
 }
