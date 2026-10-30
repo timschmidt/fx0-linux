@@ -205,7 +205,7 @@ struct charger_desc {
  * @tzd_batt : thermal zone device for battery
  * @charger_enabled: the state of charger
  * @emergency_stop:
- *	When setting true, stop charging
+ *	Nonzero to stop charging: a thermal status or temperature-read error
  * @psy_name_buf: the name of power-supply-class for charger manager
  * @charger_psy: power_supply for charger manager
  * @status_save_ext_pwr_inserted:
