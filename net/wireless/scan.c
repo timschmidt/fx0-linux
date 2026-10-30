@@ -1195,10 +1195,18 @@ void ___cfg80211_scan_done(struct cfg80211_registered_device *rdev,
 	cfg80211_put_scan_req(rdev->scan_req);
 	rdev->scan_req = NULL;
 
-	if (!send_message)
-		rdev->scan_msg = msg;
-	else
+	if (send_message) {
 		nl80211_send_scan_msg(rdev, msg);
+		return;
+	}
+
+	/*
+	 * The interface is going down; defer the message to the worker.
+	 * A driver that still owns the request no longer queues the worker
+	 * when it completes, so do it here or new scans stay blocked.
+	 */
+	rdev->scan_msg = msg;
+	wiphy_work_queue(&rdev->wiphy, &rdev->scan_done_wk);
 }
 
 void __cfg80211_scan_done(struct wiphy *wiphy, struct wiphy_work *wk)
