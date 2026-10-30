@@ -67,6 +67,7 @@
 
 #define IADC_NOMINAL_RSENSE			0xf4
 #define IADC_NOMINAL_RSENSE_SIGN_MASK		BIT(7)
+#define IADC_OFFSET_TRIM_MSB			0xf2
 
 #define IADC_REF_GAIN_MICRO_VOLTS		17857
 
@@ -103,6 +104,7 @@
  * @gain: Raw gain of the channels.
  * @lock: ADC lock for access to the peripheral.
  * @complete: ADC notification after end of conversion interrupt is received.
+ * @calibration_valid: the software cache matches the hardware trim state.
  */
 struct iadc_chip {
 	struct regmap	*regmap;
@@ -114,6 +116,7 @@ struct iadc_chip {
 	u16		gain;
 	struct mutex	lock;
 	struct completion complete;
+	bool		calibration_valid;
 };
 
 static int iadc_read(struct iadc_chip *iadc, u16 offset, u8 *data)
@@ -329,13 +332,19 @@ static int iadc_read_raw(struct iio_dev *indio_dev,
 	struct iadc_chip *iadc = iio_priv(indio_dev);
 	s64 isense_ua;
 	s32 vsense_uv, vsense_raw;
-	u16 adc_raw;
+	u16 adc_raw, gain, offset;
 	int ret;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
 		mutex_lock(&iadc->lock);
+		if (chan->type == IIO_CURRENT && !iadc->calibration_valid) {
+			mutex_unlock(&iadc->lock);
+			return -EIO;
+		}
 		ret = iadc_do_conversion(iadc, chan->channel, &adc_raw);
+		gain = iadc->gain;
+		offset = chan->type == IIO_CURRENT ? iadc->offset[chan->channel] : 0;
 		mutex_unlock(&iadc->lock);
 		if (ret < 0)
 			return ret;
@@ -344,10 +353,10 @@ static int iadc_read_raw(struct iio_dev *indio_dev,
 			return IIO_VAL_INT;
 		}
 
-		vsense_raw = adc_raw - iadc->offset[chan->channel];
+		vsense_raw = adc_raw - offset;
 
 		vsense_uv = vsense_raw * IADC_REF_GAIN_MICRO_VOLTS;
-		vsense_uv /= (s32)iadc->gain - iadc->offset[chan->channel];
+		vsense_uv /= (s32)gain - offset;
 
 		/* Convert microvolts / microohms to microamps. */
 		isense_ua = div64_s64((s64)vsense_uv * 1000000,
@@ -356,7 +365,7 @@ static int iadc_read_raw(struct iio_dev *indio_dev,
 			return -ERANGE;
 
 		dev_dbg(iadc->dev, "off %d gain %d adc %d %duV I %llduA\n",
-			iadc->offset[chan->channel], iadc->gain,
+			offset, gain,
 			adc_raw, vsense_uv, isense_ua);
 
 		*val = isense_ua;
@@ -386,38 +395,162 @@ static irqreturn_t iadc_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int iadc_update_offset(struct iadc_chip *iadc)
+struct iadc_calibration {
+	u16 gain;
+	u16 offset[2];
+};
+
+/* Caller serializes conversions and cache publication with iadc->lock. */
+static int iadc_measure_calibration(struct iadc_chip *iadc,
+				  struct iadc_calibration *cal)
 {
 	int ret;
 
-	ret = iadc_do_conversion(iadc, IADC_GAIN_17P857MV, &iadc->gain);
-	if (ret < 0)
+	ret = iadc_do_conversion(iadc, IADC_GAIN_17P857MV, &cal->gain);
+	if (ret)
 		return ret;
-
 	ret = iadc_do_conversion(iadc, IADC_INT_OFFSET_CSP2_CSN2,
-				 &iadc->offset[IADC_INT_RSENSE]);
-	if (ret < 0)
+				 &cal->offset[IADC_INT_RSENSE]);
+	if (ret)
 		return ret;
-
-	if (iadc->gain == iadc->offset[IADC_INT_RSENSE]) {
-		dev_err(iadc->dev, "error: internal offset == gain %d\n",
-			iadc->gain);
-		return -EINVAL;
-	}
-
 	ret = iadc_do_conversion(iadc, IADC_EXT_OFFSET_CSP_CSN,
-				 &iadc->offset[IADC_EXT_RSENSE]);
-	if (ret < 0)
+				 &cal->offset[IADC_EXT_RSENSE]);
+	if (ret)
 		return ret;
-
-	if (iadc->gain == iadc->offset[IADC_EXT_RSENSE]) {
-		dev_err(iadc->dev, "error: external offset == gain %d\n",
-			iadc->gain);
+	if (cal->gain <= cal->offset[IADC_INT_RSENSE] ||
+	    cal->gain <= cal->offset[IADC_EXT_RSENSE])
 		return -EINVAL;
-	}
-
 	return 0;
 }
+
+static void iadc_publish_calibration(struct iadc_chip *iadc,
+				     const struct iadc_calibration *cal)
+{
+	iadc->gain = cal->gain;
+	memcpy(iadc->offset, cal->offset, sizeof(iadc->offset));
+	iadc->calibration_valid = true;
+}
+
+static int iadc_update_offset(struct iadc_chip *iadc)
+{
+	struct iadc_calibration cal;
+	int ret;
+
+	ret = iadc_measure_calibration(iadc, &cal);
+	if (!ret)
+		iadc_publish_calibration(iadc, &cal);
+	return ret;
+}
+
+/* BEGIN TESTED TRIM TRANSACTION */
+static int iadc_write_offset_trim(struct iadc_chip *iadc, const u8 *trim)
+{
+	int i, ret;
+
+	for (i = 0; i < 2; i++) {
+		ret = iadc_write(iadc, IADC_SEC_ACCESS, IADC_SEC_ACCESS_DATA);
+		if (ret)
+			return ret;
+		ret = iadc_write(iadc, IADC_OFFSET_TRIM_MSB + i, trim[i]);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static int iadc_restore_offset_trim(struct iadc_chip *iadc, const u8 *before)
+{
+	u8 after[2];
+	int attempt, ret = -EIO;
+
+	for (attempt = 0; attempt < 2; attempt++) {
+		ret = iadc_write_offset_trim(iadc, before);
+		if (ret)
+			continue;
+		ret = regmap_bulk_read(iadc->regmap, iadc->base + IADC_OFFSET_TRIM_MSB,
+				       after, sizeof(after));
+		if (ret)
+			continue;
+		if (!memcmp(before, after, sizeof(after)))
+			return 0;
+		ret = -EIO;
+	}
+	return ret;
+}
+
+static int iadc_calibrate_external(struct iadc_chip *iadc)
+{
+	struct iadc_calibration cal;
+	u8 before[2], trim[2], after[2];
+	int ret, restore_ret;
+
+	ret = iadc_measure_calibration(iadc, &cal);
+	if (ret)
+		return ret;
+	ret = regmap_bulk_read(iadc->regmap, iadc->base + IADC_OFFSET_TRIM_MSB,
+			       before, sizeof(before));
+	if (ret)
+		return ret;
+	trim[0] = cal.offset[IADC_EXT_RSENSE] >> 8;
+	trim[1] = cal.offset[IADC_EXT_RSENSE] & 0xff;
+	ret = iadc_write_offset_trim(iadc, trim);
+	if (ret)
+		goto restore;
+	ret = regmap_bulk_read(iadc->regmap, iadc->base + IADC_OFFSET_TRIM_MSB,
+			       after, sizeof(after));
+	if (ret)
+		goto restore;
+	if (memcmp(trim, after, sizeof(trim))) {
+		ret = -EIO;
+		goto restore;
+	}
+	iadc_publish_calibration(iadc, &cal);
+	dev_dbg(iadc->dev, "External-sense calibration committed\n");
+	return 0;
+restore:
+	restore_ret = iadc_restore_offset_trim(iadc, before);
+	if (restore_ret) {
+		iadc->calibration_valid = false;
+		dev_err(iadc->dev, "Could not restore offset trim: %d\n", restore_ret);
+		return restore_ret;
+	}
+	return ret;
+}
+/* END TESTED TRIM TRANSACTION */
+
+static ssize_t iadc_write_sys_calibration(struct iio_dev *indio_dev,
+					uintptr_t private,
+					const struct iio_chan_spec *chan,
+					const char *buf, size_t len)
+{
+	struct iadc_chip *iadc = iio_priv(indio_dev);
+	bool calibrate;
+	int ret;
+
+	ret = kstrtobool(buf, &calibrate);
+	if (ret)
+		return ret;
+	if (!calibrate)
+		return len;
+	if (chan->channel != IADC_EXT_RSENSE)
+		return -EINVAL;
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
+	mutex_lock(&iadc->lock);
+	ret = iadc_calibrate_external(iadc);
+	mutex_unlock(&iadc->lock);
+	iio_device_release_direct(indio_dev);
+	return ret ? ret : len;
+}
+
+static const struct iio_chan_spec_ext_info iadc_external_calibration[] = {
+	{
+		.name = "sys_calibration",
+		.write = iadc_write_sys_calibration,
+		.shared = IIO_SEPARATE,
+	},
+	{ }
+};
 
 static int iadc_version_check(struct iadc_chip *iadc)
 {
@@ -540,6 +673,7 @@ static int iadc_probe(struct platform_device *pdev)
 	struct device_node *node = pdev->dev.of_node;
 	struct device *dev = &pdev->dev;
 	struct iio_dev *indio_dev;
+	struct iio_chan_spec *channels;
 	struct iadc_chip *iadc;
 	int ret, irq_eoc;
 	u32 res;
@@ -619,6 +753,13 @@ static int iadc_probe(struct platform_device *pdev)
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = &iadc_info;
 	indio_dev->channels = iadc_channels;
+	if (of_device_is_compatible(node, "qcom,pm8226-iadc")) {
+		channels = devm_kmemdup(dev, iadc_channels, sizeof(iadc_channels), GFP_KERNEL);
+		if (!channels)
+			return -ENOMEM;
+		channels[IADC_EXT_RSENSE].ext_info = iadc_external_calibration;
+		indio_dev->channels = channels;
+	}
 	indio_dev->num_channels = ARRAY_SIZE(iadc_channels);
 
 	return devm_iio_device_register(dev, indio_dev);
