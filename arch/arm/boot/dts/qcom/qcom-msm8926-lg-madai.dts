@@ -322,3 +322,5 @@
 		power-supplies = <&smbb>;
 	};
 };
+
+#include "qcom-msm8926-lg-madai-battery.dtsi"

@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Battery thermistor lookup data: Copyright (c) 2012-2014, The Linux Foundation.
+ * From the LG charging-temperature table in qpnp-adc-common.c, vendor revision
+ * 03aba4427a7666d57b5ae06d375e259ea337f351. Temperatures are mC, ADC values mV.
+ * This describes the original Fx0 pack; it does not select a capacity profile.
+ */
+
+/ {
+	battery_thermistor: battery-thermistor {
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0>;
+		#io-channel-cells = <0>;
+		io-channels = <&pm8226_vadc VADC_LR_MUX1_BAT_THERM>;
+		io-channel-names = "sensor-channel";
+		temperature-lookup-table = <
+			(-30000) 1627
+			(-20000) 1507
+			(-10000) 1345
+			0 1159
+			1000 1139
+			2000 1120
+			3000 1101
+			4000 1082
+			5000 1064
+			6000 1045
+			7000 1026
+			8000 1008
+			9000 989
+			10000 972
+			11000 954
+			12000 936
+			13000 919
+			14000 902
+			15000 885
+			16000 869
+			17000 853
+			18000 837
+			19000 822
+			20000 807
+			21000 792
+			22000 777
+			23000 763
+			24000 750
+			25000 737
+			26000 724
+			27000 711
+			28000 699
+			29000 687
+			30000 675
+			31000 664
+			32000 653
+			33000 643
+			34000 633
+			35000 623
+			36000 613
+			37000 604
+			38000 595
+			39000 586
+			40000 578
+			41000 570
+			42000 562
+			43000 555
+			44000 547
+			45000 540
+			46000 533
+			47000 527
+			48000 521
+			49000 515
+			50000 509
+			51000 503
+			52000 498
+			53000 492
+			54000 487
+			55000 482
+			56000 478
+			57000 473
+			58000 469
+			59000 465
+			60000 461
+			61000 457
+			62000 453
+			63000 449
+			64000 446
+			65000 442
+			66000 439
+			67000 436
+			68000 433
+			69000 430
+			70000 427
+			71000 425
+			72000 422
+			73000 420
+			74000 417
+			75000 415
+			76000 413
+			77000 411
+			78000 409
+			79000 407
+		>;
+	};
+
+	thermal-zones {
+		battery-thermal {
+			polling-delay-passive = <0>;
+			polling-delay = <0>;
+			thermal-sensors = <&battery_thermistor>;
+		};
+	};
+};
+
+&pm8226_0 {
+	battery@4000 {
+		io-channels = <&pm8226_iadc 1>, <&pm8226_iadc 3>,
+			      <&pm8226_iadc 5>, <&pm8226_vadc VADC_VBAT_SNS>,
+			      <&battery_thermistor>;
+		io-channel-names = "current", "gain", "offset", "voltage", "temperature";
+	};
+};
