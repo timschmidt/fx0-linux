@@ -712,6 +712,18 @@ config CHARGER_QCOM_SMBB
 	  documentation for more detail.  The base name for this driver is
 	  'pm8941_charger'.
 
+config BATTERY_QCOM_PM8226_BMS
+	tristate "Qualcomm PM8226 non-VM BMS measurements"
+	depends on MFD_SPMI_PMIC || COMPILE_TEST
+	depends on IIO
+	help
+	  Monitor battery voltage, current and relative charge using the
+	  non-VM BMS and shared IADC calibration on Qualcomm PM8226.
+	  An IIO temperature channel can optionally report battery temperature.
+
+	  This driver does not estimate state of charge without a battery
+	  profile. The module is called qcom_pm8226_bms.
+
 config BATTERY_PM8916_BMS_VM
 	tristate "Qualcomm PM8916 BMS-VM support"
 	depends on MFD_SPMI_PMIC || COMPILE_TEST
