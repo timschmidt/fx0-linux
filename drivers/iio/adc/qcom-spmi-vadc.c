@@ -467,6 +467,14 @@ static int vadc_read_raw(struct iio_dev *indio_dev,
 		if (ret)
 			break;
 
+		/* New battery voltage inputs use the IIO millivolt ABI. */
+		if (prop->calibration == VADC_CALIB_ABSOLUTE &&
+		    (chan->channel == VADC_VBAT_SNS ||
+		     chan->channel == VADC_LR_MUX1_BAT_THERM)) {
+			*val2 = 1000;
+			return IIO_VAL_FRACTIONAL;
+		}
+
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_RAW:
 		prop = &vadc->chan_props[chan->address];
