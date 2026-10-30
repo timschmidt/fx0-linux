@@ -10,6 +10,7 @@
 #include <linux/iio/iio.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
+#include <linux/math64.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -311,8 +312,9 @@ static int iadc_read_raw(struct iio_dev *indio_dev,
 			 int *val, int *val2, long mask)
 {
 	struct iadc_chip *iadc = iio_priv(indio_dev);
-	s32 isense_ua, vsense_uv;
-	u16 adc_raw, vsense_raw;
+	s64 isense_ua;
+	s32 vsense_uv, vsense_raw;
+	u16 adc_raw;
 	int ret;
 
 	switch (mask) {
@@ -328,9 +330,13 @@ static int iadc_read_raw(struct iio_dev *indio_dev,
 		vsense_uv = vsense_raw * IADC_REF_GAIN_MICRO_VOLTS;
 		vsense_uv /= (s32)iadc->gain - iadc->offset[chan->channel];
 
-		isense_ua = vsense_uv / iadc->rsense[chan->channel];
+		/* Convert microvolts / microohms to microamps. */
+		isense_ua = div64_s64((s64)vsense_uv * 1000000,
+				      iadc->rsense[chan->channel]);
+		if (isense_ua < INT_MIN || isense_ua > INT_MAX)
+			return -ERANGE;
 
-		dev_dbg(iadc->dev, "off %d gain %d adc %d %duV I %duA\n",
+		dev_dbg(iadc->dev, "off %d gain %d adc %d %duV I %llduA\n",
 			iadc->offset[chan->channel], iadc->gain,
 			adc_raw, vsense_uv, isense_ua);
 
