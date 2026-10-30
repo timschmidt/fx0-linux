@@ -52,8 +52,9 @@ struct pm8226_bms {
 	int gain_delta;
 	u64 denominator;
 	u64 last_sample_ns, last_counter_ns, last_calibration_ns;
-	int voltage_uv, current_ua, temperature_decic;
-	int present_error, voltage_error, current_error, temperature_error, charge_error;
+	int voltage_uv, current_ua, average_ua, temperature_decic;
+	int present_error, voltage_error, current_error, average_error;
+	int temperature_error, charge_error;
 	bool present, configured, calibration_valid;
 };
 
@@ -347,16 +348,19 @@ static void bms_sample(struct pm8226_bms *bms)
 		ret = bms_calibrate(bms);
 	else
 		ret = 0;
+	/* Keep the live IADC sample distinct from the background BMS average. */
+	bms->current_error = iio_read_channel_processed_scale(bms->sense_channel,
+							    &bms->current_ua, 1000);
 	if (ret)
-		goto current_error;
+		goto average_error;
 	ret = bms_refresh_calibration(bms);
 	if (ret)
-		goto current_error;
+		goto average_error;
 	ret = bms_snapshot(bms, &output);
 	if (ret)
-		goto current_error;
-	bms->current_error = bms_current_to_ua((s16)get_unaligned_le16(output.vsense),
-					     bms->gain_delta, bms->rsense, &bms->current_ua);
+		goto average_error;
+	bms->average_error = bms_current_to_ua((s16)get_unaligned_le16(output.vsense),
+					     bms->gain_delta, bms->rsense, &bms->average_ua);
 	/* Long unobserved intervals cannot establish an unambiguous wrapped delta. */
 	rebase = bms->counter.initialized && now - bms->last_counter_ns > BMS_COUNTER_MAX_AGE_NS;
 	if (rebase)
@@ -369,17 +373,18 @@ static void bms_sample(struct pm8226_bms *bms)
 	if (ktime_get_boottime_ns() - bms->last_calibration_ns >= BMS_CALIBRATE_NS) {
 		ret = bms_calibrate(bms);
 		if (ret)
-			goto current_error;
+			goto average_error;
 	}
 	bms->last_sample_ns = now;
 	return;
-current_error:
-	bms->current_error = ret;
+average_error:
+	bms->average_error = ret;
 	bms->charge_error = ret;
 	bms->last_sample_ns = now;
 	return;
 absent:
 	bms->voltage_error = bms->current_error = bms->charge_error = -ENODATA;
+	bms->average_error = -ENODATA;
 	bms->temperature_error = -ENODATA;
 	bms->last_sample_ns = now;
 }
@@ -423,6 +428,10 @@ static int bms_get_property(struct power_supply *psy, enum power_supply_property
 		ret = bms->current_error;
 		value->intval = bms->current_ua;
 		break;
+	case POWER_SUPPLY_PROP_CURRENT_AVG:
+		ret = bms->average_error;
+		value->intval = bms->average_ua;
+		break;
 	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
 		ret = bms->charge_error;
 		if (!ret && (bms->counter.charge_uah < INT_MIN || bms->counter.charge_uah > INT_MAX))
@@ -445,7 +454,8 @@ unlock:
 static const enum power_supply_property bms_properties[] = {
 	POWER_SUPPLY_PROP_PRESENT, POWER_SUPPLY_PROP_STATUS, POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
-	POWER_SUPPLY_PROP_CURRENT_NOW, POWER_SUPPLY_PROP_CHARGE_COUNTER, POWER_SUPPLY_PROP_TEMP,
+	POWER_SUPPLY_PROP_CURRENT_NOW, POWER_SUPPLY_PROP_CURRENT_AVG,
+	POWER_SUPPLY_PROP_CHARGE_COUNTER, POWER_SUPPLY_PROP_TEMP,
 };
 
 static void bms_work(struct work_struct *work)
@@ -567,7 +577,7 @@ static int bms_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EOPNOTSUPP, "IADC calibration unavailable\n");
 	bms_sample(bms);
 	if (bms->present_error || (bms->present && !bms->configured))
-		return dev_err_probe(dev, bms->present_error ?: bms->current_error,
+		return dev_err_probe(dev, bms->present_error ?: bms->charge_error,
 				     "BMS initialization failed\n");
 	bms->desc.name = "pm8226-bms";
 	bms->desc.type = POWER_SUPPLY_TYPE_BATTERY;
