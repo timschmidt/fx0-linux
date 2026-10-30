@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 
@@ -307,6 +308,20 @@ exit:
 	return ret;
 }
 
+static int iadc_fwnode_xlate(struct iio_dev *indio_dev,
+			    const struct fwnode_reference_args *spec)
+{
+	int i, channel;
+
+	if (spec->nargs != 1 || spec->args[0] > INT_MAX)
+		return -EINVAL;
+	channel = spec->args[0];
+	for (i = 0; i < indio_dev->num_channels; i++)
+		if (indio_dev->channels[i].channel == channel)
+			return i;
+	return -EINVAL;
+}
+
 static int iadc_read_raw(struct iio_dev *indio_dev,
 			 struct iio_chan_spec const *chan,
 			 int *val, int *val2, long mask)
@@ -324,6 +339,10 @@ static int iadc_read_raw(struct iio_dev *indio_dev,
 		mutex_unlock(&iadc->lock);
 		if (ret < 0)
 			return ret;
+		if (chan->type == IIO_VOLTAGE) {
+			*val = adc_raw;
+			return IIO_VAL_INT;
+		}
 
 		vsense_raw = adc_raw - iadc->offset[chan->channel];
 
@@ -343,6 +362,8 @@ static int iadc_read_raw(struct iio_dev *indio_dev,
 		*val = isense_ua;
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
+		if (chan->type != IIO_CURRENT)
+			return -EINVAL;
 		*val = 0;
 		*val2 = 1000;
 		return IIO_VAL_INT_PLUS_MICRO;
@@ -353,6 +374,7 @@ static int iadc_read_raw(struct iio_dev *indio_dev,
 
 static const struct iio_info iadc_info = {
 	.read_raw = iadc_read_raw,
+	.fwnode_xlate = iadc_fwnode_xlate,
 };
 
 static irqreturn_t iadc_isr(int irq, void *dev_id)
@@ -483,6 +505,27 @@ static const struct iio_chan_spec iadc_channels[] = {
 		.channel = 1,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |
 				      BIT(IIO_CHAN_INFO_SCALE),
+		.indexed = 1,
+	},
+	{
+		.type = IIO_VOLTAGE,
+		.datasheet_name = "GAIN_17P857MV",
+		.channel = IADC_GAIN_17P857MV,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.indexed = 1,
+	},
+	{
+		.type = IIO_VOLTAGE,
+		.datasheet_name = "OFFSET_CSP_CSN",
+		.channel = IADC_EXT_OFFSET_CSP_CSN,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.indexed = 1,
+	},
+	{
+		.type = IIO_VOLTAGE,
+		.datasheet_name = "OFFSET_CSP2_CSN2",
+		.channel = IADC_INT_OFFSET_CSP2_CSN2,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.indexed = 1,
 	},
 };
