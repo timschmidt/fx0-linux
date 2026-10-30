@@ -68,11 +68,6 @@
 	};
 
 	reserved-memory {
-		fx0_wcnss_mem: wcnss@d200000 {
-			reg = <0x0d200000 0xa00000>;
-			no-map;
-		};
-
 		/* Stock firmware excludes 5 MiB here; the first MiB is SMEM. */
 		reserved@fb00000 {
 			reg = <0x0fb00000 0x400000>;
@@ -99,6 +94,13 @@
 		function = "gpio";
 		drive-strength = <2>;
 		bias-disable;
+	};
+
+	wcnss_pin_a: wcnss-pin-active-state {
+		pins = "gpio40", "gpio41", "gpio42", "gpio43", "gpio44";
+		function = "wlan";
+		drive-strength = <6>;
+		bias-pull-down;
 	};
 };
 
@@ -132,9 +134,39 @@
 	};
 };
 
+&pronto {
+	vddmx-supply = <&pm8226_l3>;
+	vddpx-supply = <&pm8226_l6>;
+
+	pinctrl-0 = <&wcnss_pin_a>;
+	pinctrl-names = "default";
+
+	status = "okay";
+
+	iris {
+		compatible = "qcom,wcn3660";
+
+		vddxo-supply = <&pm8226_l10>;
+		vddrfa-supply = <&pm8226_l24>;
+		vddpa-supply = <&pm8226_l16>;
+		vdddig-supply = <&pm8226_l24>;
+	};
+
+	smd-edge {
+		wcnss {
+			status = "okay";
+		};
+	};
+};
+
 &rpm_requests {
 	regulators {
 		compatible = "qcom,rpm-pm8226-regulators";
+
+		pm8226_l3: l3 {
+			regulator-min-microvolt = <750000>;
+			regulator-max-microvolt = <1337500>;
+		};
 
 		pm8226_l4: l4 {
 			regulator-min-microvolt = <1200000>;
@@ -162,6 +194,11 @@
 			regulator-max-microvolt = <1800000>;
 		};
 
+		pm8226_l16: l16 {
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3350000>;
+		};
+
 		pm8226_l17: l17 {
 			regulator-min-microvolt = <2950000>;
 			regulator-max-microvolt = <2950000>;
@@ -172,6 +209,12 @@
 		pm8226_l20: l20 {
 			regulator-min-microvolt = <3075000>;
 			regulator-max-microvolt = <3075000>;
+		};
+
+		/* Shared by the Iris RFA and digital supplies. */
+		pm8226_l24: l24 {
+			regulator-min-microvolt = <1300000>;
+			regulator-max-microvolt = <1350000>;
 		};
 
 		pm8226_l28: l28 {
