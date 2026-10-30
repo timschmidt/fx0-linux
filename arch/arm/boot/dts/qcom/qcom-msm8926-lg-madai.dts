@@ -196,6 +196,7 @@
 };
 
 &smbb {
+	qcom,software-charge-control;
 	qcom,fast-charge-safe-current = <1500000>;
 	qcom,fast-charge-current-limit = <1200000>;
 	qcom,fast-charge-safe-voltage = <4380000>;
@@ -204,6 +205,13 @@
 	qcom,minimum-input-voltage = <4350000>;
 
 	status = "okay";
+
+	charge-policy {
+		compatible = "lg,madai-charge-policy";
+		io-channels = <&pm8226_vadc VADC_LR_MUX1_BAT_THERM>,
+			      <&pm8226_vadc VADC_VBAT_SNS>;
+		io-channel-names = "thermistor", "voltage";
+	};
 };
 
 &usb {
