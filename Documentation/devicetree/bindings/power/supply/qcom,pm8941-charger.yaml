@@ -13,6 +13,27 @@ allOf:
   - $ref: power-supply.yaml#
 
 properties:
+  qcom,software-charge-control:
+    type: boolean
+    description: |
+      Experimental firmware-to-native software charging handoff. Charging must
+      already be inhibited before native dependencies can defer probe. The
+      parent keeps charging off until its policy child validates fresh inputs.
+
+  qcom,boot-charge-inhibited:
+    type: boolean
+    description: |
+      Runtime firmware marker generated only after verified charge inhibition
+      and conservative BTC configuration. Must not be authored in a static DT.
+
+  lg,battery-charge-profile:
+    $ref: /schemas/types.yaml#/definitions/string
+    const: tocad-madai
+    description: Runtime firmware-selected pack profile; no unknown-type fallback.
+
+  charge-policy:
+    $ref: lg,madai-charge-policy.yaml#
+
   compatible:
     enum:
       - qcom,pm8226-charger
@@ -139,6 +160,15 @@ properties:
       Specifically whether to supply voltage to VBUS for host mode operation of the OTG port,
       or allow input voltage from external VBUS for charging. In the hardware, the supply for
       this regulator comes from usb_otg_in-supply.
+
+dependencies:
+  charge-policy:
+    - qcom,software-charge-control
+  qcom,boot-charge-inhibited:
+    - qcom,software-charge-control
+  lg,battery-charge-profile:
+    - qcom,software-charge-control
+    - monitored-battery
 
 required:
   - compatible

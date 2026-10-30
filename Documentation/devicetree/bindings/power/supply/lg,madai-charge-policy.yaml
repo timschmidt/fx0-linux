@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/lg,madai-charge-policy.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: LG Fx0 charging policy development interface
+
+maintainers:
+  - Timothy Schmidt <timschmidt@gmail.com>
+
+description: |
+  Experimental policy child of the Fx0 SMBB charger. The parent remains bound
+  with battery charging inhibited while these managed suppliers are unavailable.
+  A runtime-identified TOCAD Madai profile and verified firmware charge-inhibit
+  handoff are required. The raw thermistor voltage is converted without endpoint
+  clamping. These properties are a development proposal, not a stable ABI.
+
+properties:
+  compatible:
+    const: lg,madai-charge-policy
+
+  io-channels:
+    items:
+      - description: Raw battery thermistor voltage, processed in millivolts
+      - description: Battery voltage sense channel
+
+  io-channel-names:
+    items:
+      - const: thermistor
+      - const: voltage
+
+required:
+  - compatible
+  - io-channels
+  - io-channel-names
+
+additionalProperties: false
