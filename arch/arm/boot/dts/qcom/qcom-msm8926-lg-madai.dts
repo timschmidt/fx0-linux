@@ -8,6 +8,7 @@
 #include "qcom-msm8226.dtsi"
 #include "pm8226.dtsi"
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
 
 /delete-node/ &smem_region;
 
@@ -22,6 +23,37 @@
 
 	chosen {
 		stdout-path = "serial0";
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-0 = <&gpio_keys_default>;
+		pinctrl-1 = <&gpio_keys_sleep>;
+		pinctrl-names = "default", "sleep";
+
+		button-volume-down {
+			label = "Volume Down";
+			gpios = <&tlmm 106 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEDOWN>;
+			debounce-interval = <15>;
+			wakeup-source;
+		};
+
+		button-home {
+			label = "Home";
+			gpios = <&tlmm 107 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_HOME>;
+			debounce-interval = <15>;
+			wakeup-source;
+		};
+
+		button-volume-up {
+			label = "Volume Up";
+			gpios = <&tlmm 108 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEUP>;
+			debounce-interval = <15>;
+			wakeup-source;
+		};
 	};
 
 	cam_vio: regulator-camera-io {
@@ -51,6 +83,22 @@
 			reg = <0x0fa00000 0x100000>;
 			no-map;
 		};
+	};
+};
+
+&tlmm {
+	gpio_keys_default: gpio-keys-default-state {
+		pins = "gpio106", "gpio107", "gpio108";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	gpio_keys_sleep: gpio-keys-sleep-state {
+		pins = "gpio106", "gpio107", "gpio108";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
 	};
 };
 
