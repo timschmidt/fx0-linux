@@ -24,6 +24,10 @@ properties:
   '#thermal-sensor-cells':
     const: 0
 
+  '#io-channel-cells':
+    const: 0
+    description: The converted temperature is also available as an IIO channel.
+
   io-channels:
     maxItems: 1
 
