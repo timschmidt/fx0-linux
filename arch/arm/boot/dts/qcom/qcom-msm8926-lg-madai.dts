@@ -304,3 +304,21 @@
 &mdss_mdp {
 	iommus = <&mdp_iommu 0>;
 };
+
+&pm8226_iadc {
+	#io-channel-cells = <1>;
+	qcom,external-resistor-micro-ohms = <10800>;
+};
+
+&pm8226_0 {
+	battery@4000 {
+		compatible = "qcom,pm8226-bms";
+		reg = <0x4000>, <0x3800>, <0x1208>;
+		reg-names = "bms", "iadc", "battery-present";
+		io-channels = <&pm8226_iadc 1>, <&pm8226_iadc 3>,
+			      <&pm8226_iadc 5>, <&pm8226_vadc VADC_VBAT_SNS>;
+		io-channel-names = "current", "gain", "offset", "voltage";
+		shunt-resistor-micro-ohms = <10800>;
+		power-supplies = <&smbb>;
+	};
+};
