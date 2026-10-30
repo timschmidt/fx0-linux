@@ -712,6 +712,17 @@ config CHARGER_QCOM_SMBB
 	  documentation for more detail.  The base name for this driver is
 	  'pm8941_charger'.
 
+config CHARGER_QCOM_SMBB_POLICY
+	bool "Experimental SMBB software charging policy"
+	depends on CHARGER_QCOM_SMBB=y && IIO=y
+	help
+	  Enable the opt-in policy child for runtime-identified Fx0 batteries.
+	  This development policy requires a verified firmware charge gate and
+	  managed battery voltage/thermistor inputs. Hardware temperature limits
+	  stay conservative. Its firmware properties are not a stable binding.
+	  The driver is built in so loss of boot-time pack identity stays latched
+	  until reboot, including across device reprobe.
+
 config BATTERY_PM8916_BMS_VM
 	tristate "Qualcomm PM8916 BMS-VM support"
 	depends on MFD_SPMI_PMIC || COMPILE_TEST

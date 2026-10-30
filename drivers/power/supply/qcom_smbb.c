@@ -18,16 +18,28 @@
 
 #include <linux/errno.h>
 #include <linux/interrupt.h>
+#include <linux/debugfs.h>
+#include <linux/iio/consumer.h>
+#include <linux/iio/iio.h>
+#include <linux/ktime.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/seq_file.h>
+#include <linux/workqueue.h>
 #include <linux/extcon-provider.h>
 #include <linux/regulator/driver.h>
+
+#if IS_ENABLED(CONFIG_CHARGER_QCOM_SMBB_POLICY)
+#include "qcom_smbb_policy.h"
+#endif
 
 #define SMBB_CHG_VMAX		0x040
 #define SMBB_CHG_VSAFE		0x041
@@ -93,6 +105,12 @@
 #define SMBB_INHIBIT_INIT	BIT(0)
 #define SMBB_INHIBIT_USER	BIT(1)
 #define SMBB_INHIBIT_FAULT	BIT(2)
+#define SMBB_INHIBIT_POLICY	BIT(3)
+#define SMBB_INHIBIT_SAMPLE	BIT(4)
+#define SMBB_INHIBIT_THERMAL	BIT(5)
+#define SMBB_INHIBIT_SUSPEND	BIT(6)
+#define SMBB_INHIBIT_PACK	BIT(7)
+#define SMBB_INHIBIT_HANDOFF	BIT(8)
 
 enum smbb_attr {
 	ATTR_BAT_ISAFE,
@@ -120,6 +138,12 @@ struct smbb_charger {
 	/* Serializes charger-enable votes and battery limit changes. */
 	struct mutex charge_lock;
 	unsigned int charge_inhibit;
+	bool software_control;
+	bool battery_present_sampled;
+	unsigned int board_current, board_voltage;
+	unsigned int user_current, user_voltage;
+	unsigned int thermal_current;
+	u64 policy_valid_until_ns;
 
 	unsigned int attr[_ATTR_CNT];
 
@@ -131,6 +155,12 @@ struct smbb_charger {
 	struct regulator_desc otg_rdesc;
 	struct regulator_dev *otg_reg;
 };
+
+static int smbb_charge_vote(struct smbb_charger *chg, unsigned int vote,
+			    bool inhibit);
+
+/* Boot-time identification cannot authorize a later inserted pack. */
+static bool smbb_pack_identity_lost;
 
 static const unsigned int smbb_usb_extcon_cable[] = {
 	EXTCON_USB,
@@ -362,7 +392,7 @@ static int smbb_charger_attr_parse(struct smbb_charger *chg,
 	return smbb_charger_attr_read(chg, which);
 }
 
-static void smbb_set_line_flag(struct smbb_charger *chg, int irq, int flag)
+static int smbb_set_line_flag(struct smbb_charger *chg, int irq, int flag)
 {
 	bool state;
 	int ret;
@@ -370,7 +400,7 @@ static void smbb_set_line_flag(struct smbb_charger *chg, int irq, int flag)
 	ret = irq_get_irqchip_state(irq, IRQCHIP_STATE_LINE_LEVEL, &state);
 	if (ret < 0) {
 		dev_err(chg->dev, "failed to read irq line\n");
-		return;
+		return ret;
 	}
 
 	mutex_lock(&chg->statlock);
@@ -381,6 +411,7 @@ static void smbb_set_line_flag(struct smbb_charger *chg, int irq, int flag)
 	mutex_unlock(&chg->statlock);
 
 	dev_dbg(chg->dev, "status = %03lx\n", chg->status);
+	return 0;
 }
 
 static irqreturn_t smbb_usb_valid_handler(int irq, void *_data)
@@ -433,8 +464,16 @@ static irqreturn_t smbb_bat_temp_handler(int irq, void *_data)
 static irqreturn_t smbb_bat_present_handler(int irq, void *_data)
 {
 	struct smbb_charger *chg = _data;
+	bool initial = !chg->battery_present_sampled;
+	int ret;
 
-	smbb_set_line_flag(chg, irq, STATUS_BAT_PRESENT);
+	ret = smbb_set_line_flag(chg, irq, STATUS_BAT_PRESENT);
+	chg->battery_present_sampled = true;
+	if (chg->software_control &&
+	    (!initial || ret || !(READ_ONCE(chg->status) & STATUS_BAT_PRESENT))) {
+		WRITE_ONCE(smbb_pack_identity_lost, true);
+		smbb_charge_vote(chg, SMBB_INHIBIT_PACK, true);
+	}
 	power_supply_changed(chg->bat_psy);
 
 	return IRQ_HANDLED;
@@ -602,10 +641,16 @@ static int smbb_charger_writable_property(struct power_supply *psy,
 /* Caller holds charge_lock. Never change forced-battery mode (bit 0). */
 static int smbb_charge_verify(struct smbb_charger *chg, bool enable)
 {
-	unsigned int value = enable ? CTRL_EN : 0;
+	unsigned int value;
 	unsigned int control;
 	int ret;
 
+	if (chg->software_control && enable &&
+	    ktime_get_boottime_ns() >= chg->policy_valid_until_ns) {
+		chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
+		enable = false;
+	}
+	value = enable ? CTRL_EN : 0;
 	/* Force the bus write even after a previously uncertain transaction. */
 	ret = regmap_write_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
 				CTRL_EN, value);
@@ -652,7 +697,14 @@ static int smbb_get_charge_behaviour(struct smbb_charger *chg, int *behaviour)
 	int ret;
 
 	mutex_lock(&chg->charge_lock);
-	ret = regmap_read(chg->regmap, chg->addr + SMBB_CHG_CTRL, &control);
+	ret = 0;
+	if (chg->software_control &&
+	    ktime_get_boottime_ns() >= chg->policy_valid_until_ns) {
+		chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
+		ret = smbb_charge_verify(chg, false);
+	}
+	if (!ret)
+		ret = regmap_read(chg->regmap, chg->addr + SMBB_CHG_CTRL, &control);
 	if (!ret && (control & CTRL_EN) && chg->charge_inhibit)
 		ret = -EIO;
 	if (ret)
@@ -693,7 +745,31 @@ static int smbb_set_battery_limit(struct smbb_charger *chg,
 		return -EINVAL;
 
 	mutex_lock(&chg->charge_lock);
-	ret = smbb_charger_attr_write(chg, which, value);
+	if (chg->software_control) {
+		unsigned int effective;
+
+		if (ktime_get_boottime_ns() >= chg->policy_valid_until_ns) {
+			chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
+			ret = smbb_charge_verify(chg, false);
+			if (ret)
+				goto out;
+		}
+		if (which == ATTR_BAT_IMAX)
+			effective = min3((unsigned int)value, chg->board_current,
+					 chg->thermal_current);
+		else
+			effective = min((unsigned int)value, chg->board_voltage);
+		ret = smbb_charger_attr_write(chg, which, effective);
+		if (!ret) {
+			if (which == ATTR_BAT_IMAX)
+				chg->user_current = min((unsigned int)value, chg->board_current);
+			else
+				chg->user_voltage = min((unsigned int)value, chg->board_voltage);
+		}
+	} else {
+		ret = smbb_charger_attr_write(chg, which, value);
+	}
+out:
 	if (ret)
 		smbb_charge_fault(chg);
 	mutex_unlock(&chg->charge_lock);
@@ -968,6 +1044,49 @@ static const struct regulator_ops smbb_chg_otg_ops = {
 	.is_enabled = smbb_chg_otg_is_enabled,
 };
 
+static int smbb_policy_handoff(struct smbb_charger *chg)
+{
+	const void *marker;
+	unsigned int control, btc;
+	int length, ret;
+
+	marker = of_get_property(chg->dev->of_node, "qcom,boot-charge-inhibited", &length);
+	if (!marker || length)
+		return -EPROTO;
+	marker = of_get_property(chg->dev->of_node, "qcom,software-charge-control", &length);
+	if (!marker || length)
+		return -EPROTO;
+	ret = regmap_read(chg->regmap, chg->addr + SMBB_CHG_CTRL, &control);
+	if (ret)
+		return ret;
+	ret = regmap_read(chg->regmap, chg->addr + SMBB_BAT_BTC_CTRL, &btc);
+	if (ret)
+		return ret;
+	if (control & (CTRL_EN | BIT(0)) || (btc & 0x83) != 0x81)
+		return -EPROTO;
+	return 0;
+}
+
+static void smbb_policy_setup(struct smbb_charger *chg)
+{
+	int ret;
+
+	chg->software_control = of_property_read_bool(chg->dev->of_node,
+						      "qcom,software-charge-control");
+	if (!chg->software_control)
+		return;
+	chg->charge_inhibit |= SMBB_INHIBIT_POLICY;
+	if (READ_ONCE(smbb_pack_identity_lost))
+		chg->charge_inhibit |= SMBB_INHIBIT_PACK;
+	mutex_lock(&chg->charge_lock);
+	ret = smbb_policy_handoff(chg);
+	mutex_unlock(&chg->charge_lock);
+	if (ret) {
+		chg->charge_inhibit |= SMBB_INHIBIT_HANDOFF;
+		dev_err(chg->dev, "rejecting charging handoff: %d\n", ret);
+	}
+}
+
 static void smbb_charge_cleanup(void *data)
 {
 	struct smbb_charger *chg = data;
@@ -1007,6 +1126,8 @@ static int smbb_charger_probe(struct platform_device *pdev)
 		return rc;
 	}
 
+	smbb_policy_setup(chg);
+
 	/* Keep charging off through setup, including every deferred/error exit. */
 	rc = smbb_charge_vote(chg, SMBB_INHIBIT_INIT, true);
 	if (rc)
@@ -1037,6 +1158,11 @@ static int smbb_charger_probe(struct platform_device *pdev)
 			return rc;
 		}
 	}
+	chg->board_current = chg->attr[ATTR_BAT_IMAX];
+	chg->user_current = chg->board_current;
+	chg->thermal_current = chg->board_current;
+	chg->board_voltage = chg->attr[ATTR_BAT_VMAX];
+	chg->user_voltage = chg->board_voltage;
 
 	bat_cfg.drv_data = chg;
 	bat_cfg.fwnode = dev_fwnode(&pdev->dev);
@@ -1125,6 +1251,8 @@ static int smbb_charger_probe(struct platform_device *pdev)
 
 	chg->jeita_ext_temp = of_property_read_bool(pdev->dev.of_node,
 			"qcom,jeita-extended-temp-range");
+	if (chg->software_control)
+		chg->jeita_ext_temp = false;
 
 	/* Set temperature range to [35%:70%] or [25%:80%] accordingly */
 	rc = regmap_update_bits(chg->regmap, chg->addr + SMBB_BAT_BTC_CTRL,
@@ -1156,8 +1284,310 @@ static int smbb_charger_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, chg);
 
-	return smbb_charge_vote(chg, SMBB_INHIBIT_INIT, false);
+	rc = smbb_charge_vote(chg, SMBB_INHIBIT_INIT, false);
+	if (rc)
+		return rc;
+	if (chg->software_control && IS_ENABLED(CONFIG_CHARGER_QCOM_SMBB_POLICY))
+		return devm_of_platform_populate(chg->dev);
+	return 0;
 }
+
+#if IS_ENABLED(CONFIG_CHARGER_QCOM_SMBB_POLICY)
+#define SMBB_POLICY_POLL_MS 1000
+#define SMBB_POLICY_MAX_AGE_MS 3000
+
+struct smbb_policy {
+	struct smbb_charger *chg;
+	struct iio_channel *thermistor, *voltage;
+	struct delayed_work sample_work, age_work;
+	struct dentry *debugfs;
+	enum smbb_policy_state state;
+	bool running;
+	u64 last_valid_ns;
+	int temperature, microvolts, last_error;
+};
+
+/* Caller holds charge_lock. Never release user, pack, handoff or fault votes. */
+static int smbb_policy_apply(struct smbb_policy *policy, int error,
+			     int temperature, int microvolts, u64 started)
+{
+	struct smbb_charger *chg = policy->chg;
+	unsigned int present, charge_current, voltage;
+	int ret;
+
+	if (!policy->running)
+		return 0;
+	if (!error && ktime_get_boottime_ns() - started >
+	    (u64)SMBB_POLICY_MAX_AGE_MS * NSEC_PER_MSEC)
+		error = -ESTALE;
+	if (!error && (microvolts < 2100000 || microvolts > 4500000))
+		error = -ERANGE;
+	policy->last_error = error;
+	if (error) {
+		policy->state = SMBB_POLICY_STOP;
+		chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
+		goto apply;
+	}
+	ret = regmap_read(chg->regmap, chg->addr + SMBB_BAT_PRES_STATUS, &present);
+	if (ret || !(present & PRES_STATUS_BAT_PRES)) {
+		WRITE_ONCE(smbb_pack_identity_lost, true);
+		chg->charge_inhibit |= SMBB_INHIBIT_PACK;
+		policy->last_error = ret ?: -ENODEV;
+		goto apply;
+	}
+	policy->temperature = temperature;
+	policy->microvolts = microvolts;
+	policy->state = smbb_policy_next(policy->state, temperature, microvolts);
+	if (microvolts > chg->board_voltage)
+		policy->state = SMBB_POLICY_STOP;
+	chg->thermal_current = policy->state == SMBB_POLICY_NORMAL ?
+			       chg->board_current : min(chg->board_current, 450000U);
+	charge_current = min(chg->user_current, chg->thermal_current);
+	voltage = min(chg->user_voltage, chg->board_voltage);
+	if (charge_current != chg->attr[ATTR_BAT_IMAX] || voltage != chg->attr[ATTR_BAT_VMAX]) {
+		ret = smbb_charge_verify(chg, false);
+		if (ret)
+			goto fault;
+		ret = smbb_charger_attr_write(chg, ATTR_BAT_IMAX, charge_current);
+		if (ret)
+			goto fault;
+		ret = smbb_charger_attr_write(chg, ATTR_BAT_VMAX, voltage);
+		if (ret)
+			goto fault;
+	}
+	if (policy->state == SMBB_POLICY_STOP)
+		chg->charge_inhibit |= SMBB_INHIBIT_THERMAL;
+	else
+		chg->charge_inhibit &= ~SMBB_INHIBIT_THERMAL;
+	if (ktime_get_boottime_ns() - started >
+	    (u64)SMBB_POLICY_MAX_AGE_MS * NSEC_PER_MSEC) {
+		policy->last_error = -ESTALE;
+		chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
+		goto apply;
+	}
+	chg->charge_inhibit &= ~(SMBB_INHIBIT_POLICY | SMBB_INHIBIT_SAMPLE |
+				 SMBB_INHIBIT_SUSPEND);
+	policy->last_valid_ns = started;
+	chg->policy_valid_until_ns = started + (u64)SMBB_POLICY_MAX_AGE_MS * NSEC_PER_MSEC;
+apply:
+	ret = smbb_charge_verify(chg, !chg->charge_inhibit);
+	if (!ret) {
+		if (chg->charge_inhibit & SMBB_INHIBIT_FAULT)
+			policy->last_error = -EIO;
+		return 0;
+	}
+fault:
+	policy->last_error = ret;
+	smbb_charge_fault(chg);
+	return ret;
+}
+
+static void smbb_policy_sample_work(struct work_struct *work)
+{
+	struct smbb_policy *policy = container_of(to_delayed_work(work),
+						struct smbb_policy, sample_work);
+	struct smbb_charger *chg = policy->chg;
+	int millivolts = 0, microvolts = 0, temperature = 0, ret;
+	u64 started = ktime_get_boottime_ns();
+
+	/* Do not hold the actuator lock while a supplier converts/calibrates. */
+	ret = iio_read_channel_processed(policy->thermistor, &millivolts);
+	if (!ret)
+		ret = smbb_policy_temperature(millivolts, &temperature);
+	if (!ret)
+		ret = iio_read_channel_processed_scale(policy->voltage, &microvolts, 1000);
+	mutex_lock(&chg->charge_lock);
+	smbb_policy_apply(policy, ret, temperature, microvolts, started);
+	if (policy->running)
+		queue_delayed_work(system_wq, &policy->sample_work,
+				   msecs_to_jiffies(SMBB_POLICY_POLL_MS));
+	mutex_unlock(&chg->charge_lock);
+	power_supply_changed(chg->bat_psy);
+}
+
+static void smbb_policy_age_work(struct work_struct *work)
+{
+	struct smbb_policy *policy = container_of(to_delayed_work(work),
+						struct smbb_policy, age_work);
+	struct smbb_charger *chg = policy->chg;
+	bool notify = false;
+	int ret;
+
+	mutex_lock(&chg->charge_lock);
+	if (policy->running) {
+		if (ktime_get_boottime_ns() - policy->last_valid_ns >
+		    (u64)SMBB_POLICY_MAX_AGE_MS * NSEC_PER_MSEC) {
+			chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
+			policy->last_error = -ESTALE;
+			policy->state = SMBB_POLICY_STOP;
+			ret = smbb_charge_verify(chg, false);
+			if (ret)
+				smbb_charge_fault(chg);
+			notify = true;
+		}
+		queue_delayed_work(system_highpri_wq, &policy->age_work,
+				   msecs_to_jiffies(SMBB_POLICY_POLL_MS));
+	}
+	mutex_unlock(&chg->charge_lock);
+	if (notify)
+		power_supply_changed(chg->bat_psy);
+}
+
+static int smbb_policy_quiesce(struct smbb_policy *policy, unsigned int vote)
+{
+	struct smbb_charger *chg = policy->chg;
+	int ret;
+
+	mutex_lock(&chg->charge_lock);
+	policy->running = false;
+	chg->charge_inhibit |= vote;
+	ret = smbb_charge_verify(chg, false);
+	if (ret)
+		smbb_charge_fault(chg);
+	mutex_unlock(&chg->charge_lock);
+	cancel_delayed_work_sync(&policy->sample_work);
+	cancel_delayed_work_sync(&policy->age_work);
+	return ret;
+}
+
+static void smbb_policy_stop(void *data)
+{
+	struct smbb_policy *policy = data;
+	int ret = smbb_policy_quiesce(policy, SMBB_INHIBIT_POLICY);
+
+	if (ret)
+		dev_err(policy->chg->dev, "unable to verify policy stop: %d\n", ret);
+	debugfs_remove_recursive(policy->debugfs);
+}
+
+static int smbb_policy_status_show(struct seq_file *seq, void *unused)
+{
+	struct smbb_policy *policy = seq->private;
+	struct smbb_charger *chg = policy->chg;
+
+	mutex_lock(&chg->charge_lock);
+	seq_printf(seq, "running=%u votes=0x%x state=%u temp_decic=%d voltage_uV=%d error=%d age_ms=%llu\n",
+		   policy->running, chg->charge_inhibit, policy->state,
+		   policy->temperature, policy->microvolts, policy->last_error,
+		   div_u64(ktime_get_boottime_ns() - policy->last_valid_ns, NSEC_PER_MSEC));
+	mutex_unlock(&chg->charge_lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(smbb_policy_status);
+
+static int smbb_policy_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct smbb_charger *chg = dev_get_drvdata(dev->parent);
+	struct power_supply_battery_info *info;
+	struct smbb_policy *policy;
+	const char *profile;
+	enum iio_chan_type type;
+	struct device *supplier;
+	int ret;
+
+	if (!chg || !chg->software_control)
+		return -ENODEV;
+	if (READ_ONCE(chg->charge_inhibit) & SMBB_INHIBIT_HANDOFF)
+		return -EPROTO;
+	ret = of_property_read_string(dev->parent->of_node, "lg,battery-charge-profile", &profile);
+	if (ret || strcmp(profile, "tocad-madai"))
+		return dev_err_probe(dev, -ENODEV, "battery profile is not identified\n");
+	info = chg->bat_psy->battery_info;
+	if (!info || info->constant_charge_voltage_max_uv != 4350000 ||
+	    info->charge_full_design_uah != 2370000 ||
+	    chg->board_voltage > 4350000 || chg->board_current > 1200000)
+		return -EINVAL;
+	policy = devm_kzalloc(dev, sizeof(*policy), GFP_KERNEL);
+	if (!policy)
+		return -ENOMEM;
+	policy->chg = chg;
+	policy->state = SMBB_POLICY_STOP;
+	policy->thermistor = devm_iio_channel_get(dev, "thermistor");
+	if (IS_ERR(policy->thermistor))
+		return dev_err_probe(dev, PTR_ERR(policy->thermistor), "thermistor unavailable\n");
+	policy->voltage = devm_iio_channel_get(dev, "voltage");
+	if (IS_ERR(policy->voltage))
+		return dev_err_probe(dev, PTR_ERR(policy->voltage), "voltage unavailable\n");
+	if (policy->thermistor->indio_dev != policy->voltage->indio_dev)
+		return -EINVAL;
+	supplier = policy->thermistor->indio_dev->dev.parent;
+	if (!device_link_add(dev, supplier, DL_FLAG_AUTOREMOVE_CONSUMER))
+		return -EINVAL;
+	if (!device_is_bound(supplier))
+		return -EPROBE_DEFER;
+	ret = iio_get_channel_type(policy->thermistor, &type);
+	if (ret || type != IIO_VOLTAGE)
+		return -EINVAL;
+	ret = iio_get_channel_type(policy->voltage, &type);
+	if (ret || type != IIO_VOLTAGE)
+		return -EINVAL;
+	INIT_DELAYED_WORK(&policy->sample_work, smbb_policy_sample_work);
+	INIT_DELAYED_WORK(&policy->age_work, smbb_policy_age_work);
+	ret = devm_add_action_or_reset(dev, smbb_policy_stop, policy);
+	if (ret)
+		return ret;
+	policy->debugfs = debugfs_create_dir("qcom-smbb-policy", NULL);
+	if (!IS_ERR_OR_NULL(policy->debugfs))
+		debugfs_create_file("status", 0400, policy->debugfs, policy,
+				    &smbb_policy_status_fops);
+	else
+		policy->debugfs = NULL;
+	platform_set_drvdata(pdev, policy);
+	mutex_lock(&chg->charge_lock);
+	policy->running = true;
+	chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
+	queue_delayed_work(system_wq, &policy->sample_work, 0);
+	queue_delayed_work(system_highpri_wq, &policy->age_work,
+			   msecs_to_jiffies(SMBB_POLICY_POLL_MS));
+	mutex_unlock(&chg->charge_lock);
+	return 0;
+}
+
+static int smbb_policy_suspend(struct device *dev)
+{
+	return smbb_policy_quiesce(dev_get_drvdata(dev), SMBB_INHIBIT_SUSPEND);
+}
+
+static int smbb_policy_resume(struct device *dev)
+{
+	struct smbb_policy *policy = dev_get_drvdata(dev);
+	struct smbb_charger *chg = policy->chg;
+
+	mutex_lock(&chg->charge_lock);
+	policy->running = true;
+	policy->last_valid_ns = 0;
+	chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
+	queue_delayed_work(system_wq, &policy->sample_work, 0);
+	queue_delayed_work(system_highpri_wq, &policy->age_work,
+			   msecs_to_jiffies(SMBB_POLICY_POLL_MS));
+	mutex_unlock(&chg->charge_lock);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(smbb_policy_pm_ops, smbb_policy_suspend, smbb_policy_resume);
+
+static void smbb_policy_shutdown(struct platform_device *pdev)
+{
+	smbb_policy_quiesce(platform_get_drvdata(pdev), SMBB_INHIBIT_SUSPEND);
+}
+
+static const struct of_device_id smbb_policy_match[] = {
+	{ .compatible = "lg,madai-charge-policy" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, smbb_policy_match);
+
+static struct platform_driver smbb_policy_driver = {
+	.probe = smbb_policy_probe,
+	.shutdown = smbb_policy_shutdown,
+	.driver = {
+		.name = "smbb-charge-policy",
+		.of_match_table = smbb_policy_match,
+		.pm = pm_sleep_ptr(&smbb_policy_pm_ops),
+	},
+};
+#endif
 
 static const struct of_device_id smbb_charger_id_table[] = {
 	{ .compatible = "qcom,pm8226-charger" },
@@ -1173,7 +1603,25 @@ static struct platform_driver smbb_charger_driver = {
 		.of_match_table = smbb_charger_id_table,
 	},
 };
-module_platform_driver(smbb_charger_driver);
+
+static struct platform_driver *const smbb_drivers[] = {
+	&smbb_charger_driver,
+#if IS_ENABLED(CONFIG_CHARGER_QCOM_SMBB_POLICY)
+	&smbb_policy_driver,
+#endif
+};
+
+static int __init smbb_init(void)
+{
+	return platform_register_drivers(smbb_drivers, ARRAY_SIZE(smbb_drivers));
+}
+module_init(smbb_init);
+
+static void __exit smbb_exit(void)
+{
+	platform_unregister_drivers(smbb_drivers, ARRAY_SIZE(smbb_drivers));
+}
+module_exit(smbb_exit);
 
 MODULE_DESCRIPTION("Qualcomm Switch-Mode Battery Charger and Boost driver");
 MODULE_LICENSE("GPL v2");
