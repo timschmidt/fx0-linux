@@ -1,0 +1,16 @@
+What:		/sys/bus/iio/devices/iio:deviceX/in_current1_sys_calibration
+Date:		October 2026
+Contact:	linux-iio@vger.kernel.org
+Description:
+		On PM8226, writing 1 calibrates the gain and zero-current
+		references and programs the volatile external-sense offset trim.
+		Writing 0 does nothing. Calibration and current conversions are
+		serialized. The driver verifies protected trim writes before
+		publishing the matching software calibration cache.
+
+		On failure the previous trim/cache are retained where possible.
+		If hardware restoration fails, current reads return an error
+		until a successful calibration. Raw reference reads remain
+		available for recovery. No coulomb counter is reset by this
+		attribute. Kernel consumers must retain a managed dependency
+		on the IADC provider while using its extended channel callbacks.
