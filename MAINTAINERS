@@ -14163,6 +14163,12 @@ S:	Maintained
 T:	git git://git.kernel.org/pub/scm/linux/kernel/git/hid/hid.git
 F:	drivers/hid/hid-letsketch.c
 
+LG FX0 CHARGING POLICY
+M:	Timothy Schmidt <timschmidt@gmail.com>
+L:	linux-pm@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/power/supply/lg,madai-charge-policy.yaml
+
 LG FX0 DISPLAY PANEL
 M:	Timothy Schmidt <timschmidt@gmail.com>
 L:	dri-devel@lists.freedesktop.org
