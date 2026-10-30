@@ -758,12 +758,18 @@ static int smbb_battery_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		mutex_lock(&chg->charge_lock);
-		val->intval = chg->attr[ATTR_BAT_IMAX];
+		if (chg->charge_inhibit & SMBB_INHIBIT_FAULT)
+			rc = -EIO;
+		else
+			val->intval = chg->attr[ATTR_BAT_IMAX];
 		mutex_unlock(&chg->charge_lock);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
 		mutex_lock(&chg->charge_lock);
-		val->intval = chg->attr[ATTR_BAT_VMAX];
+		if (chg->charge_inhibit & SMBB_INHIBIT_FAULT)
+			rc = -EIO;
+		else
+			val->intval = chg->attr[ATTR_BAT_VMAX];
 		mutex_unlock(&chg->charge_lock);
 		break;
 	case POWER_SUPPLY_PROP_TECHNOLOGY:
