@@ -532,15 +532,14 @@ static int cm_check_thermal_status(struct charger_manager *cm)
 	int temp, upper_limit, lower_limit;
 	int ret = 0;
 
+	if (!desc->measure_battery_temp)
+		return 0;
+
 	ret = cm_get_battery_temperature(cm, &temp);
 	if (ret) {
-		/* FIXME:
-		 * No information of battery temperature might
-		 * occur hazardous result. We have to handle it
-		 * depending on battery type.
-		 */
 		dev_err(cm->dev, "Failed to get battery temperature\n");
-		return 0;
+		cm->emergency_stop = ret;
+		return ret;
 	}
 
 	upper_limit = desc->temp_max;
@@ -721,7 +720,9 @@ static int charger_get_property(struct power_supply *psy,
 		val->intval = cm->battery_status;
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
-		if (cm->emergency_stop == CM_BATT_OVERHEAT)
+		if (cm->emergency_stop < 0)
+			val->intval = POWER_SUPPLY_HEALTH_UNKNOWN;
+		else if (cm->emergency_stop == CM_BATT_OVERHEAT)
 			val->intval = POWER_SUPPLY_HEALTH_OVERHEAT;
 		else if (cm->emergency_stop == CM_BATT_COLD)
 			val->intval = POWER_SUPPLY_HEALTH_COLD;
