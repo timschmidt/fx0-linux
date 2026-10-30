@@ -9,6 +9,9 @@ title: Qualcomm Switch-Mode Battery Charger and Boost
 maintainers:
   - Sebastian Reichel <sre@kernel.org>
 
+allOf:
+  - $ref: power-supply.yaml#
+
 properties:
   compatible:
     enum:
@@ -17,6 +20,8 @@ properties:
 
   reg:
     maxItems: 1
+
+  monitored-battery: true
 
   interrupts:
     items:
