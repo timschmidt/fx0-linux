@@ -40,6 +40,12 @@ properties:
 
   "#io-channel-cells":
     const: 1
+    description: |
+      The cell identifies the hardware channel. Channels 0 and 1 measure current
+      through the internal and external sense resistors, respectively. Channel 3
+      measures the internal 17.857 mV gain reference. Channels 5 and 6 measure the
+      external and internal zero-current references, respectively. The reference
+      channels provide raw ADC codes for calibration consumers such as the BMS.
 
 required:
   - compatible
