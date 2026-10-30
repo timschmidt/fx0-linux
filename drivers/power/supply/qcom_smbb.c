@@ -587,13 +587,46 @@ static int smbb_charger_writable_property(struct power_supply *psy,
 	return psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT;
 }
 
+static int smbb_get_charge_behaviour(struct smbb_charger *chg, int *behaviour)
+{
+	unsigned int control;
+	int ret;
+
+	ret = regmap_read(chg->regmap, chg->addr + SMBB_CHG_CTRL, &control);
+	if (ret)
+		return ret;
+	*behaviour = control & CTRL_EN ? POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO :
+		POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE;
+	return 0;
+}
+
+static int smbb_set_charge_behaviour(struct smbb_charger *chg, int behaviour)
+{
+	unsigned int value;
+
+	switch (behaviour) {
+	case POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO:
+		value = CTRL_EN;
+		break;
+	case POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE:
+		value = 0;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	/* Preserve forced-battery mode and every other charger control bit. */
+	return regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
+				  CTRL_EN, value);
+}
+
 static int smbb_battery_get_property(struct power_supply *psy,
 		enum power_supply_property psp,
 		union power_supply_propval *val)
 {
 	struct smbb_charger *chg = power_supply_get_drvdata(psy);
 	unsigned long status;
-	int rc = 0;
+	int behaviour, rc = 0;
 
 	mutex_lock(&chg->statlock);
 	status = chg->status;
@@ -601,18 +634,28 @@ static int smbb_battery_get_property(struct power_supply *psy,
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
-		if (status & STATUS_CHG_GONE)
+		if (status & STATUS_CHG_GONE) {
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-		else if (!(status & (STATUS_DCIN_VALID | STATUS_USBIN_VALID)))
+		} else if (!(status & (STATUS_DCIN_VALID | STATUS_USBIN_VALID))) {
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-		else if (status & STATUS_CHG_DONE)
+		} else if (status & STATUS_CHG_DONE) {
 			val->intval = POWER_SUPPLY_STATUS_FULL;
-		else if (!(status & STATUS_BAT_OK))
+		} else if (!(status & STATUS_BAT_OK)) {
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-		else if (status & (STATUS_CHG_FAST | STATUS_CHG_TRKL))
-			val->intval = POWER_SUPPLY_STATUS_CHARGING;
-		else /* everything is ok for charging, but we are not... */
-			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+		} else {
+			rc = smbb_get_charge_behaviour(chg, &behaviour);
+			if (rc)
+				break;
+			if (behaviour == POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE)
+				val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
+			else if (status & (STATUS_CHG_FAST | STATUS_CHG_TRKL))
+				val->intval = POWER_SUPPLY_STATUS_CHARGING;
+			else
+				val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+		}
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+		rc = smbb_get_charge_behaviour(chg, &val->intval);
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
 		if (status & STATUS_BAT_OK)
@@ -665,6 +708,11 @@ static int smbb_battery_set_property(struct power_supply *psy,
 	int rc;
 
 	switch (psp) {
+	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+		rc = smbb_set_charge_behaviour(chg, val->intval);
+		if (!rc)
+			power_supply_changed(psy);
+		break;
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		rc = smbb_charger_attr_write(chg, ATTR_BAT_IMAX, val->intval);
 		break;
@@ -683,6 +731,7 @@ static int smbb_battery_writable_property(struct power_supply *psy,
 		enum power_supply_property psp)
 {
 	switch (psp) {
+	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
 		return 1;
@@ -699,6 +748,7 @@ static enum power_supply_property smbb_charger_properties[] = {
 
 static enum power_supply_property smbb_battery_properties[] = {
 	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_CHARGE_TYPE,
@@ -758,6 +808,8 @@ static char *smbb_bif[] = { "smbb-bif" };
 static const struct power_supply_desc bat_psy_desc = {
 	.name = "smbb-bif",
 	.type = POWER_SUPPLY_TYPE_BATTERY,
+	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
+			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
 	.properties = smbb_battery_properties,
 	.num_properties = ARRAY_SIZE(smbb_battery_properties),
 	.get_property = smbb_battery_get_property,
