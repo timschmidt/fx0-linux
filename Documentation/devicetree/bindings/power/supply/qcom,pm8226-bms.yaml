@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/qcom,pm8226-bms.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm PM8226 battery measurement system
+
+maintainers:
+  - Sebastian Reichel <sre@kernel.org>
+
+description: |
+  The non-VM BMS measures battery sense voltage and integrates a signed
+  36-bit coulomb counter. It shares analog calibration with the primary
+  IADC. The companion IADC controls the external sense input; battery
+  voltage and optional temperature measurements are supplied through IIO.
+
+allOf:
+  - $ref: power-supply.yaml#
+
+properties:
+  compatible:
+    const: qcom,pm8226-bms
+
+  reg:
+    items:
+      - description: BMS peripheral base in the SPMI register map
+      - description: Companion IADC peripheral base
+      - description: Battery presence status register
+
+  reg-names:
+    items:
+      - const: bms
+      - const: iadc
+      - const: battery-present
+
+  io-channels:
+    minItems: 4
+    items:
+      - description: External current-sense ADC channel
+      - description: Gain calibration reference channel
+      - description: External zero-current reference channel
+      - description: Battery voltage channel
+      - description: Battery temperature channel
+
+  io-channel-names:
+    minItems: 4
+    items:
+      - const: current
+      - const: gain
+      - const: offset
+      - const: voltage
+      - const: temperature
+
+  shunt-resistor-micro-ohms:
+    description: Resistance of the external battery-current shunt
+    minimum: 1
+
+  power-supplies: true
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - io-channels
+  - io-channel-names
+  - shunt-resistor-micro-ohms
+
+additionalProperties: false
+
+examples:
+  - |
+    pmic {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        battery@4000 {
+            compatible = "qcom,pm8226-bms";
+            reg = <0x4000>, <0x3800>, <0x1208>;
+            reg-names = "bms", "iadc", "battery-present";
+            io-channels = <&iadc 1>, <&iadc 3>, <&iadc 5>, <&vadc 6>;
+            io-channel-names = "current", "gain", "offset", "voltage";
+            shunt-resistor-micro-ohms = <10800>;
+            power-supplies = <&charger>;
+        };
+    };
