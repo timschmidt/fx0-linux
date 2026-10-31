@@ -278,6 +278,20 @@ static void vfe_wm_frame_based(struct vfe_device *vfe, u8 wm, u8 enable)
 			1 << VFE_0_BUS_IMAGE_MASTER_n_WR_CFG_FRM_BASED_SHIFT);
 }
 
+/*
+ * A frame-based write master on MSM8226's VFE 4.0 still takes the frame
+ * geometry: line length in 64-bit words, height and burst length.
+ */
+static void vfe_wm_frame_size(struct vfe_device *vfe, u8 wm,
+			      struct v4l2_pix_format_mplane *pix)
+{
+	u32 words = DIV_ROUND_UP(pix->plane_fmt[0].bytesperline, 8);
+	u32 reg;
+
+	reg = (words << 16) | ((pix->height - 1) << 4) | 1;
+	writel_relaxed(reg, vfe->base + VFE_0_BUS_IMAGE_MASTER_n_WR_BUFFER_CFG(wm));
+}
+
 static void vfe_get_wm_sizes(struct v4l2_pix_format_mplane *pix, u8 plane,
 			     u16 *width, u16 *height, u16 *bytesperline)
 {
@@ -974,6 +988,7 @@ static const struct vfe_hw_ops_gen1 vfe_ops_gen1_4_1 = {
 	.set_xbar_cfg = vfe_set_xbar_cfg,
 	.wm_enable = vfe_wm_enable,
 	.wm_frame_based = vfe_wm_frame_based,
+	.wm_frame_size = vfe_wm_frame_size,
 	.wm_get_ping_pong_status = vfe_wm_get_ping_pong_status,
 	.wm_line_based = vfe_wm_line_based,
 	.wm_set_framedrop_pattern = vfe_wm_set_framedrop_pattern,
