@@ -244,7 +244,10 @@
 			regulator-allow-set-load;
 		};
 
-		pm8226_lvs1: lvs1 {};
+		pm8226_lvs1: lvs1 {
+			/* The sensor bus answers about 5 ms after the switch closes. */
+			regulator-enable-ramp-delay = <10000>;
+		};
 	};
 };
 
