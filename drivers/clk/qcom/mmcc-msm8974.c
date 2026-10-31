@@ -679,6 +679,7 @@ static const struct freq_tbl ftbl_camss_mclk0_3_clk[] = {
 
 static struct clk_rcg2 mclk0_clk_src = {
 	.cmd_rcgr = 0x3360,
+	.mnd_width = 8,
 	.hid_width = 5,
 	.parent_map = mmcc_xo_mmpll0_mmpll1_gpll0_map,
 	.freq_tbl = ftbl_camss_mclk0_3_clk,
@@ -692,6 +693,7 @@ static struct clk_rcg2 mclk0_clk_src = {
 
 static struct clk_rcg2 mclk1_clk_src = {
 	.cmd_rcgr = 0x3390,
+	.mnd_width = 8,
 	.hid_width = 5,
 	.parent_map = mmcc_xo_mmpll0_mmpll1_gpll0_map,
 	.freq_tbl = ftbl_camss_mclk0_3_clk,
@@ -705,6 +707,7 @@ static struct clk_rcg2 mclk1_clk_src = {
 
 static struct clk_rcg2 mclk2_clk_src = {
 	.cmd_rcgr = 0x33c0,
+	.mnd_width = 8,
 	.hid_width = 5,
 	.parent_map = mmcc_xo_mmpll0_mmpll1_gpll0_map,
 	.freq_tbl = ftbl_camss_mclk0_3_clk,
@@ -718,6 +721,7 @@ static struct clk_rcg2 mclk2_clk_src = {
 
 static struct clk_rcg2 mclk3_clk_src = {
 	.cmd_rcgr = 0x33f0,
+	.mnd_width = 8,
 	.hid_width = 5,
 	.parent_map = mmcc_xo_mmpll0_mmpll1_gpll0_map,
 	.freq_tbl = ftbl_camss_mclk0_3_clk,
