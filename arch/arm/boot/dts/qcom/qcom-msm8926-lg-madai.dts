@@ -359,3 +359,12 @@
 &mdss_mdp {
 	iommus = <&mdp_iommu 0>;
 };
+
+/*
+ * The stock bootloader consumes the IMEM restart reason before lk2nd runs.
+ * Also store the reason in the PON spare register, which it leaves intact.
+ */
+&pm8226_pon {
+	mode-recovery = <0x1>;
+	mode-bootloader = <0x2>;
+};
