@@ -210,6 +210,11 @@
 			regulator-allow-set-load;
 		};
 
+		pm8226_l19: l19 {
+			regulator-min-microvolt = <2850000>;
+			regulator-max-microvolt = <2850000>;
+		};
+
 		pm8226_l20: l20 {
 			regulator-min-microvolt = <3075000>;
 			regulator-max-microvolt = <3075000>;
@@ -226,6 +231,8 @@
 			regulator-max-microvolt = <3100000>;
 			regulator-allow-set-load;
 		};
+
+		pm8226_lvs1: lvs1 {};
 	};
 };
 
@@ -367,4 +374,26 @@
 &pm8226_pon {
 	mode-recovery = <0x1>;
 	mode-bootloader = <0x2>;
+};
+
+&blsp1_i2c2 {
+	status = "okay";
+
+	magnetometer@c {
+		compatible = "alps,hscdtd008a";
+		reg = <0x0c>;
+		avdd-supply = <&pm8226_l19>;
+		dvdd-supply = <&pm8226_lvs1>;
+	};
+
+	imu@68 {
+		compatible = "invensense,mpu6515";
+		reg = <0x68>;
+		interrupts-extended = <&tlmm 69 IRQ_TYPE_EDGE_RISING>;
+		vddio-supply = <&pm8226_lvs1>;
+	};
+};
+
+&pm8226_vib {
+	status = "okay";
 };
