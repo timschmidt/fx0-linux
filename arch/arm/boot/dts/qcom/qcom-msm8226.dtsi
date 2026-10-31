@@ -1438,6 +1438,37 @@
 			};
 		};
 
+		gpu_iommu: iommu@fdb10000 {
+			compatible = "qcom,msm8226-gpu-iommu";
+			reg = <0xfdb10000 0x2600>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			#iommu-cells = <1>;
+			ranges = <0 0xfdb18000 0x2000>;
+
+			clocks = <&mmcc OXILICX_AHB_CLK>,
+				 <&mmcc OXILICX_AXI_CLK>,
+				 <&mmcc OXILI_GFX3D_CLK>;
+			clock-names = "iface", "bus", "tbu";
+			power-domains = <&mmcc OXILICX_GDSC>;
+
+			status = "disabled";
+
+			/* GFX3D_USER */
+			iommu-ctx@0 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x0 0x1000>;
+				interrupts = <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			/* GFX3D_PRIV */
+			iommu-ctx@1000 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x1000 0x1000>;
+				interrupts = <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH>;
+			};
+		};
+
 		gpu: gpu@fdb00000 {
 			compatible = "qcom,adreno-305.18", "qcom,adreno";
 			reg = <0xfdb00000 0x10000>;
@@ -1454,6 +1485,7 @@
 			sram = <&gmu_sram>;
 			power-domains = <&mmcc OXILICX_GDSC>;
 			operating-points-v2 = <&gpu_opp_table>;
+			iommus = <&gpu_iommu 0>;
 
 			status = "disabled";
 
