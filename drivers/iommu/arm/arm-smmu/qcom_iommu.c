@@ -1267,6 +1267,13 @@ static const struct qcom_iommu_bfb_reg msm8226_vfe_bfb[] = {
 	{ 0x020, 0x00000000 },
 };
 
+/* Stream IDs from the vendor vfe_iommu context descriptions. */
+static const struct qcom_iommu_sid msm8226_vfe_sids[] = {
+	{ .cbndx = 0, .sid = 0 },	/* VFE0 */
+	{ .cbndx = 1, .sid = 1 },	/* VFE1 */
+	{ .cbndx = 2, .sid = 2 },	/* CPP */
+};
+
 static const struct qcom_iommu_cfg msm8226_vfe_cfg = {
 	.halt = true,
 	.no_stall = true,
@@ -1275,6 +1282,8 @@ static const struct qcom_iommu_cfg msm8226_vfe_cfg = {
 	.ctx_restore = true,
 	.bfb = msm8226_vfe_bfb,
 	.num_bfb = ARRAY_SIZE(msm8226_vfe_bfb),
+	.sids = msm8226_vfe_sids,
+	.num_sids = ARRAY_SIZE(msm8226_vfe_sids),
 };
 
 static const struct qcom_iommu_bfb_reg msm8226_mdp_bfb[] = {
