@@ -173,6 +173,12 @@
 			compatible = "qcom,pm8226-regulators";
 		};
 
+		pm8226_flash: led-controller@d300 {
+			compatible = "qcom,pm8226-flash-led", "qcom,pm8941-flash-led";
+			reg = <0xd300>;
+			status = "disabled";
+		};
+
 		pm8226_vib: vibrator@c000 {
 			compatible = "qcom,pm8916-vib";
 			reg = <0xc000>;

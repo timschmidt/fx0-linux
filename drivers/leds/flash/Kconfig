@@ -75,6 +75,18 @@ config LEDS_MT6370_FLASH
 	  This driver can also be built as a module. If so, the module
 	  will be called "leds-mt6370-flash".
 
+config LEDS_QCOM_FLASH_V1
+	tristate "Torch support for first-generation Qualcomm PMIC flash LEDs"
+	depends on MFD_SPMI_PMIC || COMPILE_TEST
+	depends on LEDS_CLASS && OF
+	select REGMAP
+	help
+	  This option enables the torch mode of the flash LED module in
+	  Qualcomm PM8226 and PM8941 PMICs.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called leds-qcom-flash-v1.
+
 config LEDS_QCOM_FLASH
 	tristate "LED support for flash module inside Qualcomm Technologies, Inc. PMIC"
 	depends on MFD_SPMI_PMIC || COMPILE_TEST
