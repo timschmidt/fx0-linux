@@ -10,6 +10,7 @@
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
+#include <dt-bindings/media/video-interfaces.h>
 
 /delete-node/ &smem_region;
 
@@ -59,6 +60,16 @@
 		};
 	};
 
+	cam_avdd: regulator-camera-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_avdd_2v8";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 110 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+
 	cam_vio: regulator-camera-io {
 		compatible = "regulator-fixed";
 		regulator-name = "cam_io_1v8";
@@ -85,6 +96,13 @@
 };
 
 &tlmm {
+	cam_mclk0_default: cam-mclk0-default-state {
+		pins = "gpio26";
+		function = "cam_mclk0";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
 	gpio_keys_default: gpio-keys-default-state {
 		pins = "gpio106", "gpio107", "gpio108";
 		function = "gpio";
@@ -97,6 +115,13 @@
 		function = "gpio";
 		drive-strength = <2>;
 		bias-disable;
+	};
+
+	sdhc2_cd_default: sdhc2-cd-default-state {
+		pins = "gpio37";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
 	};
 
 	wcnss_pin_a: wcnss-pin-active-state {
@@ -239,6 +264,11 @@
 		pm8226_l24: l24 {
 			regulator-min-microvolt = <1300000>;
 			regulator-max-microvolt = <1350000>;
+		};
+
+		pm8226_l26: l26 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
 		};
 
 		pm8226_l28: l28 {
@@ -404,15 +434,6 @@
 	status = "okay";
 };
 
-&tlmm {
-	sdhc2_cd_default: sdhc2-cd-default-state {
-		pins = "gpio37";
-		function = "gpio";
-		drive-strength = <2>;
-		bias-pull-up;
-	};
-};
-
 &blsp1_i2c2 {
 	status = "okay";
 
@@ -443,4 +464,49 @@
 		color = <LED_COLOR_ID_WHITE>;
 		led-max-microamp = <200000>;
 	};
+};
+
+&camss {
+	vdda-supply = <&pm8226_l4>;
+	status = "okay";
+
+	ports {
+		port@0 {
+			reg = <0>;
+
+			camss_csiphy0_ep: endpoint {
+				remote-endpoint = <&rear_camera_ep>;
+				data-lanes = <0 2 3 4>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+			};
+		};
+	};
+};
+
+&cci_i2c0 {
+	rear_camera: camera@10 {
+		compatible = "sony,imx179";
+		reg = <0x10>;
+		clocks = <&mmcc CAMSS_MCLK0_CLK>;
+		assigned-clocks = <&mmcc CAMSS_MCLK0_CLK>;
+		assigned-clock-rates = <24000000>;
+		pinctrl-0 = <&cam_mclk0_default>;
+		pinctrl-names = "default";
+		dovdd-supply = <&cam_vio>;
+		avdd-supply = <&cam_avdd>;
+		dvdd-supply = <&pm8226_l26>;
+		reset-gpios = <&tlmm 114 GPIO_ACTIVE_LOW>;
+
+		port {
+			rear_camera_ep: endpoint {
+				remote-endpoint = <&camss_csiphy0_ep>;
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <324000000>;
+			};
+		};
+	};
+};
+
+&vfe_iommu {
+	status = "okay";
 };
