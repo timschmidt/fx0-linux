@@ -2293,6 +2293,15 @@ config SND_SOC_WCD_CLASSH
 config SND_SOC_WCD_COMMON
 	tristate
 
+config SND_SOC_WCD9306
+	tristate "WCD9306/WCD9302 (Tapan) Codec"
+	depends on SLIMBUS
+	select REGMAP_SLIMBUS
+	help
+	  The WCD9306 and WCD9302 are SLIMbus audio codecs used with
+	  Qualcomm MSM8226/MSM8926 SoCs. This driver identifies and powers
+	  up the codec.
+
 config SND_SOC_WCD9335
 	tristate "WCD9335 Codec"
 	depends on SLIMBUS
