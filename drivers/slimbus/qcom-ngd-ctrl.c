@@ -1956,6 +1956,12 @@ static int qcom_slim_ngd_ctrl_probe(struct platform_device *pdev)
 	ctrl->ctrl.xfer_msg = qcom_slim_ngd_xfer_msg;
 	ctrl->ctrl.wakeup = NULL;
 	ctrl->state = QCOM_SLIM_NGD_CTRL_DOWN;
+	/*
+	 * The DSP may already be running before this driver loads. Request an
+	 * initial startup, published only when the parent and child are ready.
+	 * A subsequent DOWN notification can revoke it before publication.
+	 */
+	WRITE_ONCE(ctrl->up_requested, true);
 
 	mutex_init(&ctrl->tx_lock);
 	mutex_init(&ctrl->dma_lock);
