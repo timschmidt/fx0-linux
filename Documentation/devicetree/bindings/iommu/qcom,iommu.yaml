@@ -31,20 +31,25 @@ properties:
               - qcom,msm8976-iommu
           - const: qcom,msm-iommu-v2
       - enum:
+          - qcom,msm8226-gpu-iommu
           - qcom,msm8226-mdp-iommu
           - qcom,msm8974-gpu-iommu
           - qcom,msm8974-mdp-iommu
           - qcom,msm8974-venus-iommu
 
   clocks:
+    minItems: 2
     items:
       - description: Clock required for IOMMU register group access
       - description: Clock required for underlying bus access
+      - description: Clock required by the translation unit while it is programmed
 
   clock-names:
+    minItems: 2
     items:
       - const: iface
       - const: bus
+      - const: tbu
 
   power-domains:
     maxItems: 1
