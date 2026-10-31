@@ -172,6 +172,18 @@
 			regulator-max-microvolt = <1337500>;
 		};
 
+		pm8226_l18: l18 {
+			regulator-min-microvolt = <2950000>;
+			regulator-max-microvolt = <2950000>;
+			regulator-allow-set-load;
+		};
+
+		pm8226_l21: l21 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2950000>;
+			regulator-allow-set-load;
+		};
+
 		pm8226_l4: l4 {
 			regulator-min-microvolt = <1200000>;
 			regulator-max-microvolt = <1200000>;
@@ -367,4 +379,23 @@
 &pm8226_pon {
 	mode-recovery = <0x1>;
 	mode-bootloader = <0x2>;
+};
+
+&sdhc_2 {
+	vmmc-supply = <&pm8226_l18>;
+	vqmmc-supply = <&pm8226_l21>;
+	bus-width = <4>;
+	cd-gpios = <&tlmm 37 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&sdhc2_default_state>, <&sdhc2_cd_default>;
+
+	status = "okay";
+};
+
+&tlmm {
+	sdhc2_cd_default: sdhc2-cd-default-state {
+		pins = "gpio37";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
 };
