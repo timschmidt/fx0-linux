@@ -159,6 +159,14 @@ static int video_buf_init(struct vb2_buffer *vb)
 		if (!sgt)
 			return -EFAULT;
 
+		/* The hardware writes each plane linearly from its base. */
+		if (sgt->nents != 1) {
+			dev_err_ratelimited(video->camss->dev,
+					    "Buffer plane %u spans %u DMA segments\n",
+					    i, sgt->nents);
+			return -EFAULT;
+		}
+
 		buffer->addr[i] = sg_dma_address(sgt->sgl);
 	}
 
