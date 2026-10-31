@@ -497,8 +497,14 @@ static int imx179_probe(struct i2c_client *client)
 	if (IS_ERR(imx179->xclk))
 		return dev_err_probe(dev, PTR_ERR(imx179->xclk),
 				     "Failed to get clock\n");
+	if (clk_get_rate(imx179->xclk) != IMX179_XCLK_FREQ) {
+		ret = clk_set_rate(imx179->xclk, IMX179_XCLK_FREQ);
+		if (ret)
+			return dev_err_probe(dev, ret, "Failed to set clock rate\n");
+	}
 	if (clk_get_rate(imx179->xclk) != IMX179_XCLK_FREQ)
-		return dev_err_probe(dev, -EINVAL, "Clock must be %u Hz\n",
+		return dev_err_probe(dev, -EINVAL, "Clock is %lu Hz, need %u Hz\n",
+				     clk_get_rate(imx179->xclk),
 				     IMX179_XCLK_FREQ);
 
 	for (i = 0; i < ARRAY_SIZE(imx179_supply_names); i++)
