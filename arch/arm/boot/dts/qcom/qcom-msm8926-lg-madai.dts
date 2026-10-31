@@ -11,6 +11,9 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/media/video-interfaces.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
 
 /delete-node/ &smem_region;
 
@@ -57,6 +60,43 @@
 			linux,code = <KEY_VOLUMEUP>;
 			debounce-interval = <15>;
 			wakeup-source;
+		};
+	};
+
+	spk_boost: regulator-speaker-boost {
+		compatible = "regulator-fixed";
+		regulator-name = "spk_boost";
+		gpio = <&tlmm 60 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+
+	sound {
+		compatible = "qcom,apq8096-sndcard";
+		model = "LG Fx0";
+
+		mm1-dai-link {
+			link-name = "MultiMedia1";
+
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+			};
+		};
+
+		slim-dai-link {
+			link-name = "SLIM Playback";
+
+			cpu {
+				sound-dai = <&q6afedai SLIMBUS_0_RX>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&tapan_codec 0>;
+			};
 		};
 	};
 
@@ -528,14 +568,32 @@
 			reg = <0 0>;
 		};
 
-		codec@1,0 {
+		tapan_codec: codec@1,0 {
 			compatible = "slim217,e0";
 			reg = <1 0>;
 			slim-ifc-dev = <&tapan_ifd>;
+			#sound-dai-cells = <1>;
+			clocks = <&rpmcc RPM_SMD_DIV_CLK1>;
+			clock-names = "mclk";
+			pinctrl-0 = <&cdc_mclk_default>;
+			pinctrl-names = "default";
+			vdd-spkdrv-supply = <&spk_boost>;
 			reset-gpios = <&tlmm 72 GPIO_ACTIVE_LOW>;
 			vdd-h-supply = <&pm8226_l6>;
 			vdd-px-supply = <&pm8226_l6>;
 			vdd-cx-supply = <&pm8226_l4>;
 		};
+	};
+};
+
+&pm8226_gpios {
+	cdc_mclk_default: cdc-mclk-default-state {
+		pins = "gpio1";
+		function = "func1";
+		output-enable;
+		drive-push-pull;
+		bias-disable;
+		power-source = <3>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_HIGH>;
 	};
 };
