@@ -19,7 +19,7 @@
 #include <media/v4l2-subdev.h>
 
 #define IMX179_REG_CHIP_ID		CCI_REG16(0x0002)
-#define IMX179_CHIP_ID			0x0179
+#define IMX179_CHIP_ID			0x8179
 #define IMX179_REG_MODE_SELECT		CCI_REG8(0x0100)
 #define IMX179_MODE_STANDBY		0x00
 #define IMX179_MODE_STREAMING		0x01
