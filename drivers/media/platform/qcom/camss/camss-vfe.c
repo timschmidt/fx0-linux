@@ -1328,8 +1328,14 @@ static void vfe_try_format(struct vfe_line *line,
 			   struct v4l2_mbus_framefmt *fmt,
 			   enum v4l2_subdev_format_whence which)
 {
+	struct vfe_device *vfe = to_vfe(line);
+	unsigned int max_height = 8191;
 	unsigned int i;
 	u32 code;
+
+	if (line->id != VFE_LINE_PIX && vfe->ops_gen1 &&
+	    vfe->ops_gen1->max_frame_height)
+		max_height = min(max_height, vfe->ops_gen1->max_frame_height);
 
 	switch (pad) {
 	case MSM_VFE_PAD_SINK:
@@ -1344,7 +1350,7 @@ static void vfe_try_format(struct vfe_line *line,
 			fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
 
 		fmt->width = clamp_t(u32, fmt->width, 1, 8191);
-		fmt->height = clamp_t(u32, fmt->height, 1, 8191);
+		fmt->height = clamp_t(u32, fmt->height, 1, max_height);
 
 		fmt->field = V4L2_FIELD_NONE;
 		fmt->colorspace = V4L2_COLORSPACE_SRGB;
@@ -2074,6 +2080,9 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 		if (i == VFE_LINE_PIX) {
 			video_out->bpl_alignment = 16;
 			video_out->line_based = 1;
+		} else {
+			video_out->max_height = vfe->ops_gen1 ?
+				vfe->ops_gen1->max_frame_height : 0;
 		}
 
 		video_out->nformats = vfe->line[i].nformats;

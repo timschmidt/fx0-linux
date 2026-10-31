@@ -175,6 +175,7 @@ static int vfe_enable_output(struct vfe_line *line)
 	unsigned int frame_skip = 0;
 	unsigned int i;
 	u16 ub_size;
+	int ret;
 
 	ub_size = vfe->ops_gen1->get_ub_size(vfe->id);
 	if (!ub_size)
@@ -199,6 +200,16 @@ static int vfe_enable_output(struct vfe_line *line)
 		dev_err(vfe->camss->dev, "Output is not in reserved state %d\n", output->state);
 		spin_unlock_irqrestore(&vfe->output_lock, flags);
 		return -EINVAL;
+	}
+	if (line->id != VFE_LINE_PIX && vfe->ops_gen1->wm_frame_size) {
+		struct v4l2_pix_format_mplane *pix =
+			&line->video_out.active_fmt.fmt.pix_mp;
+
+		ret = vfe->ops_gen1->wm_frame_size(vfe, output->wm_idx[0], pix);
+		if (ret) {
+			spin_unlock_irqrestore(&vfe->output_lock, flags);
+			return ret;
+		}
 	}
 	output->state = VFE_OUTPUT_IDLE;
 
@@ -245,9 +256,6 @@ static int vfe_enable_output(struct vfe_line *line)
 		vfe->ops_gen1->wm_set_ub_cfg(vfe, output->wm_idx[0],
 					    (ub_size + 1) * output->wm_idx[0], ub_size);
 		vfe->ops_gen1->wm_frame_based(vfe, output->wm_idx[0], 1);
-		if (vfe->ops_gen1->wm_frame_size)
-			vfe->ops_gen1->wm_frame_size(vfe, output->wm_idx[0],
-						     &line->video_out.active_fmt.fmt.pix_mp);
 		vfe->ops_gen1->wm_enable(vfe, output->wm_idx[0], 1);
 		vfe->ops_gen1->bus_reload_wm(vfe, output->wm_idx[0]);
 	} else {

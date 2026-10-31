@@ -106,6 +106,8 @@
 #define VFE_0_BUS_IMAGE_MASTER_n_WR_UB_CFG_OFFSET_SHIFT	16
 #define VFE_0_BUS_IMAGE_MASTER_n_WR_IMAGE_SIZE(n)	(0x080 + 0x24 * (n))
 #define VFE_0_BUS_IMAGE_MASTER_n_WR_BUFFER_CFG(n)	(0x084 + 0x24 * (n))
+#define VFE_WM_BUFFER_CFG_MAX_HEIGHT		4096
+#define VFE_WM_BUFFER_CFG_MAX_WORDS		0xffff
 #define VFE_0_BUS_IMAGE_MASTER_n_WR_FRAMEDROP_PATTERN(n)	\
 							(0x088 + 0x24 * (n))
 #define VFE_0_BUS_IMAGE_MASTER_n_WR_IRQ_SUBSAMPLE_PATTERN(n)	\
@@ -282,14 +284,22 @@ static void vfe_wm_frame_based(struct vfe_device *vfe, u8 wm, u8 enable)
  * A frame-based write master on MSM8226's VFE 4.0 still takes the frame
  * geometry: line length in 64-bit words, height and burst length.
  */
-static void vfe_wm_frame_size(struct vfe_device *vfe, u8 wm,
-			      struct v4l2_pix_format_mplane *pix)
+static int vfe_wm_frame_size(struct vfe_device *vfe, u8 wm,
+			     struct v4l2_pix_format_mplane *pix)
 {
 	u32 words = DIV_ROUND_UP(pix->plane_fmt[0].bytesperline, 8);
 	u32 reg;
 
+	/* Height occupies bits 15:4 and words per line occupy bits 31:16. */
+	if (!pix->height || pix->height > VFE_WM_BUFFER_CFG_MAX_HEIGHT ||
+	    !words || words > VFE_WM_BUFFER_CFG_MAX_WORDS)
+		return -EINVAL;
+
 	reg = (words << 16) | ((pix->height - 1) << 4) | 1;
-	writel_relaxed(reg, vfe->base + VFE_0_BUS_IMAGE_MASTER_n_WR_BUFFER_CFG(wm));
+	writel_relaxed(reg, vfe->base +
+		       VFE_0_BUS_IMAGE_MASTER_n_WR_BUFFER_CFG(wm));
+
+	return 0;
 }
 
 static void vfe_get_wm_sizes(struct v4l2_pix_format_mplane *pix, u8 plane,
@@ -971,6 +981,7 @@ static int vfe_4_1_pm_domain_on(struct vfe_device *vfe)
 }
 
 static const struct vfe_hw_ops_gen1 vfe_ops_gen1_4_1 = {
+	.max_frame_height = VFE_WM_BUFFER_CFG_MAX_HEIGHT,
 	.bus_connect_wm_to_rdi = vfe_bus_connect_wm_to_rdi,
 	.bus_disconnect_wm_from_rdi = vfe_bus_disconnect_wm_from_rdi,
 	.bus_enable_wr_if = vfe_bus_enable_wr_if,
