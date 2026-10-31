@@ -368,3 +368,7 @@
 	mode-recovery = <0x1>;
 	mode-bootloader = <0x2>;
 };
+
+&apr {
+	status = "okay";
+};
