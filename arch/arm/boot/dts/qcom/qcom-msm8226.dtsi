@@ -1439,6 +1439,44 @@
 			};
 		};
 
+		vfe_iommu: iommu@fda44000 {
+			compatible = "qcom,msm8226-vfe-iommu";
+			reg = <0xfda44000 0x2600>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			#iommu-cells = <1>;
+			ranges = <0 0xfda4c000 0x3000>;
+
+			clocks = <&mmcc CAMSS_VFE_VFE_AHB_CLK>,
+				 <&mmcc CAMSS_VFE_VFE_AXI_CLK>,
+				 <&mmcc CAMSS_TOP_AHB_CLK>;
+			clock-names = "iface", "bus", "tbu";
+			power-domains = <&mmcc CAMSS_VFE_GDSC>;
+
+			status = "disabled";
+
+			/* VFE0 */
+			iommu-ctx@0 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x0 0x1000>;
+				interrupts = <GIC_SPI 65 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			/* VFE1 */
+			iommu-ctx@1000 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x1000 0x1000>;
+				interrupts = <GIC_SPI 65 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			/* CPP */
+			iommu-ctx@2000 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x2000 0x1000>;
+				interrupts = <GIC_SPI 65 IRQ_TYPE_LEVEL_HIGH>;
+			};
+		};
+
 		gpu_iommu: iommu@fdb10000 {
 			compatible = "qcom,msm8226-gpu-iommu";
 			reg = <0xfdb10000 0x2600>;
