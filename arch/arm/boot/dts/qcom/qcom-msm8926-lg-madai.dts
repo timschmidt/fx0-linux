@@ -344,6 +344,14 @@
 	};
 };
 
+&gpu {
+	status = "okay";
+};
+
+&gpu_iommu {
+	status = "okay";
+};
+
 &mdp_iommu {
 	status = "okay";
 };
