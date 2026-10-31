@@ -5,6 +5,7 @@
 
 /dts-v1/;
 
+#include <dt-bindings/soc/qcom,apr.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/clock/qcom,dsi-phy-28nm.h>
 #include <dt-bindings/clock/qcom,gcc-msm8974.h>
@@ -1678,6 +1679,20 @@
 				qcom,smd-edge = <1>;
 
 				label = "lpass";
+
+				apr: apr {
+					compatible = "qcom,apr-v2";
+					qcom,smd-channels = "apr_audio_svc";
+					qcom,domain = <APR_DOMAIN_ADSP>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+					status = "disabled";
+
+					q6core: service@3 {
+						compatible = "qcom,q6core";
+						reg = <APR_SVC_ADSP_CORE>;
+					};
+				};
 			};
 		};
 

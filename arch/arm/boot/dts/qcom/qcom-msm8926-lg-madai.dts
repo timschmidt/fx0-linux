@@ -508,5 +508,7 @@
 };
 
 &vfe_iommu {
+
+&apr {
 	status = "okay";
 };
