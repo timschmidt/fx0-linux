@@ -368,3 +368,28 @@
 	mode-recovery = <0x1>;
 	mode-bootloader = <0x2>;
 };
+
+&slimbam {
+	status = "okay";
+};
+
+&slim_msm {
+	status = "okay";
+
+	slim@1 {
+		tapan_ifd: ifd@0,0 {
+			compatible = "slim217,e0";
+			reg = <0 0>;
+		};
+
+		codec@1,0 {
+			compatible = "slim217,e0";
+			reg = <1 0>;
+			slim-ifc-dev = <&tapan_ifd>;
+			reset-gpios = <&tlmm 72 GPIO_ACTIVE_LOW>;
+			vdd-h-supply = <&pm8226_l6>;
+			vdd-px-supply = <&pm8226_l6>;
+			vdd-cx-supply = <&pm8226_l4>;
+		};
+	};
+};
