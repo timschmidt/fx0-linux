@@ -78,6 +78,8 @@ static bool wcd9306_volatile_reg(struct device *dev, unsigned int reg)
 static const struct regmap_config wcd9306_regmap_config = {
 	.reg_bits = 16,
 	.val_bits = 8,
+	/* In SLIMbus mode the registers start at value element 0x800. */
+	.reg_base = 0x800,
 	.max_register = WCD9306_MAX_REGISTER,
 	.reg_defaults = wcd9306_defaults,
 	.num_reg_defaults = ARRAY_SIZE(wcd9306_defaults),
