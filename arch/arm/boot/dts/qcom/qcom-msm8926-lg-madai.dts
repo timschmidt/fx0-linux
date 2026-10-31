@@ -108,6 +108,10 @@
 	status = "okay";
 };
 
+&adsp {
+	status = "okay";
+};
+
 &blsp1_uart3 {
 	status = "okay";
 };
