@@ -511,6 +511,17 @@ config DRM_PANEL_LINCOLNTECH_LCD197
 	  24 bit RGB per pixel. It provides a MIPI DSI interface to
 	  the host.
 
+config DRM_PANEL_LG_FX0
+	tristate "LG Fx0 JDI in-cell panel"
+	depends on OF && DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	select DRM_DISPLAY_HELPER
+	help
+	  Support for the 720x1280 JDI in-cell panel in production LG Fx0
+	  handsets, using four DSI lanes and separate bias supply enables.
+	  Early development-board panel variants are not supported.
+	  If built as a module, this driver is called panel-lg-fx0.
+
 config DRM_PANEL_LG_LB035Q02
 	tristate "LG LB035Q024573 RGB panel"
 	depends on GPIOLIB && OF && SPI
