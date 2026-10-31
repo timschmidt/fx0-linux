@@ -14901,6 +14901,7 @@ M:	Timothy Schmidt <timschmidt@gmail.com>
 L:	dri-devel@lists.freedesktop.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/display/panel/lg,fx0-panel.yaml
+F:	drivers/gpu/drm/panel/panel-lg-fx0.c
 
 LG LAPTOP EXTRAS
 M:	Matan Ziv-Av <matan@svgalib.org>
