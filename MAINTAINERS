@@ -23956,6 +23956,7 @@ M:	Timothy Schmidt <timschmidt@gmail.com>
 L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/media/i2c/sony,imx179.yaml
+F:	drivers/media/i2c/imx179.c
 
 SONY IMX208 SENSOR DRIVER
 M:	Sakari Ailus <sakari.ailus@linux.intel.com>

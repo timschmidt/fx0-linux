@@ -362,6 +362,10 @@ static int imx179_set_format(struct v4l2_subdev *sd,
 	const struct imx179_mode *mode;
 	int vblank, ret;
 
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE &&
+	    v4l2_subdev_is_streaming(sd))
+		return -EBUSY;
+
 	mode = v4l2_find_nearest_size(imx179_modes, ARRAY_SIZE(imx179_modes),
 				      width, height, fmt->format.width,
 				      fmt->format.height);
@@ -433,6 +437,9 @@ static int imx179_disable_streams(struct v4l2_subdev *sd,
 
 	ret = cci_write(imx179->regmap, IMX179_REG_MODE_SELECT,
 			IMX179_MODE_STANDBY, NULL);
+	if (ret)
+		return ret;
+
 	pm_runtime_put(imx179->dev);
 
 	return ret;
