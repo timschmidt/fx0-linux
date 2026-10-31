@@ -245,6 +245,9 @@ static int vfe_enable_output(struct vfe_line *line)
 		vfe->ops_gen1->wm_set_ub_cfg(vfe, output->wm_idx[0],
 					    (ub_size + 1) * output->wm_idx[0], ub_size);
 		vfe->ops_gen1->wm_frame_based(vfe, output->wm_idx[0], 1);
+		if (vfe->ops_gen1->wm_frame_size)
+			vfe->ops_gen1->wm_frame_size(vfe, output->wm_idx[0],
+						     &line->video_out.active_fmt.fmt.pix_mp);
 		vfe->ops_gen1->wm_enable(vfe, output->wm_idx[0], 1);
 		vfe->ops_gen1->bus_reload_wm(vfe, output->wm_idx[0]);
 	} else {
