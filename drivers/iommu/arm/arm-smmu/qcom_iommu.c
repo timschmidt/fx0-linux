@@ -1245,6 +1245,38 @@ static const struct qcom_iommu_cfg msm8226_gpu_cfg = {
 	.num_sids = ARRAY_SIZE(msm8974_gpu_sids),
 };
 
+/* Values from the MSM8226 vendor vfe_iommu description. */
+static const struct qcom_iommu_bfb_reg msm8226_vfe_bfb[] = {
+	{ 0x04c, 0xffffffff },
+	{ 0x050, 0x00000000 },
+	{ 0x514, 0x00000004 },
+	{ 0x540, 0x00000008 },
+	{ 0x56c, 0x00000000 },
+	{ 0x314, 0x00000000 },
+	{ 0x394, 0x0000001b },
+	{ 0x414, 0x0000005b },
+	{ 0x0ac, 0x00000000 },
+	{ 0x15c, 0x0000001b },
+	{ 0x20c, 0x0000002b },
+	{ 0x008, 0x00000000 },
+	{ 0x00c, 0x00000000 },
+	{ 0x010, 0x00000000 },
+	{ 0x014, 0x00000000 },
+	{ 0x018, 0x00000000 },
+	{ 0x01c, 0x00000000 },
+	{ 0x020, 0x00000000 },
+};
+
+static const struct qcom_iommu_cfg msm8226_vfe_cfg = {
+	.halt = true,
+	.no_stall = true,
+	.fmt = ARM_V7S,
+	.no_afe = true,
+	.ctx_restore = true,
+	.bfb = msm8226_vfe_bfb,
+	.num_bfb = ARRAY_SIZE(msm8226_vfe_bfb),
+};
+
 static const struct qcom_iommu_bfb_reg msm8226_mdp_bfb[] = {
 	{ 0x04c, 0xffffffff },
 	{ 0x050, 0x00000000 },
@@ -1350,6 +1382,7 @@ static const struct of_device_id qcom_iommu_of_match[] = {
 	{ .compatible = "qcom,msm8974-gpu-iommu", .data = &msm8974_gpu_cfg },
 	{ .compatible = "qcom,msm8226-gpu-iommu", .data = &msm8226_gpu_cfg },
 	{ .compatible = "qcom,msm8226-mdp-iommu", .data = &msm8226_mdp_cfg },
+	{ .compatible = "qcom,msm8226-vfe-iommu", .data = &msm8226_vfe_cfg },
 	{ .compatible = "qcom,msm8974-mdp-iommu", .data = &msm8974_mdp_cfg },
 	{ .compatible = "qcom,msm8974-venus-iommu", .data = &msm8974_venus_cfg },
 	{ /* sentinel */ }
