@@ -1674,6 +1674,13 @@ static int qcom_slim_ngd_ctrl_probe(struct platform_device *pdev)
 
 	enable_irq(irq);
 
+	/*
+	 * The DSP may already be running, as when it boots before this driver
+	 * loads, and then no power-up notification follows. Bring the NGD up
+	 * now; the worker waits for the QMI service.
+	 */
+	schedule_work(&ctrl->ngd_up_work);
+
 	return 0;
 
 err_unregister_ngd:
