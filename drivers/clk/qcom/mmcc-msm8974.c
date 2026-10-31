@@ -1783,6 +1783,7 @@ static struct clk_branch camss_vfe_vfe_axi_clk = {
 				&mmss_axi_clk_src.clkr.hw
 			},
 			.num_parents = 1,
+			.flags = CLK_SET_RATE_PARENT,
 			.ops = &clk_branch2_ops,
 		},
 	},
