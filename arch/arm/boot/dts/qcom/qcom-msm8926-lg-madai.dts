@@ -372,3 +372,13 @@
 &apr {
 	status = "okay";
 };
+
+/* Experiment: CAMSS with the CSID test pattern generator, no sensors. */
+&camss {
+	vdda-supply = <&pm8226_l4>;
+	status = "okay";
+};
+
+&vfe_iommu {
+	status = "okay";
+};
