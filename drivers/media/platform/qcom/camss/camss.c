@@ -256,7 +256,7 @@ static const struct camss_subdev_resources vfe_res_8x26[] = {
 				  400000000 },
 				{ 0 },
 				{ 0 },
-				{ 0 } },
+				{ 266670000 } },
 		.reg = { "vfe0" },
 		.interrupt = { "vfe0" },
 		.vfe = {
