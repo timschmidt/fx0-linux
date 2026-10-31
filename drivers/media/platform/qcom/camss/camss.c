@@ -4313,6 +4313,13 @@ static int camss_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_genpd_cleanup;
 
+	/*
+	 * The write masters take one base address per plane, so each buffer
+	 * must map to a single contiguous DMA range. On 32-bit ARM the IOMMU
+	 * mapping only merges scatterlist chunks up to the maximum segment size.
+	 */
+	dma_set_max_seg_size(dev, UINT_MAX);
+
 	camss->media_dev.dev = camss->dev;
 	strscpy(camss->media_dev.model, "Qualcomm Camera Subsystem",
 		sizeof(camss->media_dev.model));
