@@ -502,6 +502,7 @@
 		compatible = "invensense,mpu6515";
 		reg = <0x68>;
 		interrupts-extended = <&tlmm 69 IRQ_TYPE_EDGE_RISING>;
+		vdd-supply = <&pm8226_lvs1>;
 		vddio-supply = <&pm8226_lvs1>;
 	};
 };
