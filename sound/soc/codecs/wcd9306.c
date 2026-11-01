@@ -497,6 +497,82 @@ static int wcd9306_codec_enable_dec1(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+/*
+ * Class-H setup for the line outputs with a 1.8 V buck supply: the buck is
+ * only used while the negative charge pump starts, then the charge pump runs
+ * from VDD_BUCK directly.
+ */
+static int wcd9306_codec_enable_clsh_lo(struct snd_soc_dapm_widget *w,
+					struct snd_kcontrol *kc, int event)
+{
+	struct snd_soc_component *comp = snd_soc_dapm_to_component(w->dapm);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		/* Buck mode, VREF 1.8 V */
+		snd_soc_component_update_bits(comp, WCD9306_BUCK_MODE_5, 0x02, 0x02);
+		snd_soc_component_write(comp, WCD9306_BUCK_MODE_4, 0xe6);
+		snd_soc_component_update_bits(comp, WCD9306_BUCK_MODE_1, 0x04, 0x04);
+		snd_soc_component_update_bits(comp, WCD9306_BUCK_MODE_3, 0x0c, 0x00);
+		usleep_range(50, 100);
+		snd_soc_component_update_bits(comp, WCD9306_BUCK_MODE_1, 0x80, 0x80);
+
+		/* Negative charge pump at clock level 5 */
+		snd_soc_component_update_bits(comp, WCD9306_NCP_STATIC, 0x10, 0x00);
+		snd_soc_component_update_bits(comp, WCD9306_NCP_STATIC, 0x0f, 0x05);
+		snd_soc_component_update_bits(comp, WCD9306_NCP_STATIC, 0x20, 0x20);
+		snd_soc_component_update_bits(comp, WCD9306_NCP_EN, 0x01, 0x01);
+		usleep_range(50, 100);
+
+		snd_soc_component_update_bits(comp, WCD9306_BUCK_MODE_1, 0x80, 0x00);
+		snd_soc_component_update_bits(comp, WCD9306_NCP_STATIC, 0x10, 0x10);
+		usleep_range(50, 100);
+		snd_soc_component_update_bits(comp, WCD9306_BUCK_MODE_1, 0x04, 0x00);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		snd_soc_component_update_bits(comp, WCD9306_NCP_EN, 0x01, 0x00);
+		break;
+	}
+
+	return 0;
+}
+
+static int wcd9306_codec_enable_lineout_dac(struct snd_soc_dapm_widget *w,
+					    struct snd_kcontrol *kc, int event)
+{
+	struct snd_soc_component *comp = snd_soc_dapm_to_component(w->dapm);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		snd_soc_component_update_bits(comp, w->reg, 0x40, 0x40);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		snd_soc_component_update_bits(comp, w->reg, 0x40, 0x00);
+		break;
+	}
+
+	return 0;
+}
+
+static int wcd9306_codec_enable_lineout_pa(struct snd_soc_dapm_widget *w,
+					   struct snd_kcontrol *kc, int event)
+{
+	if (event == SND_SOC_DAPM_POST_PMU)
+		usleep_range(3000, 3100);
+
+	return 0;
+}
+
+static const char * const rdac5_mux_text[] = {
+	"DEM4", "DEM3_INV",
+};
+
+static SOC_ENUM_SINGLE_DECL(rdac5_mux_enum, WCD9306_CDC_CONN_MISC, 2,
+			    rdac5_mux_text);
+
+static const struct snd_kcontrol_new rdac5_mux =
+	SOC_DAPM_ENUM("RDAC5 MUX Mux", rdac5_mux_enum);
+
 static const char * const dec_1_2_mux_text[] = {
 	"ZERO", "ADC1", "ADC2", "ADC3", "ADC4", "ADCMB",
 	"DMIC1", "DMIC2", "DMIC3", "DMIC4",
@@ -576,6 +652,23 @@ static const struct snd_soc_dapm_widget wcd9306_dapm_widgets[] = {
 			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_OUTPUT("SPK_OUT"),
 
+	/*
+	 * The loudspeaker is bridged between SPK_OUT and LINEOUT2, which
+	 * carries the inverted RX3 signal.
+	 */
+	SND_SOC_DAPM_REGULATOR_SUPPLY("vdd-buck", 0, 0),
+	SND_SOC_DAPM_REGULATOR_SUPPLY("vdd-buckhelper", 0, 0),
+	SND_SOC_DAPM_SUPPLY("CLASS_H_LO", SND_SOC_NOPM, 0, 0,
+			    wcd9306_codec_enable_clsh_lo,
+			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX("RDAC5 MUX", SND_SOC_NOPM, 0, 0, &rdac5_mux),
+	SND_SOC_DAPM_DAC_E("LINEOUT2 DAC", NULL, WCD9306_RX_LINE_2_DAC_CTL, 7, 0,
+			   wcd9306_codec_enable_lineout_dac,
+			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_PGA_E("LINEOUT2 PA", WCD9306_RX_LINE_CNP_EN, 1, 0, NULL, 0,
+			   wcd9306_codec_enable_lineout_pa, SND_SOC_DAPM_POST_PMU),
+	SND_SOC_DAPM_OUTPUT("LINEOUT2"),
+
 	SND_SOC_DAPM_INPUT("AMIC1"),
 	SND_SOC_DAPM_SUPPLY("LDO_H", SND_SOC_NOPM, 0, 0,
 			    wcd9306_codec_enable_ldo_h,
@@ -611,6 +704,16 @@ static const struct snd_soc_dapm_route wcd9306_audio_map[] = {
 	{ "SPK DAC", NULL, "RX_BIAS" },
 	{ "SPK PA", NULL, "SPK DAC" },
 	{ "SPK_OUT", NULL, "SPK PA" },
+
+	{ "RDAC5 MUX", "DEM3_INV", "RX3 MIX1" },
+	{ "LINEOUT2 DAC", NULL, "RDAC5 MUX" },
+	{ "LINEOUT2 DAC", NULL, "RX_BIAS" },
+	{ "LINEOUT2 DAC", NULL, "CLASS_H_LO" },
+	{ "CLASS_H_LO", NULL, "vdd-buck" },
+	{ "CLASS_H_LO", NULL, "vdd-buckhelper" },
+	{ "CLASS_H_LO", NULL, "MCLK" },
+	{ "LINEOUT2 PA", NULL, "LINEOUT2 DAC" },
+	{ "LINEOUT2", NULL, "LINEOUT2 PA" },
 
 	{ "LDO_H", NULL, "MCLK" },
 	{ "MIC BIAS1", NULL, "LDO_H" },
