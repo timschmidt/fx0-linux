@@ -38,11 +38,17 @@
 #define WCD9306_AIF1_PB_CHANNELS	2
 #define WCD9306_SLIM_PGD_RX_PORT_CFG(p)		(0x30 + (p))
 #define WCD9306_SLIM_PGD_RX_PORT_MULTI_CHNL_0(p) (0x140 + 4 * (p))
+/* TX ports start at 0 and use their own configuration block. */
+#define WCD9306_TX_MAX			5
+#define WCD9306_AIF1_CAP_CHANNELS	2
+#define WCD9306_SLIM_PGD_TX_PORT_CFG(p)		(0x50 + (p))
+#define WCD9306_SLIM_PGD_TX_PORT_MULTI_CHNL_0(p) (0x100 + 4 * (p))
 /* 12-byte watermark (value 2), port enabled */
 #define WCD9306_SLIM_WATER_MARK_VAL	((2 << 1) | 1)
 
 enum {
 	AIF1_PB = 0,
+	AIF1_CAP,
 	NUM_CODEC_DAIS,
 };
 
@@ -68,8 +74,10 @@ struct wcd9306_codec {
 
 	struct wcd9306_slim_ch rx_chs[WCD9306_RX_MAX];
 	unsigned int num_rx_port;
-	struct slim_stream_runtime *sruntime;
-	struct slim_stream_config sconfig;
+	struct wcd9306_slim_ch tx_chs[WCD9306_TX_MAX];
+	unsigned int num_tx_port;
+	struct slim_stream_runtime *sruntime[NUM_CODEC_DAIS];
+	struct slim_stream_config sconfig[NUM_CODEC_DAIS];
 };
 
 static bool wcd9306_readable_reg(struct device *dev, unsigned int reg)
@@ -384,6 +392,139 @@ static int wcd9306_codec_enable_spk_pa(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+static int wcd9306_codec_enable_ldo_h(struct snd_soc_dapm_widget *w,
+				      struct snd_kcontrol *kc, int event)
+{
+	struct snd_soc_component *comp = snd_soc_dapm_to_component(w->dapm);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		snd_soc_component_update_bits(comp, WCD9306_LDO_H_MODE_1,
+					      0x80, 0x80);
+		/* The LDO needs 1 ms to settle. */
+		usleep_range(1000, 1100);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		snd_soc_component_update_bits(comp, WCD9306_LDO_H_MODE_1,
+					      0x80, 0x00);
+		break;
+	}
+
+	return 0;
+}
+
+static int wcd9306_codec_enable_micbias1(struct snd_soc_dapm_widget *w,
+					 struct snd_kcontrol *kc, int event)
+{
+	struct snd_soc_component *comp = snd_soc_dapm_to_component(w->dapm);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		/* Micbias 1 runs from CFILT 1, external capacitor mode. */
+		snd_soc_component_update_bits(comp, WCD9306_MICB_CFILT_1_CTL,
+					      0x80, 0x80);
+		snd_soc_component_update_bits(comp, WCD9306_MICB_1_CTL,
+					      0xe0, 0x80);
+		break;
+	case SND_SOC_DAPM_POST_PMU:
+		usleep_range(20000, 20100);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		snd_soc_component_update_bits(comp, WCD9306_MICB_1_CTL,
+					      0x80, 0x00);
+		snd_soc_component_update_bits(comp, WCD9306_MICB_CFILT_1_CTL,
+					      0x80, 0x00);
+		break;
+	}
+
+	return 0;
+}
+
+static int wcd9306_codec_enable_adc1(struct snd_soc_dapm_widget *w,
+				     struct snd_kcontrol *kc, int event)
+{
+	struct snd_soc_component *comp = snd_soc_dapm_to_component(w->dapm);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		snd_soc_component_update_bits(comp, WCD9306_TX_1_2_TEST_CTL,
+					      0x80, 0x80);
+		break;
+	case SND_SOC_DAPM_POST_PMU:
+		snd_soc_component_update_bits(comp, WCD9306_TX_1_2_TEST_CTL,
+					      0x80, 0x00);
+		break;
+	}
+
+	return 0;
+}
+
+static int wcd9306_codec_enable_dec1(struct snd_soc_dapm_widget *w,
+				     struct snd_kcontrol *kc, int event)
+{
+	struct snd_soc_component *comp = snd_soc_dapm_to_component(w->dapm);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		/* Mute, reset, and start with a 150 Hz high-pass filter. */
+		snd_soc_component_update_bits(comp, WCD9306_CDC_TX1_VOL_CTL_CFG,
+					      0x01, 0x01);
+		snd_soc_component_update_bits(comp, WCD9306_CDC_CLK_TX_RESET_B1_CTL,
+					      0x01, 0x01);
+		snd_soc_component_update_bits(comp, WCD9306_CDC_CLK_TX_RESET_B1_CTL,
+					      0x01, 0x00);
+		snd_soc_component_update_bits(comp, WCD9306_CDC_TX1_MUX_CTL,
+					      0x38, 0x10);
+		break;
+	case SND_SOC_DAPM_POST_PMU:
+		snd_soc_component_update_bits(comp, WCD9306_CDC_TX1_VOL_CTL_CFG,
+					      0x01, 0x00);
+		/* The digital gain takes effect once rewritten after enable. */
+		snd_soc_component_write(comp, WCD9306_CDC_TX1_VOL_CTL_GAIN,
+					snd_soc_component_read(comp,
+							       WCD9306_CDC_TX1_VOL_CTL_GAIN));
+		break;
+	case SND_SOC_DAPM_PRE_PMD:
+		snd_soc_component_update_bits(comp, WCD9306_CDC_TX1_VOL_CTL_CFG,
+					      0x01, 0x01);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		snd_soc_component_update_bits(comp, WCD9306_CDC_TX1_MUX_CTL,
+					      0x08, 0x08);
+		break;
+	}
+
+	return 0;
+}
+
+static const char * const dec_1_2_mux_text[] = {
+	"ZERO", "ADC1", "ADC2", "ADC3", "ADC4", "ADCMB",
+	"DMIC1", "DMIC2", "DMIC3", "DMIC4",
+};
+
+static SOC_ENUM_SINGLE_DECL(dec1_mux_enum, WCD9306_CDC_CONN_TX_B1_CTL, 0,
+			    dec_1_2_mux_text);
+
+static const struct snd_kcontrol_new dec1_mux =
+	SOC_DAPM_ENUM("DEC1 MUX Mux", dec1_mux_enum);
+
+static const char * const sb_tx_1_2_mux_text[] = {
+	"ZERO", "RMIX1", "RMIX2", "RMIX3", "RMIX4", "RSVD", "RSVD", "RSVD",
+	"DEC1", "DEC2", "DEC3", "DEC4",
+};
+
+static SOC_ENUM_SINGLE_DECL(sb_tx1_mux_enum, WCD9306_CDC_CONN_TX_SB_B1_CTL, 0,
+			    sb_tx_1_2_mux_text);
+
+static const struct snd_kcontrol_new sb_tx1_mux =
+	SOC_DAPM_ENUM("SLIM TX1 MUX Mux", sb_tx1_mux_enum);
+
+static SOC_ENUM_SINGLE_DECL(sb_tx2_mux_enum, WCD9306_CDC_CONN_TX_SB_B2_CTL, 0,
+			    sb_tx_1_2_mux_text);
+
+static const struct snd_kcontrol_new sb_tx2_mux =
+	SOC_DAPM_ENUM("SLIM TX2 MUX Mux", sb_tx2_mux_enum);
+
 static const char * const rx_3_4_mix1_text[] = {
 	"ZERO", "SRC1", "SRC2", "IIR1", "IIR2", "RX1", "RX2", "RX3", "RX4",
 	"RX5", "AUXRX", "AUXTX1", "AUXTX2",
@@ -406,9 +547,13 @@ static const struct snd_kcontrol_new spk_dac_switch[] = {
 };
 
 static const DECLARE_TLV_DB_SCALE(digital_gain, -8400, 100, -8400);
+static const DECLARE_TLV_DB_SCALE(analog_gain, 0, 150, 0);
 
 static const struct snd_kcontrol_new wcd9306_snd_controls[] = {
 	SOC_SINGLE_S8_TLV("RX3 Digital Volume", WCD9306_CDC_RX3_VOL_CTL_B2_CTL,
+			  -84, 40, digital_gain),
+	SOC_SINGLE_TLV("ADC1 Volume", WCD9306_TX_1_EN, 2, 19, 0, analog_gain),
+	SOC_SINGLE_S8_TLV("DEC1 Volume", WCD9306_CDC_TX1_VOL_CTL_GAIN,
 			  -84, 40, digital_gain),
 };
 
@@ -430,6 +575,26 @@ static const struct snd_soc_dapm_widget wcd9306_dapm_widgets[] = {
 			   wcd9306_codec_enable_spk_pa,
 			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_OUTPUT("SPK_OUT"),
+
+	SND_SOC_DAPM_INPUT("AMIC1"),
+	SND_SOC_DAPM_SUPPLY("LDO_H", SND_SOC_NOPM, 0, 0,
+			    wcd9306_codec_enable_ldo_h,
+			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_SUPPLY("MIC BIAS1", SND_SOC_NOPM, 0, 0,
+			    wcd9306_codec_enable_micbias1,
+			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
+			    SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_ADC_E("ADC1", NULL, WCD9306_TX_1_EN, 7, 0,
+			   wcd9306_codec_enable_adc1,
+			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
+	SND_SOC_DAPM_SUPPLY("CDC_CONN", WCD9306_CDC_CLK_OTHR_CTL, 2, 0, NULL, 0),
+	SND_SOC_DAPM_MUX_E("DEC1 MUX", WCD9306_CDC_CLK_TX_CLK_EN_B1_CTL, 0, 0,
+			   &dec1_mux, wcd9306_codec_enable_dec1,
+			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
+			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX("SLIM TX1 MUX", SND_SOC_NOPM, 0, 0, &sb_tx1_mux),
+	SND_SOC_DAPM_MUX("SLIM TX2 MUX", SND_SOC_NOPM, 0, 0, &sb_tx2_mux),
+	SND_SOC_DAPM_AIF_OUT("AIF1 CAP", "AIF1 Capture", 0, SND_SOC_NOPM, 0, 0),
 };
 
 static const struct snd_soc_dapm_route wcd9306_audio_map[] = {
@@ -446,6 +611,20 @@ static const struct snd_soc_dapm_route wcd9306_audio_map[] = {
 	{ "SPK DAC", NULL, "RX_BIAS" },
 	{ "SPK PA", NULL, "SPK DAC" },
 	{ "SPK_OUT", NULL, "SPK PA" },
+
+	{ "LDO_H", NULL, "MCLK" },
+	{ "MIC BIAS1", NULL, "LDO_H" },
+	{ "ADC1", NULL, "AMIC1" },
+	{ "ADC1", NULL, "MIC BIAS1" },
+	{ "DEC1 MUX", "ADC1", "ADC1" },
+	{ "DEC1 MUX", NULL, "CDC_CONN" },
+	{ "DEC1 MUX", NULL, "MCLK" },
+	/* Both ports of the capture group carry the same decimator. */
+	{ "SLIM TX1 MUX", "DEC1", "DEC1 MUX" },
+	{ "SLIM TX2 MUX", "DEC1", "DEC1 MUX" },
+	{ "AIF1 CAP", NULL, "SLIM TX1 MUX" },
+	{ "AIF1 CAP", NULL, "SLIM TX2 MUX" },
+	{ "AIF1 CAP", NULL, "MCLK" },
 };
 
 static int wcd9306_set_interpolator_rate(struct wcd9306_codec *wcd,
@@ -480,14 +659,50 @@ static int wcd9306_set_interpolator_rate(struct wcd9306_codec *wcd,
 	return regmap_update_bits(wcd->regmap, WCD9306_CDC_RX3_B5_CTL, 0xe0, val);
 }
 
-static int wcd9306_slim_set_hw_params(struct wcd9306_codec *wcd,
+static int wcd9306_set_decimator_rate(struct wcd9306_codec *wcd,
+				      unsigned int rate)
+{
+	unsigned int val;
+
+	switch (rate) {
+	case 8000:
+		val = 0x00;
+		break;
+	case 16000:
+		val = 0x01;
+		break;
+	case 32000:
+		val = 0x02;
+		break;
+	case 48000:
+		val = 0x03;
+		break;
+	case 96000:
+		val = 0x04;
+		break;
+	case 192000:
+		val = 0x05;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	/* Only DEC1, which feeds both capture ports, is wired up so far. */
+	return regmap_update_bits(wcd->regmap, WCD9306_CDC_TX1_CLK_FS_CTL,
+				  0x07, val);
+}
+
+static int wcd9306_slim_set_hw_params(struct wcd9306_codec *wcd, int dai_id,
 				      unsigned int channels)
 {
-	struct slim_stream_config *cfg = &wcd->sconfig;
+	struct slim_stream_config *cfg = &wcd->sconfig[dai_id];
+	bool capture = dai_id == AIF1_CAP;
+	struct wcd9306_slim_ch *chs = capture ? wcd->tx_chs : wcd->rx_chs;
+	unsigned int num_port = capture ? wcd->num_tx_port : wcd->num_rx_port;
 	u16 payload = 0;
 	int ret, i;
 
-	if (channels > wcd->num_rx_port)
+	if (channels > num_port)
 		return -EINVAL;
 
 	kfree(cfg->chs);
@@ -496,33 +711,45 @@ static int wcd9306_slim_set_hw_params(struct wcd9306_codec *wcd,
 		return -ENOMEM;
 
 	cfg->ch_count = channels;
-	cfg->direction = SNDRV_PCM_STREAM_PLAYBACK;
+	cfg->direction = capture ? SNDRV_PCM_STREAM_CAPTURE :
+				   SNDRV_PCM_STREAM_PLAYBACK;
 	cfg->port_mask = 0;
 	for (i = 0; i < channels; i++) {
-		payload |= BIT(wcd->rx_chs[i].shift);
-		cfg->port_mask |= BIT(wcd->rx_chs[i].port);
-		cfg->chs[i] = wcd->rx_chs[i].ch_num;
+		payload |= BIT(chs[i].shift);
+		cfg->port_mask |= BIT(chs[i].port);
+		cfg->chs[i] = chs[i].ch_num;
 	}
 
 	for (i = 0; i < channels; i++) {
-		u16 port = wcd->rx_chs[i].port;
+		u16 port = chs[i].port;
 
-		ret = regmap_write(wcd->if_regmap,
-				   WCD9306_SLIM_PGD_RX_PORT_MULTI_CHNL_0(port),
-				   payload);
-		if (ret)
-			return ret;
-		ret = regmap_write(wcd->if_regmap,
-				   WCD9306_SLIM_PGD_RX_PORT_CFG(port),
-				   WCD9306_SLIM_WATER_MARK_VAL);
+		if (capture) {
+			ret = regmap_write(wcd->if_regmap,
+					   WCD9306_SLIM_PGD_TX_PORT_MULTI_CHNL_0(port),
+					   payload);
+			if (!ret)
+				ret = regmap_write(wcd->if_regmap,
+						   WCD9306_SLIM_PGD_TX_PORT_CFG(port),
+						   WCD9306_SLIM_WATER_MARK_VAL);
+		} else {
+			ret = regmap_write(wcd->if_regmap,
+					   WCD9306_SLIM_PGD_RX_PORT_MULTI_CHNL_0(port),
+					   payload);
+			if (!ret)
+				ret = regmap_write(wcd->if_regmap,
+						   WCD9306_SLIM_PGD_RX_PORT_CFG(port),
+						   WCD9306_SLIM_WATER_MARK_VAL);
+		}
 		if (ret)
 			return ret;
 	}
 
-	if (!wcd->sruntime)
-		wcd->sruntime = slim_stream_allocate(wcd->slim, "WCD9306-SLIM");
+	if (!wcd->sruntime[dai_id])
+		wcd->sruntime[dai_id] = slim_stream_allocate(wcd->slim,
+							     capture ? "WCD9306-SLIM-TX" :
+								       "WCD9306-SLIM-RX");
 
-	return IS_ERR(wcd->sruntime) ? PTR_ERR(wcd->sruntime) : 0;
+	return IS_ERR(wcd->sruntime[dai_id]) ? PTR_ERR(wcd->sruntime[dai_id]) : 0;
 }
 
 static int wcd9306_hw_params(struct snd_pcm_substream *substream,
@@ -532,7 +759,10 @@ static int wcd9306_hw_params(struct snd_pcm_substream *substream,
 	struct wcd9306_codec *wcd = snd_soc_component_get_drvdata(dai->component);
 	int ret;
 
-	ret = wcd9306_set_interpolator_rate(wcd, params_rate(params));
+	if (dai->id == AIF1_CAP)
+		ret = wcd9306_set_decimator_rate(wcd, params_rate(params));
+	else
+		ret = wcd9306_set_interpolator_rate(wcd, params_rate(params));
 	if (ret) {
 		dev_err(wcd->dev, "Unsupported rate %u\n", params_rate(params));
 		return ret;
@@ -540,33 +770,34 @@ static int wcd9306_hw_params(struct snd_pcm_substream *substream,
 
 	switch (params_width(params)) {
 	case 16 ... 24:
-		wcd->sconfig.bps = params_width(params);
+		wcd->sconfig[dai->id].bps = params_width(params);
 		break;
 	default:
 		return -EINVAL;
 	}
-	wcd->sconfig.rate = params_rate(params);
+	wcd->sconfig[dai->id].rate = params_rate(params);
 
-	return wcd9306_slim_set_hw_params(wcd, params_channels(params));
+	return wcd9306_slim_set_hw_params(wcd, dai->id, params_channels(params));
 }
 
 static int wcd9306_trigger(struct snd_pcm_substream *substream, int cmd,
 			   struct snd_soc_dai *dai)
 {
 	struct wcd9306_codec *wcd = snd_soc_component_get_drvdata(dai->component);
+	struct slim_stream_runtime *srt = wcd->sruntime[dai->id];
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
-		slim_stream_prepare(wcd->sruntime, &wcd->sconfig);
-		slim_stream_enable(wcd->sruntime);
+		slim_stream_prepare(srt, &wcd->sconfig[dai->id]);
+		slim_stream_enable(srt);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		slim_stream_disable(wcd->sruntime);
-		slim_stream_unprepare(wcd->sruntime);
+		slim_stream_disable(srt);
+		slim_stream_unprepare(srt);
 		break;
 	}
 
@@ -580,14 +811,25 @@ static int wcd9306_set_channel_map(struct snd_soc_dai *dai,
 	struct wcd9306_codec *wcd = snd_soc_component_get_drvdata(dai->component);
 	int i;
 
-	if (!rx_slot)
+	if (!rx_slot && !tx_slot)
 		return -EINVAL;
 
-	wcd->num_rx_port = min(rx_num, WCD9306_RX_MAX);
-	for (i = 0; i < wcd->num_rx_port; i++) {
-		wcd->rx_chs[i].ch_num = rx_slot[i];
-		wcd->rx_chs[i].port = WCD9306_RX_PORT_START + i;
-		wcd->rx_chs[i].shift = i;
+	if (rx_slot) {
+		wcd->num_rx_port = min(rx_num, WCD9306_RX_MAX);
+		for (i = 0; i < wcd->num_rx_port; i++) {
+			wcd->rx_chs[i].ch_num = rx_slot[i];
+			wcd->rx_chs[i].port = WCD9306_RX_PORT_START + i;
+			wcd->rx_chs[i].shift = i;
+		}
+	}
+
+	if (tx_slot) {
+		wcd->num_tx_port = min(tx_num, WCD9306_TX_MAX);
+		for (i = 0; i < wcd->num_tx_port; i++) {
+			wcd->tx_chs[i].ch_num = tx_slot[i];
+			wcd->tx_chs[i].port = i;
+			wcd->tx_chs[i].shift = i;
+		}
 	}
 
 	return 0;
@@ -600,16 +842,26 @@ static int wcd9306_get_channel_map(const struct snd_soc_dai *dai,
 	struct wcd9306_codec *wcd = snd_soc_component_get_drvdata(dai->component);
 	int i;
 
-	if (!rx_slot || !rx_num)
-		return -EINVAL;
-
-	if (wcd->num_rx_port < WCD9306_AIF1_PB_CHANNELS)
-		return -EINVAL;
-
 	/* Report only the channels this DAI streams on. */
+	if (dai->id == AIF1_CAP) {
+		if (!tx_slot || !tx_num ||
+		    wcd->num_tx_port < WCD9306_AIF1_CAP_CHANNELS)
+			return -EINVAL;
+		for (i = 0; i < WCD9306_AIF1_CAP_CHANNELS; i++)
+			tx_slot[i] = wcd->tx_chs[i].ch_num;
+		*tx_num = WCD9306_AIF1_CAP_CHANNELS;
+		if (rx_num)
+			*rx_num = 0;
+		return 0;
+	}
+
+	if (!rx_slot || !rx_num || wcd->num_rx_port < WCD9306_AIF1_PB_CHANNELS)
+		return -EINVAL;
 	for (i = 0; i < WCD9306_AIF1_PB_CHANNELS; i++)
 		rx_slot[i] = wcd->rx_chs[i].ch_num;
 	*rx_num = WCD9306_AIF1_PB_CHANNELS;
+	if (tx_num)
+		*tx_num = 0;
 
 	return 0;
 }
@@ -636,6 +888,20 @@ static struct snd_soc_dai_driver wcd9306_dais[] = {
 		},
 		.ops = &wcd9306_dai_ops,
 	},
+	[AIF1_CAP] = {
+		.name = "wcd9306_tx1",
+		.id = AIF1_CAP,
+		.capture = {
+			.stream_name = "AIF1 Capture",
+			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |
+				 SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000 |
+				 SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE,
+			.channels_min = WCD9306_AIF1_CAP_CHANNELS,
+			.channels_max = WCD9306_AIF1_CAP_CHANNELS,
+		},
+		.ops = &wcd9306_dai_ops,
+	},
 };
 
 static int wcd9306_component_probe(struct snd_soc_component *comp)
@@ -647,6 +913,10 @@ static int wcd9306_component_probe(struct snd_soc_component *comp)
 
 	/* Start at the stock speaker level, -24 dB digital gain. */
 	regmap_write(wcd->regmap, WCD9306_CDC_RX3_VOL_CTL_B2_CTL, 0xe8);
+
+	/* Stock main microphone setup: ADC1 analog gain and CFILT 1 level. */
+	regmap_update_bits(wcd->regmap, WCD9306_TX_1_EN, 0x7c, 0x30);
+	regmap_update_bits(wcd->regmap, WCD9306_MICB_CFILT_1_VAL, 0xfc, 0x60);
 
 	/*
 	 * Tell the codec its MCLK rate. Boards feed either 12.288 MHz or
