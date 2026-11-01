@@ -316,7 +316,7 @@ static int rmi_i2c_suspend(struct device *dev)
 
 	ret = rmi_driver_suspend(rmi_i2c->xport.rmi_dev, true);
 	if (ret)
-		dev_warn(dev, "Failed to resume device: %d\n", ret);
+		dev_warn(dev, "Failed to suspend device: %d\n", ret);
 
 	if (rmi_i2c->reset_gpio)
 		gpiod_set_value_cansleep(rmi_i2c->reset_gpio, 1);
@@ -324,7 +324,12 @@ static int rmi_i2c_suspend(struct device *dev)
 	regulator_bulk_disable(ARRAY_SIZE(rmi_i2c->supplies),
 			       rmi_i2c->supplies);
 
-	return ret;
+	/*
+	 * The device is powered off now. Returning an error would abort the
+	 * system suspend without calling rmi_i2c_resume() for this device,
+	 * leaving it powered off and in reset.
+	 */
+	return 0;
 }
 
 static int rmi_i2c_resume(struct device *dev)
