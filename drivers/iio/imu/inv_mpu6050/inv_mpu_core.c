@@ -804,24 +804,31 @@ inv_mpu6050_read_raw(struct iio_dev *indio_dev,
 		default:
 			return -EINVAL;
 		}
-	case IIO_CHAN_INFO_CALIBBIAS:
+	case IIO_CHAN_INFO_CALIBBIAS: {
+		struct device *pdev = regmap_get_device(st->map);
+		int reg;
+
 		switch (chan->type) {
 		case IIO_ANGL_VEL:
-			mutex_lock(&st->lock);
-			ret = inv_mpu6050_sensor_show(st, st->reg->gyro_offset,
-						chan->channel2, val);
-			mutex_unlock(&st->lock);
-			return ret;
+			reg = st->reg->gyro_offset;
+			break;
 		case IIO_ACCEL:
-			mutex_lock(&st->lock);
-			ret = inv_mpu6050_sensor_show(st, st->reg->accl_offset,
-						chan->channel2, val);
-			mutex_unlock(&st->lock);
-			return ret;
-
+			reg = st->reg->accl_offset;
+			break;
 		default:
 			return -EINVAL;
 		}
+
+		/* The supplies may be off while the chip is runtime suspended */
+		ret = pm_runtime_resume_and_get(pdev);
+		if (ret)
+			return ret;
+		mutex_lock(&st->lock);
+		ret = inv_mpu6050_sensor_show(st, reg, chan->channel2, val);
+		mutex_unlock(&st->lock);
+		pm_runtime_put_autosuspend(pdev);
+		return ret;
+	}
 	default:
 		return -EINVAL;
 	}
