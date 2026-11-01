@@ -34,6 +34,11 @@ properties:
   interrupts:
     maxItems: 1
 
+  panel:
+    description:
+      The panel an in-cell touchscreen belongs to. The touchscreen is then
+      powered down before the panel and powered up after it.
+
   reset-gpios:
     maxItems: 1
     description: Active low signal
