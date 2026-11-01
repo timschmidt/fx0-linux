@@ -35,9 +35,10 @@ properties:
     maxItems: 1
 
   panel:
+    $ref: /schemas/types.yaml#/definitions/phandle
     description:
-      The panel an in-cell touchscreen belongs to. The touchscreen is then
-      powered down before the panel and powered up after it.
+      Display panel that must be powered on before the in-cell touchscreen.
+      The I2C controller follows the panel's prepare and unprepare sequence.
 
   reset-gpios:
     maxItems: 1
@@ -219,6 +220,7 @@ allOf:
         spi-tx-delay-us: false
     else:
       properties:
+        panel: false
         syna,reset-delay-ms: false
         syna,startup-delay-ms: false
 
