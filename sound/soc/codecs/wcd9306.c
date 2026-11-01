@@ -595,6 +595,18 @@ static int wcd9306_component_probe(struct snd_soc_component *comp)
 	snd_soc_component_init_regmap(comp, wcd->regmap);
 	wcd9306_init_regs(wcd);
 
+	/*
+	 * Tell the codec its MCLK rate. Boards feed either 12.288 MHz or
+	 * 9.6 MHz; the RPM divided clock used for 9.6 MHz does not report
+	 * its real rate, so treat anything other than 12.288 MHz as 9.6 MHz.
+	 */
+	if (clk_get_rate(wcd->mclk) == 12288000) {
+		regmap_update_bits(wcd->regmap, WCD9306_CHIP_CTL, 0x06, 0x00);
+		regmap_update_bits(wcd->regmap, WCD9306_RX_COM_TIMER_DIV, 0x01, 0x01);
+	} else {
+		regmap_update_bits(wcd->regmap, WCD9306_CHIP_CTL, 0x06, 0x02);
+	}
+
 	return 0;
 }
 
