@@ -504,6 +504,10 @@
 		interrupts-extended = <&tlmm 69 IRQ_TYPE_EDGE_RISING>;
 		vdd-supply = <&pm8226_lvs1>;
 		vddio-supply = <&pm8226_lvs1>;
+
+		mount-matrix = "0", "1", "0",
+			       "1", "0", "0",
+			       "0", "0", "-1";
 	};
 };
 
