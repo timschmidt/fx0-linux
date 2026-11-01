@@ -30,6 +30,9 @@
  * @supplies: Array of voltage regulators
  * @startup_delay: Milliseconds to pause after powering up the regulators
  * @reset_gpio: Optional GPIO held asserted while the device is powered off
+ * @panel_follower: Callbacks for sequencing with an in-cell display panel
+ * @is_panel_follower: Whether system sleep defers sequencing to the panel
+ * @powered: Whether this driver holds the regulator enable references
  */
 struct rmi_i2c_xport {
 	struct rmi_transport_dev xport;
@@ -434,17 +437,11 @@ static int rmi_i2c_runtime_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct rmi_i2c_xport *rmi_i2c = i2c_get_clientdata(client);
-	int ret;
 
-	ret = rmi_driver_suspend(rmi_i2c->xport.rmi_dev, false);
-	if (ret)
-		dev_warn(dev, "Failed to resume device: %d\n", ret);
+	if (rmi_i2c->is_panel_follower)
+		return 0;
 
-	if (rmi_i2c->reset_gpio)
-		gpiod_set_value_cansleep(rmi_i2c->reset_gpio, 1);
-
-	regulator_bulk_disable(ARRAY_SIZE(rmi_i2c->supplies),
-			       rmi_i2c->supplies);
+	rmi_i2c_power_off(rmi_i2c, false);
 
 	return 0;
 }
@@ -455,17 +452,14 @@ static int rmi_i2c_runtime_resume(struct device *dev)
 	struct rmi_i2c_xport *rmi_i2c = i2c_get_clientdata(client);
 	int ret;
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(rmi_i2c->supplies),
-				    rmi_i2c->supplies);
-	if (ret)
+	if (rmi_i2c->is_panel_follower)
+		return 0;
+
+	ret = rmi_i2c_power_on(rmi_i2c, false);
+	if (!rmi_i2c->powered)
 		return ret;
 
-	rmi_i2c_release_reset(rmi_i2c);
-
-	ret = rmi_driver_resume(rmi_i2c->xport.rmi_dev, false);
-	if (ret)
-		dev_warn(dev, "Failed to resume device: %d\n", ret);
-
+	/* Preserve the existing warning-only handling of function-resume errors. */
 	return 0;
 }
 
