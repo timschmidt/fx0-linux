@@ -383,6 +383,7 @@
 		interrupt-parent = <&tlmm>;
 		interrupts = <17 IRQ_TYPE_EDGE_FALLING>;
 		reset-gpios = <&tlmm 16 GPIO_ACTIVE_LOW>;
+		panel = <&panel>;
 		vdd-supply = <&pm8226_l28>;
 		vio-supply = <&pm8226_l6>;
 		syna,startup-delay-ms = <60>;
@@ -412,7 +413,7 @@
 	vdda-supply = <&pm8226_l4>;
 	vddio-supply = <&pm8226_l8>;
 
-	panel@0 {
+	panel: panel@0 {
 		compatible = "lg,fx0-panel";
 		reg = <0>;
 		vdd-supply = <&pm8226_l28>;
