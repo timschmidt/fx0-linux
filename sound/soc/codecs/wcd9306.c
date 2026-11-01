@@ -30,7 +30,11 @@
 /* SLIMbus RX ports start at 16; the interface layout matches WCD9335. */
 #define WCD9306_RX_PORT_START		16
 #define WCD9306_RX_MAX			5
-/* AIF1 playback uses RX1 and RX2 (SLIMbus ports 16 and 17). */
+/*
+ * AIF1 playback uses RX1 and RX2 (SLIMbus ports 16 and 17). Every port of a
+ * multi-channel group must have a consumer, or the group stalls and the
+ * ports overflow.
+ */
 #define WCD9306_AIF1_PB_CHANNELS	2
 #define WCD9306_SLIM_PGD_RX_PORT_CFG(p)		(0x30 + (p))
 #define WCD9306_SLIM_PGD_RX_PORT_MULTI_CHNL_0(p) (0x140 + 4 * (p))
@@ -187,6 +191,27 @@ struct wcd9306_reg_mask_val {
 	u8 val;
 };
 
+/* Reset values the vendor driver writes first on version 2.x parts. */
+static const struct wcd9306_reg_mask_val wcd9306_2_x_reg_reset_values[] = {
+	{ WCD9306_TX_7_MBHC_EN, 0xff, 0x6c },
+	{ WCD9306_BUCK_CTRL_CCL_4, 0xff, 0x51 },
+	{ WCD9306_RX_HPH_CNP_WG_CTL, 0xff, 0xda },
+	{ WCD9306_RX_EAR_CNP, 0xff, 0xc0 },
+	{ WCD9306_RX_LINE_1_TEST, 0xff, 0x02 },
+	{ WCD9306_RX_LINE_2_TEST, 0xff, 0x02 },
+	{ WCD9306_SPKR_DRV_OCP_CTL, 0xff, 0x97 },
+	{ WCD9306_SPKR_DRV_CLIP_DET, 0xff, 0x01 },
+	{ WCD9306_SPKR_DRV_IEC, 0xff, 0x00 },
+	{ WCD9306_CDC_CLSH_B1_CTL, 0xff, 0xe4 },
+	{ WCD9306_CDC_CLSH_B2_CTL, 0xff, 0x00 },
+	{ WCD9306_CDC_CLSH_B3_CTL, 0xff, 0x00 },
+	{ WCD9306_CDC_CLSH_BUCK_NCP_VARS, 0xff, 0x00 },
+	{ WCD9306_CDC_CLSH_V_PA_HD_EAR, 0xff, 0x00 },
+	{ WCD9306_CDC_CLSH_V_PA_HD_HPH, 0xff, 0x00 },
+	{ WCD9306_CDC_CLSH_V_PA_MIN_EAR, 0xff, 0x00 },
+	{ WCD9306_CDC_CLSH_V_PA_MIN_HPH, 0xff, 0x00 },
+};
+
 /* Register defaults and init values from the vendor codec driver. */
 static const struct wcd9306_reg_mask_val wcd9306_reg_defaults[] = {
 	{ WCD9306_QFUSE_CTL, 0xff, 0x03 },
@@ -253,6 +278,9 @@ static void wcd9306_init_regs(struct wcd9306_codec *wcd)
 {
 	int i;
 
+	for (i = 0; i < ARRAY_SIZE(wcd9306_2_x_reg_reset_values); i++)
+		regmap_write(wcd->regmap, wcd9306_2_x_reg_reset_values[i].reg,
+			     wcd9306_2_x_reg_reset_values[i].val);
 	for (i = 0; i < ARRAY_SIZE(wcd9306_reg_defaults); i++)
 		regmap_write(wcd->regmap, wcd9306_reg_defaults[i].reg,
 			     wcd9306_reg_defaults[i].val);
@@ -321,11 +349,19 @@ static int wcd9306_codec_enable_interpolator(struct snd_soc_dapm_widget *w,
 {
 	struct snd_soc_component *comp = snd_soc_dapm_to_component(w->dapm);
 
-	if (event == SND_SOC_DAPM_PRE_PMU) {
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
 		snd_soc_component_update_bits(comp, WCD9306_CDC_CLK_RX_RESET_CTL,
 					      BIT(w->shift), BIT(w->shift));
 		snd_soc_component_update_bits(comp, WCD9306_CDC_CLK_RX_RESET_CTL,
 					      BIT(w->shift), 0);
+		break;
+	case SND_SOC_DAPM_POST_PMU:
+		/* The digital gain takes effect once rewritten after enable. */
+		snd_soc_component_write(comp, WCD9306_CDC_RX3_VOL_CTL_B2_CTL,
+					snd_soc_component_read(comp,
+							       WCD9306_CDC_RX3_VOL_CTL_B2_CTL));
+		break;
 	}
 
 	return 0;
@@ -359,6 +395,12 @@ static SOC_ENUM_SINGLE_DECL(rx3_mix1_inp1_enum, WCD9306_CDC_CONN_RX3_B1_CTL, 0,
 static const struct snd_kcontrol_new rx3_mix1_inp1_mux =
 	SOC_DAPM_ENUM("RX3 MIX1 INP1 Mux", rx3_mix1_inp1_enum);
 
+static SOC_ENUM_SINGLE_DECL(rx3_mix1_inp2_enum, WCD9306_CDC_CONN_RX3_B1_CTL, 4,
+			    rx_3_4_mix1_text);
+
+static const struct snd_kcontrol_new rx3_mix1_inp2_mux =
+	SOC_DAPM_ENUM("RX3 MIX1 INP2 Mux", rx3_mix1_inp2_enum);
+
 static const struct snd_kcontrol_new spk_dac_switch[] = {
 	SOC_DAPM_SINGLE("Switch", WCD9306_SPKR_DRV_DAC_CTL, 2, 1, 0),
 };
@@ -376,10 +418,13 @@ static const struct snd_soc_dapm_widget wcd9306_dapm_widgets[] = {
 			    wcd9306_codec_enable_mclk,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_MUX("RX3 MIX1 INP1", SND_SOC_NOPM, 0, 0, &rx3_mix1_inp1_mux),
+	SND_SOC_DAPM_MUX("RX3 MIX1 INP2", SND_SOC_NOPM, 0, 0, &rx3_mix1_inp2_mux),
 	SND_SOC_DAPM_MIXER_E("RX3 MIX1", WCD9306_CDC_CLK_RX_B1_CTL, 2, 0, NULL, 0,
-			     wcd9306_codec_enable_interpolator, SND_SOC_DAPM_PRE_PMU),
+			     wcd9306_codec_enable_interpolator,
+			     SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 	SND_SOC_DAPM_MIXER("SPK DAC", SND_SOC_NOPM, 0, 0, spk_dac_switch,
 			   ARRAY_SIZE(spk_dac_switch)),
+	SND_SOC_DAPM_SUPPLY("RX_BIAS", WCD9306_RX_COM_BIAS, 7, 0, NULL, 0),
 	SND_SOC_DAPM_REGULATOR_SUPPLY("vdd-spkdrv", 0, 0),
 	SND_SOC_DAPM_PGA_E("SPK PA", SND_SOC_NOPM, 0, 0, NULL, 0,
 			   wcd9306_codec_enable_spk_pa,
@@ -390,10 +435,15 @@ static const struct snd_soc_dapm_widget wcd9306_dapm_widgets[] = {
 static const struct snd_soc_dapm_route wcd9306_audio_map[] = {
 	{ "AIF1 PB", NULL, "MCLK" },
 	{ "RX3 MIX1 INP1", "RX1", "AIF1 PB" },
+	{ "RX3 MIX1 INP1", "RX2", "AIF1 PB" },
+	{ "RX3 MIX1 INP2", "RX1", "AIF1 PB" },
+	{ "RX3 MIX1 INP2", "RX2", "AIF1 PB" },
 	{ "RX3 MIX1", NULL, "RX3 MIX1 INP1" },
+	{ "RX3 MIX1", NULL, "RX3 MIX1 INP2" },
 	{ "RX3 MIX1", NULL, "MCLK" },
 	{ "SPK DAC", "Switch", "RX3 MIX1" },
 	{ "SPK DAC", NULL, "vdd-spkdrv" },
+	{ "SPK DAC", NULL, "RX_BIAS" },
 	{ "SPK PA", NULL, "SPK DAC" },
 	{ "SPK_OUT", NULL, "SPK PA" },
 };
@@ -594,6 +644,9 @@ static int wcd9306_component_probe(struct snd_soc_component *comp)
 
 	snd_soc_component_init_regmap(comp, wcd->regmap);
 	wcd9306_init_regs(wcd);
+
+	/* Start at the stock speaker level, -24 dB digital gain. */
+	regmap_write(wcd->regmap, WCD9306_CDC_RX3_VOL_CTL_B2_CTL, 0xe8);
 
 	/*
 	 * Tell the codec its MCLK rate. Boards feed either 12.288 MHz or
