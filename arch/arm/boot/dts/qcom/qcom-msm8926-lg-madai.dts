@@ -29,7 +29,21 @@
 	};
 
 	chosen {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
 		stdout-path = "serial0";
+
+		/* Filled in and enabled by lk2nd */
+		framebuffer {
+			compatible = "simple-framebuffer";
+			clocks = <&mmcc MDSS_AHB_CLK>,
+				 <&mmcc MDSS_AXI_CLK>,
+				 <&mmcc MDSS_MDP_CLK>;
+			power-domains = <&mmcc MDSS_GDSC>;
+			status = "disabled";
+		};
 	};
 
 	gpio-keys {
