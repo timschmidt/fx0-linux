@@ -158,6 +158,36 @@ static void mdp5_plane_cleanup_fb(struct drm_plane *plane,
 	msm_framebuffer_cleanup(fb, needed_dirtyfb);
 }
 
+/*
+ * drm_atomic_helper_resume() restores the plane states saved before suspend,
+ * but not the global state, in which the suspend commit released every
+ * hwpipe. Forget hwpipes that the global state does not assign to this
+ * plane, so they get assigned again instead of being used unowned and
+ * failing to be released later.
+ */
+static int mdp5_plane_drop_stale_hwpipes(struct drm_plane_state *state)
+{
+	struct mdp5_plane_state *mdp5_state = to_mdp5_plane_state(state);
+	struct mdp5_global_state *global;
+	struct drm_plane **owner;
+
+	if (!mdp5_state->hwpipe && !mdp5_state->r_hwpipe)
+		return 0;
+
+	global = mdp5_get_global_state(state->state);
+	if (IS_ERR(global))
+		return PTR_ERR(global);
+
+	owner = global->hwpipe.hwpipe_to_plane;
+	if (mdp5_state->hwpipe && owner[mdp5_state->hwpipe->idx] != state->plane)
+		mdp5_state->hwpipe = NULL;
+	if (mdp5_state->r_hwpipe &&
+	    owner[mdp5_state->r_hwpipe->idx] != state->plane)
+		mdp5_state->r_hwpipe = NULL;
+
+	return 0;
+}
+
 static int mdp5_plane_atomic_check_with_state(struct drm_crtc_state *crtc_state,
 					      struct drm_plane_state *state)
 {
@@ -175,6 +205,10 @@ static int mdp5_plane_atomic_check_with_state(struct drm_crtc_state *crtc_state,
 
 	DBG("%s: check (%d -> %d)", plane->name,
 			plane_enabled(old_state), plane_enabled(state));
+
+	ret = mdp5_plane_drop_stale_hwpipes(state);
+	if (ret)
+		return ret;
 
 	max_width = config->hw->lm.max_width << 16;
 	max_height = config->hw->lm.max_height << 16;
