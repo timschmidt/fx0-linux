@@ -270,6 +270,16 @@
 	regulators {
 		compatible = "qcom,rpm-pm8226-regulators";
 
+		pm8226_s4: s4 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		pm8226_l25: l25 {
+			regulator-min-microvolt = <1775000>;
+			regulator-max-microvolt = <2125000>;
+		};
+
 		pm8226_l3: l3 {
 			regulator-min-microvolt = <750000>;
 			regulator-max-microvolt = <1337500>;
@@ -619,6 +629,8 @@
 			pinctrl-0 = <&cdc_mclk_default>;
 			pinctrl-names = "default";
 			vdd-spkdrv-supply = <&spk_boost>;
+			vdd-buck-supply = <&pm8226_s4>;
+			vdd-buckhelper-supply = <&pm8226_l25>;
 			reset-gpios = <&tlmm 72 GPIO_ACTIVE_LOW>;
 			vdd-h-supply = <&pm8226_l6>;
 			vdd-px-supply = <&pm8226_l6>;
