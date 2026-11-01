@@ -94,6 +94,14 @@
 			};
 		};
 
+		mm2-dai-link {
+			link-name = "MultiMedia2";
+
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
+			};
+		};
+
 		slim-dai-link {
 			link-name = "SLIM Playback";
 
@@ -107,6 +115,22 @@
 
 			codec {
 				sound-dai = <&tapan_codec 0>;
+			};
+		};
+
+		slim-tx-dai-link {
+			link-name = "SLIM Capture";
+
+			cpu {
+				sound-dai = <&q6afedai SLIMBUS_0_TX>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&tapan_codec 1>;
 			};
 		};
 	};
