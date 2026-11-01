@@ -30,6 +30,8 @@
 /* SLIMbus RX ports start at 16; the interface layout matches WCD9335. */
 #define WCD9306_RX_PORT_START		16
 #define WCD9306_RX_MAX			5
+/* AIF1 playback uses RX1 and RX2 (SLIMbus ports 16 and 17). */
+#define WCD9306_AIF1_PB_CHANNELS	2
 #define WCD9306_SLIM_PGD_RX_PORT_CFG(p)		(0x30 + (p))
 #define WCD9306_SLIM_PGD_RX_PORT_MULTI_CHNL_0(p) (0x140 + 4 * (p))
 /* 12-byte watermark, port enabled */
@@ -551,9 +553,13 @@ static int wcd9306_get_channel_map(const struct snd_soc_dai *dai,
 	if (!rx_slot || !rx_num)
 		return -EINVAL;
 
-	for (i = 0; i < wcd->num_rx_port; i++)
+	if (wcd->num_rx_port < WCD9306_AIF1_PB_CHANNELS)
+		return -EINVAL;
+
+	/* Report only the channels this DAI streams on. */
+	for (i = 0; i < WCD9306_AIF1_PB_CHANNELS; i++)
 		rx_slot[i] = wcd->rx_chs[i].ch_num;
-	*rx_num = wcd->num_rx_port;
+	*rx_num = WCD9306_AIF1_PB_CHANNELS;
 
 	return 0;
 }
@@ -575,8 +581,8 @@ static struct snd_soc_dai_driver wcd9306_dais[] = {
 				 SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000 |
 				 SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE,
-			.channels_min = 1,
-			.channels_max = 2,
+			.channels_min = WCD9306_AIF1_PB_CHANNELS,
+			.channels_max = WCD9306_AIF1_PB_CHANNELS,
 		},
 		.ops = &wcd9306_dai_ops,
 	},
