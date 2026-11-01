@@ -620,25 +620,35 @@ static int inv_mpu6050_init_config(struct iio_dev *indio_dev)
 	return 0;
 }
 
+/*
+ * Offset registers are 16-bit big-endian pairs, one per axis. The MPU-6500
+ * family keeps each accelerometer pair in a three-register slot
+ * (XA_OFFSET_H at 0x77, YA_OFFSET_H at 0x7a, ZA_OFFSET_H at 0x7d).
+ */
+static unsigned int inv_mpu6050_offset_reg(int reg, int axis)
+{
+	unsigned int stride = reg == INV_MPU6500_REG_ACCEL_OFFSET ? 3 : 2;
+
+	return reg + (axis - IIO_MOD_X) * stride;
+}
+
 static int inv_mpu6050_sensor_set(struct inv_mpu6050_state  *st, int reg,
 				int axis, int val)
 {
-	int ind;
 	__be16 d = cpu_to_be16(val);
 
-	ind = (axis - IIO_MOD_X) * 2;
-
-	return regmap_bulk_write(st->map, reg + ind, &d, sizeof(d));
+	return regmap_bulk_write(st->map, inv_mpu6050_offset_reg(reg, axis),
+				 &d, sizeof(d));
 }
 
 static int inv_mpu6050_sensor_show(struct inv_mpu6050_state  *st, int reg,
 				   int axis, int *val)
 {
-	int ind, result;
+	int result;
 	__be16 d;
 
-	ind = (axis - IIO_MOD_X) * 2;
-	result = regmap_bulk_read(st->map, reg + ind, &d, sizeof(d));
+	result = regmap_bulk_read(st->map, inv_mpu6050_offset_reg(reg, axis),
+				  &d, sizeof(d));
 	if (result)
 		return result;
 	*val = (short)be16_to_cpup(&d);
