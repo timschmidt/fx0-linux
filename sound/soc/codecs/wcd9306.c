@@ -34,8 +34,8 @@
 #define WCD9306_AIF1_PB_CHANNELS	2
 #define WCD9306_SLIM_PGD_RX_PORT_CFG(p)		(0x30 + (p))
 #define WCD9306_SLIM_PGD_RX_PORT_MULTI_CHNL_0(p) (0x140 + 4 * (p))
-/* 12-byte watermark, port enabled */
-#define WCD9306_SLIM_WATER_MARK_VAL	((3 << 1) | 1)
+/* 12-byte watermark (value 2), port enabled */
+#define WCD9306_SLIM_WATER_MARK_VAL	((2 << 1) | 1)
 
 enum {
 	AIF1_PB = 0,
