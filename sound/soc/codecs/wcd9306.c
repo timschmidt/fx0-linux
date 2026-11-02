@@ -1033,6 +1033,8 @@ static int wcd9306_trigger(struct snd_pcm_substream *substream, int cmd,
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 		if (wcd->slim_on[dai->id])
 			break;
+		if (slim_delay_ms > 0) /* TEST */
+			msleep(slim_delay_ms);
 		{
 			int r1 = slim_stream_prepare(srt, &wcd->sconfig[dai->id]);
 			int r2 = slim_stream_enable(srt);
