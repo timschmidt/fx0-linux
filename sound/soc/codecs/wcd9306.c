@@ -855,6 +855,47 @@ static int wcd9306_slim_set_hw_params(struct wcd9306_codec *wcd, int dai_id,
 	return IS_ERR(wcd->sruntime[dai_id]) ? PTR_ERR(wcd->sruntime[dai_id]) : 0;
 }
 
+/*
+ * The codec unpacks each SLIMbus RX port according to a 2-bit sample
+ * format field: 0 for 24-bit and 2 for 16-bit samples.
+ */
+static int wcd9306_set_rx_port_format(struct wcd9306_codec *wcd,
+				      unsigned int width, unsigned int channels)
+{
+	unsigned int bit_sel, reg, shift, i;
+	int ret;
+
+	switch (width) {
+	case 16:
+		bit_sel = 0x2;
+		break;
+	case 24:
+		bit_sel = 0x0;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	for (i = 0; i < channels && i < wcd->num_rx_port; i++) {
+		unsigned int port = wcd->rx_chs[i].port - WCD9306_RX_PORT_START;
+
+		if (port <= 3) {
+			reg = WCD9306_CDC_CONN_RX_SB_B1_CTL;
+			shift = port * 2;
+		} else {
+			reg = WCD9306_CDC_CONN_RX_SB_B2_CTL;
+			shift = (port - 4) * 2;
+		}
+
+		ret = regmap_update_bits(wcd->regmap, reg, 0x3 << shift,
+					 bit_sel << shift);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 static int wcd9306_hw_params(struct snd_pcm_substream *substream,
 			     struct snd_pcm_hw_params *params,
 			     struct snd_soc_dai *dai)
@@ -879,6 +920,13 @@ static int wcd9306_hw_params(struct snd_pcm_substream *substream,
 		return -EINVAL;
 	}
 	wcd->sconfig[dai->id].rate = params_rate(params);
+
+	if (dai->id == AIF1_PB) {
+		ret = wcd9306_set_rx_port_format(wcd, params_width(params),
+						 params_channels(params));
+		if (ret)
+			return ret;
+	}
 
 	return wcd9306_slim_set_hw_params(wcd, dai->id, params_channels(params));
 }
