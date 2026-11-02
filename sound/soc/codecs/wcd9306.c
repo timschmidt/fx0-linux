@@ -26,6 +26,8 @@
 /* TEST: where to define and activate SLIMbus channels: 0 trigger, 1 hw_params, 2 prepare */
 static int slim_early;
 module_param(slim_early, int, 0644);
+static int slim_delay_ms;
+module_param(slim_delay_ms, int, 0644);
 
 #define SLIM_MANF_ID_QCOM		0x217
 #define SLIM_PROD_CODE_WCD9306		0xe0
@@ -990,6 +992,8 @@ static int wcd9306_prepare(struct snd_pcm_substream *substream,
 	int ret = 0;
 
 	if (slim_early == 2 && !wcd->slim_on[dai->id]) { /* TEST */
+		if (slim_delay_ms > 0)
+			msleep(slim_delay_ms);
 		ret = slim_stream_prepare(wcd->sruntime[dai->id], &wcd->sconfig[dai->id]);
 		if (!ret)
 			ret = slim_stream_enable(wcd->sruntime[dai->id]);
