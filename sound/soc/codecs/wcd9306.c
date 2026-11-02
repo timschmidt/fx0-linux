@@ -1050,6 +1050,16 @@ static int wcd9306_trigger(struct snd_pcm_substream *substream, int cmd,
 				 dai->name, r1, r2, ktime_to_us(ktime_get()));
 			if (slim_early == 3 && dai->id == AIF1_PB && !r1 && !r2)
 				wcd->slim_keep[dai->id] = true; /* TEST: keep the channel */
+			if (slim_early == 4 && dai->id == AIF1_PB && !r1 && !r2) {
+				/* TEST: reactivate once the whole stream is running */
+				msleep(slim_delay_ms > 0 ? slim_delay_ms : 100);
+				slim_stream_disable(srt);
+				slim_stream_unprepare(srt);
+				r1 = slim_stream_prepare(srt, &wcd->sconfig[dai->id]);
+				r2 = slim_stream_enable(srt);
+				dev_info(wcd->dev, "TEST %s slim re-activate prep %d en %d t=%lld us\n",
+					 dai->name, r1, r2, ktime_to_us(ktime_get()));
+			}
 		}
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
