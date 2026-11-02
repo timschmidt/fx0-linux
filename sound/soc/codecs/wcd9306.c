@@ -23,9 +23,9 @@
 
 #include "wcd9306.h"
 
-/* TEST: define and activate SLIMbus channels in hw_params instead of trigger */
-static bool slim_early;
-module_param(slim_early, bool, 0644);
+/* TEST: where to define and activate SLIMbus channels: 0 trigger, 1 hw_params, 2 prepare */
+static int slim_early;
+module_param(slim_early, int, 0644);
 
 #define SLIM_MANF_ID_QCOM		0x217
 #define SLIM_PROD_CODE_WCD9306		0xe0
@@ -971,12 +971,30 @@ static int wcd9306_hw_params(struct snd_pcm_substream *substream,
 	if (ret)
 		return ret;
 
-	if (slim_early && !wcd->slim_on[dai->id]) { /* TEST */
+	if (slim_early == 1 && !wcd->slim_on[dai->id]) { /* TEST */
 		ret = slim_stream_prepare(wcd->sruntime[dai->id], &wcd->sconfig[dai->id]);
 		if (!ret)
 			ret = slim_stream_enable(wcd->sruntime[dai->id]);
 		wcd->slim_on[dai->id] = !ret;
 		dev_info(wcd->dev, "TEST %s slim early start ret %d t=%lld us\n",
+			 dai->name, ret, ktime_to_us(ktime_get()));
+	}
+
+	return ret;
+}
+
+static int wcd9306_prepare(struct snd_pcm_substream *substream,
+			   struct snd_soc_dai *dai)
+{
+	struct wcd9306_codec *wcd = snd_soc_component_get_drvdata(dai->component);
+	int ret = 0;
+
+	if (slim_early == 2 && !wcd->slim_on[dai->id]) { /* TEST */
+		ret = slim_stream_prepare(wcd->sruntime[dai->id], &wcd->sconfig[dai->id]);
+		if (!ret)
+			ret = slim_stream_enable(wcd->sruntime[dai->id]);
+		wcd->slim_on[dai->id] = !ret;
+		dev_info(wcd->dev, "TEST %s slim prepare start ret %d t=%lld us\n",
 			 dai->name, ret, ktime_to_us(ktime_get()));
 	}
 
@@ -1100,6 +1118,7 @@ static const struct snd_soc_dai_ops wcd9306_dai_ops = {
 	.hw_params = wcd9306_hw_params,
 	.trigger = wcd9306_trigger,
 	.hw_free = wcd9306_hw_free,
+	.prepare = wcd9306_prepare,
 	.set_channel_map = wcd9306_set_channel_map,
 	.get_channel_map = wcd9306_get_channel_map,
 };

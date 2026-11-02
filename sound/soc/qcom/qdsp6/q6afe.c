@@ -1731,6 +1731,9 @@ int q6afe_port_start(struct q6afe_port *port)
 	start->port_id = port_id;
 
 	ret = afe_apr_send_pkt(afe, pkt, port, AFE_PORT_CMD_DEVICE_START);
+	if (param_id == AFE_PARAM_ID_SLIMBUS_CONFIG) /* TEST */
+		dev_info(afe->dev, "t=%lld us port 0x%x device start ret %d\n",
+			 ktime_to_us(ktime_get()), port_id, ret);
 	if (ret)
 		dev_err(afe->dev, "AFE enable for port 0x%x failed %d\n",
 			port_id, ret);
