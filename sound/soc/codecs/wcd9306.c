@@ -85,6 +85,7 @@ struct wcd9306_codec {
 	struct slim_stream_runtime *sruntime[NUM_CODEC_DAIS];
 	struct slim_stream_config sconfig[NUM_CODEC_DAIS];
 	bool slim_on[NUM_CODEC_DAIS]; /* TEST */
+	bool slim_keep[NUM_CODEC_DAIS]; /* TEST */
 };
 
 static bool wcd9306_readable_reg(struct device *dev, unsigned int reg)
@@ -1010,7 +1011,7 @@ static int wcd9306_hw_free(struct snd_pcm_substream *substream,
 {
 	struct wcd9306_codec *wcd = snd_soc_component_get_drvdata(dai->component);
 
-	if (wcd->slim_on[dai->id]) { /* TEST */
+	if (wcd->slim_on[dai->id] && !wcd->slim_keep[dai->id]) { /* TEST */
 		slim_stream_disable(wcd->sruntime[dai->id]);
 		slim_stream_unprepare(wcd->sruntime[dai->id]);
 		wcd->slim_on[dai->id] = false;
@@ -1047,6 +1048,8 @@ static int wcd9306_trigger(struct snd_pcm_substream *substream, int cmd,
 
 			dev_info(wcd->dev, "TEST %s slim trigger start prep %d en %d t=%lld us\n",
 				 dai->name, r1, r2, ktime_to_us(ktime_get()));
+			if (slim_early == 3 && dai->id == AIF1_PB && !r1 && !r2)
+				wcd->slim_keep[dai->id] = true; /* TEST: keep the channel */
 		}
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
@@ -1054,6 +1057,10 @@ static int wcd9306_trigger(struct snd_pcm_substream *substream, int cmd,
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		if (wcd->slim_on[dai->id])
 			break;
+		if (wcd->slim_keep[dai->id]) { /* TEST: leave the channel active */
+			wcd->slim_on[dai->id] = true;
+			break;
+		}
 		slim_stream_disable(srt);
 		slim_stream_unprepare(srt);
 		{
