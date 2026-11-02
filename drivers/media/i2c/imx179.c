@@ -362,11 +362,32 @@ static const struct v4l2_subdev_video_ops imx179_video_ops = {
 	.s_stream = v4l2_subdev_s_stream_helper,
 };
 
+static int imx179_get_selection(struct v4l2_subdev *sd,
+				struct v4l2_subdev_state *state,
+				struct v4l2_subdev_selection *sel)
+{
+	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+	case V4L2_SEL_TGT_CROP_DEFAULT:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+	case V4L2_SEL_TGT_NATIVE_SIZE:
+		/* The only mode reads out the whole active pixel array. */
+		sel->r.left = 0;
+		sel->r.top = 0;
+		sel->r.width = IMX179_WIDTH;
+		sel->r.height = IMX179_HEIGHT;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
 static const struct v4l2_subdev_pad_ops imx179_pad_ops = {
 	.enum_mbus_code = imx179_enum_mbus_code,
 	.enum_frame_size = imx179_enum_frame_size,
 	.get_fmt = v4l2_subdev_get_fmt,
 	.set_fmt = imx179_set_format,
+	.get_selection = imx179_get_selection,
 	.enable_streams = imx179_enable_streams,
 	.disable_streams = imx179_disable_streams,
 };
