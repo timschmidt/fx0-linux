@@ -23956,6 +23956,7 @@ M:	Timothy Schmidt <timschmidt@gmail.com>
 L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/media/i2c/sony,imx132.yaml
+F:	drivers/media/i2c/imx132.c
 
 SONY IMX179 SENSOR DRIVER
 M:	Timothy Schmidt <timschmidt@gmail.com>

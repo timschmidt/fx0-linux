@@ -376,6 +376,10 @@ static int imx132_set_format(struct v4l2_subdev *sd,
 	const struct imx132_mode *mode;
 	int vblank, ret;
 
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE &&
+	    v4l2_subdev_is_streaming(sd))
+		return -EBUSY;
+
 	mode = v4l2_find_nearest_size(imx132_modes, ARRAY_SIZE(imx132_modes),
 				      width, height, fmt->format.width,
 				      fmt->format.height);
@@ -447,6 +451,9 @@ static int imx132_disable_streams(struct v4l2_subdev *sd,
 
 	ret = cci_write(imx132->regmap, IMX132_REG_MODE_SELECT,
 			IMX132_MODE_STANDBY, NULL);
+	if (ret)
+		return ret;
+
 	pm_runtime_put(imx132->dev);
 
 	return ret;
