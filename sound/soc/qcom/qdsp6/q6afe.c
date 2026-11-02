@@ -35,6 +35,19 @@
 #define AFE_MODULE_TDM			0x0001028A
 
 #define AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG 0x00010235
+#define AFE_MODULE_CDC_DEV_CFG		0x00010234
+
+/* TEST: codec SLIMbus slave description, as the downstream MSM8226 machine driver sends */
+struct afe_param_cdc_slimbus_slave_cfg {
+	u32 minor_version;
+	u32 device_enum_addr_lsw;
+	u32 device_enum_addr_msw;
+	u16 tx_slave_port_offset;
+	u16 rx_slave_port_offset;
+} __packed;
+static bool slave_cfg_sent;
+static bool send_slave_cfg = true;
+module_param(send_slave_cfg, bool, 0644);
 #define AFE_PARAM_ID_USB_AUDIO_DEV_PARAMS    0x000102A5
 #define AFE_PARAM_ID_USB_AUDIO_DEV_LPCM_FMT 0x000102AA
 
@@ -1677,6 +1690,21 @@ int q6afe_port_start(struct q6afe_port *port)
 	struct apr_pkt *pkt;
 	int pkt_size;
 	void *p;
+
+	if (param_id == AFE_PARAM_ID_SLIMBUS_CONFIG && send_slave_cfg && !slave_cfg_sent) { /* TEST */
+		struct afe_param_cdc_slimbus_slave_cfg sc = {
+			.minor_version = 1,
+			.device_enum_addr_lsw = 0x00e00100, /* WCD9306: instance 0, device 1, product 0xe0 */
+			.device_enum_addr_msw = 0x0217,     /* manufacturer 0x217 */
+			.tx_slave_port_offset = 0,
+			.rx_slave_port_offset = 16,
+		};
+
+		ret = q6afe_set_param(afe, port, &sc, AFE_PARAM_ID_CDC_SLIMBUS_SLAVE_CFG,
+				      AFE_MODULE_CDC_DEV_CFG, sizeof(sc), port->token);
+		dev_info(afe->dev, "TEST slimbus slave cfg ret %d\n", ret);
+		slave_cfg_sent = !ret;
+	}
 
 	if (param_id == AFE_PARAM_ID_SLIMBUS_CONFIG) /* TEST */
 		dev_info(afe->dev, "t=%lld us port 0x%x slim cfg ver %u dev %u bits %u ch %u fmt %u rate %u map %u %u %u %u size %zu\n",

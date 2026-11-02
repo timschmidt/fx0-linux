@@ -1036,6 +1036,12 @@ static int wcd9306_trigger(struct snd_pcm_substream *substream, int cmd,
 		if (slim_delay_ms > 0) /* TEST */
 			msleep(slim_delay_ms);
 		{
+			int i;
+
+			for (i = 0; i < 4; i++) /* TEST: clear latched port interrupts */
+				regmap_write(wcd->if_regmap, 0x38 + i, 0xff);
+		}
+		{
 			int r1 = slim_stream_prepare(srt, &wcd->sconfig[dai->id]);
 			int r2 = slim_stream_enable(srt);
 
@@ -1050,6 +1056,12 @@ static int wcd9306_trigger(struct snd_pcm_substream *substream, int cmd,
 			break;
 		slim_stream_disable(srt);
 		slim_stream_unprepare(srt);
+		{
+			int i;
+
+			for (i = 0; i < 4; i++) /* TEST: clear latched port interrupts */
+				regmap_write(wcd->if_regmap, 0x38 + i, 0xff);
+		}
 		dev_info(wcd->dev, "TEST %s slim trigger stop t=%lld us\n",
 			 dai->name, ktime_to_us(ktime_get()));
 		break;
