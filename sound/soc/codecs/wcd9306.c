@@ -857,7 +857,7 @@ static int wcd9306_slim_set_hw_params(struct wcd9306_codec *wcd, int dai_id,
 	}
 
 	if (!wcd->sruntime[dai_id])
-		wcd->sruntime[dai_id] = slim_stream_allocate(wcd->slim,
+		wcd->sruntime[dai_id] = slim_stream_allocate(wcd->slim_ifc_dev, /* TEST: ports live on the interface device */
 							     capture ? "WCD9306-SLIM-TX" :
 								       "WCD9306-SLIM-RX");
 
