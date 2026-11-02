@@ -22,7 +22,11 @@ static int apq8096_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 					SNDRV_PCM_HW_PARAM_CHANNELS);
 
 	rate->min = rate->max = 48000;
-	channels->min = channels->max = 2;
+	/* TEST: let mono streams through */
+	if (channels->max > 2)
+		channels->max = 2;
+	if (channels->min < 1)
+		channels->min = 1;
 
 	return 0;
 }
@@ -48,7 +52,7 @@ static int msm_snd_hw_params(struct snd_pcm_substream *substream,
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 		ret = snd_soc_dai_set_channel_map(cpu_dai, 0, NULL,
-						  rx_ch_cnt, rx_ch);
+						  min(rx_ch_cnt, params_channels(params)), rx_ch);
 	else
 		ret = snd_soc_dai_set_channel_map(cpu_dai, tx_ch_cnt, tx_ch,
 						  0, NULL);

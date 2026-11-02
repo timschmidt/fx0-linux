@@ -1068,7 +1068,7 @@ static struct snd_soc_dai_driver wcd9306_dais[] = {
 				 SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000 |
 				 SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE,
-			.channels_min = WCD9306_AIF1_PB_CHANNELS,
+			.channels_min = 1, /* TEST */
 			.channels_max = WCD9306_AIF1_PB_CHANNELS,
 		},
 		.ops = &wcd9306_dai_ops,
