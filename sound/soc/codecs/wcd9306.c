@@ -359,6 +359,8 @@ static int wcd9306_codec_enable_interpolator(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
+		/* FX0 EXPERIMENT: stock RX3 path control value while playing */
+		snd_soc_component_write(comp, WCD9306_CDC_RX3_B6_CTL, 0x80);
 		snd_soc_component_update_bits(comp, WCD9306_CDC_CLK_RX_RESET_CTL,
 					      BIT(w->shift), BIT(w->shift));
 		snd_soc_component_update_bits(comp, WCD9306_CDC_CLK_RX_RESET_CTL,
@@ -1064,6 +1066,11 @@ static int wcd9306_component_probe(struct snd_soc_component *comp)
 
 	/* Start at the stock speaker level, -24 dB digital gain. */
 	regmap_write(wcd->regmap, WCD9306_CDC_RX3_VOL_CTL_B2_CTL, 0xe8);
+
+	/* FX0 EXPERIMENT: remaining stock playback values */
+	regmap_update_bits(wcd->regmap, WCD9306_LDO_H_MODE_1, 0x08, 0x08);
+	regmap_update_bits(wcd->regmap, WCD9306_CDC_CONN_CLSH_CTL, 0x0c, 0x00);
+	regmap_write(wcd->regmap, WCD9306_CDC_CONN_MISC, 0x07);
 
 	/* Stock main microphone setup: ADC1 analog gain and CFILT 1 level. */
 	regmap_update_bits(wcd->regmap, WCD9306_TX_1_EN, 0x7c, 0x30);
