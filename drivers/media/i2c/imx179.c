@@ -37,6 +37,8 @@
 
 #define IMX179_WIDTH			3280
 #define IMX179_HEIGHT			2464
+#define IMX179_BIN_WIDTH		1640
+#define IMX179_BIN_HEIGHT		1232
 #define IMX179_LINE_LENGTH		3440
 #define IMX179_FRAME_LENGTH_DEF		2507
 #define IMX179_FRAME_LENGTH_MAX		0xffff
@@ -62,8 +64,11 @@ static const char * const imx179_test_pattern_menu[] = {
 	"PN9",
 };
 
-/* 3280x2464 RAW10, 4 lanes, 24 MHz input, PLL 648 MHz: about 30 frames/s. */
-static const struct cci_reg_sequence imx179_mode_3280x2464[] = {
+/*
+ * RAW10, 4 lanes, 24 MHz input, PLL 648 MHz, whole active array: about 30
+ * frames/s. The modes differ only in the output size and binning below.
+ */
+static const struct cci_reg_sequence imx179_common_regs[] = {
 	{ CCI_REG8(0x0101), 0x00 },
 	{ CCI_REG8(0x0202), 0x09 },
 	{ CCI_REG8(0x0203), 0xc7 },
@@ -86,13 +91,8 @@ static const struct cci_reg_sequence imx179_mode_3280x2464[] = {
 	{ CCI_REG8(0x0349), 0xcf },
 	{ CCI_REG8(0x034a), 0x09 },
 	{ CCI_REG8(0x034b), 0x9f },
-	{ CCI_REG8(0x034c), 0x0c },
-	{ CCI_REG8(0x034d), 0xd0 },
-	{ CCI_REG8(0x034e), 0x09 },
-	{ CCI_REG8(0x034f), 0xa0 },
 	{ CCI_REG8(0x0383), 0x01 },
 	{ CCI_REG8(0x0387), 0x01 },
-	{ CCI_REG8(0x0390), 0x00 },
 	{ CCI_REG8(0x0401), 0x00 },
 	{ CCI_REG8(0x0405), 0x10 },
 	{ CCI_REG8(0x3020), 0x10 },
@@ -117,13 +117,52 @@ static const struct cci_reg_sequence imx179_mode_3280x2464[] = {
 	{ CCI_REG8(0x3376), 0x9f },
 	{ CCI_REG8(0x3377), 0x37 },
 	{ CCI_REG8(0x33c8), 0x00 },
-	{ CCI_REG8(0x33d4), 0x0c },
-	{ CCI_REG8(0x33d5), 0xd0 },
-	{ CCI_REG8(0x33d6), 0x09 },
-	{ CCI_REG8(0x33d7), 0xa0 },
 	{ CCI_REG8(0x4100), 0x0e },
 	{ CCI_REG8(0x4108), 0x01 },
 	{ CCI_REG8(0x4109), 0x7c },
+};
+
+static const struct cci_reg_sequence imx179_mode_3280x2464[] = {
+	{ CCI_REG16(0x034c), IMX179_WIDTH },
+	{ CCI_REG16(0x034e), IMX179_HEIGHT },
+	{ CCI_REG8(0x0390), 0x00 },
+	{ CCI_REG16(0x33d4), IMX179_WIDTH },
+	{ CCI_REG16(0x33d6), IMX179_HEIGHT },
+};
+
+/* 2x2 binning of the whole array, for preview. */
+static const struct cci_reg_sequence imx179_mode_1640x1232[] = {
+	{ CCI_REG16(0x034c), IMX179_BIN_WIDTH },
+	{ CCI_REG16(0x034e), IMX179_BIN_HEIGHT },
+	{ CCI_REG8(0x0390), 0x01 },
+	{ CCI_REG8(0x0391), 0x22 },
+	{ CCI_REG16(0x33d4), IMX179_BIN_WIDTH },
+	{ CCI_REG16(0x33d6), IMX179_BIN_HEIGHT },
+};
+
+struct imx179_mode {
+	u32 width;
+	u32 height;
+	const struct cci_reg_sequence *regs;
+	unsigned int num_regs;
+};
+
+/*
+ * Both modes keep the full-resolution frame length as their minimum, so the
+ * binned mode also runs at about 30 frames/s, as on the original system.
+ */
+static const struct imx179_mode imx179_modes[] = {
+	{
+		.width = IMX179_WIDTH,
+		.height = IMX179_HEIGHT,
+		.regs = imx179_mode_3280x2464,
+		.num_regs = ARRAY_SIZE(imx179_mode_3280x2464),
+	}, {
+		.width = IMX179_BIN_WIDTH,
+		.height = IMX179_BIN_HEIGHT,
+		.regs = imx179_mode_1640x1232,
+		.num_regs = ARRAY_SIZE(imx179_mode_1640x1232),
+	},
 };
 
 struct imx179 {
@@ -139,11 +178,24 @@ struct imx179 {
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_ctrl *vblank;
 	struct v4l2_ctrl *exposure;
+
+	/* Protected by the control handler lock, which is the state lock. */
+	const struct imx179_mode *mode;
 };
 
 static inline struct imx179 *to_imx179(struct v4l2_subdev *sd)
 {
 	return container_of(sd, struct imx179, sd);
+}
+
+static int imx179_update_exposure_range(struct imx179 *imx179, int vblank)
+{
+	int max = imx179->mode->height + vblank - IMX179_EXPOSURE_MARGIN;
+
+	return __v4l2_ctrl_modify_range(imx179->exposure,
+					imx179->exposure->minimum, max,
+					imx179->exposure->step,
+					min(imx179->exposure->val, max));
 }
 
 static int imx179_set_ctrl(struct v4l2_ctrl *ctrl)
@@ -153,12 +205,9 @@ static int imx179_set_ctrl(struct v4l2_ctrl *ctrl)
 	int ret = 0;
 
 	if (ctrl->id == V4L2_CID_VBLANK) {
-		int max = IMX179_HEIGHT + ctrl->val - IMX179_EXPOSURE_MARGIN;
-
-		__v4l2_ctrl_modify_range(imx179->exposure,
-					 imx179->exposure->minimum, max,
-					 imx179->exposure->step,
-					 min(imx179->exposure->val, max));
+		ret = imx179_update_exposure_range(imx179, ctrl->val);
+		if (ret)
+			return ret;
 	}
 
 	if (!pm_runtime_get_if_in_use(imx179->dev))
@@ -173,7 +222,7 @@ static int imx179_set_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_VBLANK:
 		cci_write(imx179->regmap, IMX179_REG_FRAME_LENGTH,
-			  IMX179_HEIGHT + ctrl->val, &ret);
+			  imx179->mode->height + ctrl->val, &ret);
 		break;
 	case V4L2_CID_TEST_PATTERN:
 		cci_write(imx179->regmap, IMX179_REG_TEST_PATTERN, ctrl->val, &ret);
@@ -255,10 +304,11 @@ static int imx179_init_controls(struct imx179 *imx179)
 	return 0;
 }
 
-static void imx179_fill_format(struct v4l2_mbus_framefmt *fmt)
+static void imx179_fill_format(struct v4l2_mbus_framefmt *fmt,
+			       const struct imx179_mode *mode)
 {
-	fmt->width = IMX179_WIDTH;
-	fmt->height = IMX179_HEIGHT;
+	fmt->width = mode->width;
+	fmt->height = mode->height;
 	fmt->code = MEDIA_BUS_FMT_SRGGB10_1X10;
 	fmt->field = V4L2_FIELD_NONE;
 	fmt->colorspace = V4L2_COLORSPACE_RAW;
@@ -270,7 +320,8 @@ static void imx179_fill_format(struct v4l2_mbus_framefmt *fmt)
 static int imx179_init_state(struct v4l2_subdev *sd,
 			     struct v4l2_subdev_state *state)
 {
-	imx179_fill_format(v4l2_subdev_state_get_format(state, 0));
+	imx179_fill_format(v4l2_subdev_state_get_format(state, 0),
+			   &imx179_modes[0]);
 
 	return 0;
 }
@@ -291,13 +342,14 @@ static int imx179_enum_frame_size(struct v4l2_subdev *sd,
 				  struct v4l2_subdev_state *state,
 				  struct v4l2_subdev_frame_size_enum *fse)
 {
-	if (fse->index || fse->code != MEDIA_BUS_FMT_SRGGB10_1X10)
+	if (fse->index >= ARRAY_SIZE(imx179_modes) ||
+	    fse->code != MEDIA_BUS_FMT_SRGGB10_1X10)
 		return -EINVAL;
 
-	fse->min_width = IMX179_WIDTH;
-	fse->max_width = IMX179_WIDTH;
-	fse->min_height = IMX179_HEIGHT;
-	fse->max_height = IMX179_HEIGHT;
+	fse->min_width = imx179_modes[fse->index].width;
+	fse->max_width = fse->min_width;
+	fse->min_height = imx179_modes[fse->index].height;
+	fse->max_height = fse->min_height;
 
 	return 0;
 }
@@ -306,10 +358,33 @@ static int imx179_set_format(struct v4l2_subdev *sd,
 			     struct v4l2_subdev_state *state,
 			     struct v4l2_subdev_format *fmt)
 {
-	imx179_fill_format(&fmt->format);
+	struct imx179 *imx179 = to_imx179(sd);
+	const struct imx179_mode *mode;
+	int vblank, ret;
+
+	mode = v4l2_find_nearest_size(imx179_modes, ARRAY_SIZE(imx179_modes),
+				      width, height, fmt->format.width,
+				      fmt->format.height);
+	imx179_fill_format(&fmt->format, mode);
 	*v4l2_subdev_state_get_format(state, 0) = fmt->format;
 
-	return 0;
+	if (fmt->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return 0;
+
+	imx179->mode = mode;
+	vblank = IMX179_FRAME_LENGTH_DEF - mode->height;
+	ret = __v4l2_ctrl_modify_range(imx179->vblank, vblank,
+				       IMX179_FRAME_LENGTH_MAX - mode->height,
+				       1, vblank);
+	if (ret)
+		return ret;
+
+	ret = __v4l2_ctrl_s_ctrl(imx179->vblank, vblank);
+	if (ret)
+		return ret;
+
+	/* The vblank value may be unchanged while the height changed. */
+	return imx179_update_exposure_range(imx179, imx179->vblank->val);
 }
 
 static int imx179_enable_streams(struct v4l2_subdev *sd,
@@ -323,8 +398,13 @@ static int imx179_enable_streams(struct v4l2_subdev *sd,
 	if (ret)
 		return ret;
 
-	ret = cci_multi_reg_write(imx179->regmap, imx179_mode_3280x2464,
-				  ARRAY_SIZE(imx179_mode_3280x2464), NULL);
+	ret = cci_multi_reg_write(imx179->regmap, imx179_common_regs,
+				  ARRAY_SIZE(imx179_common_regs), NULL);
+	if (ret)
+		goto err_put;
+
+	ret = cci_multi_reg_write(imx179->regmap, imx179->mode->regs,
+				  imx179->mode->num_regs, NULL);
 	if (ret)
 		goto err_put;
 
@@ -371,7 +451,7 @@ static int imx179_get_selection(struct v4l2_subdev *sd,
 	case V4L2_SEL_TGT_CROP_DEFAULT:
 	case V4L2_SEL_TGT_CROP_BOUNDS:
 	case V4L2_SEL_TGT_NATIVE_SIZE:
-		/* The only mode reads out the whole active pixel array. */
+		/* Both modes read out the whole active pixel array. */
 		sel->r.left = 0;
 		sel->r.top = 0;
 		sel->r.width = IMX179_WIDTH;
@@ -502,6 +582,7 @@ static int imx179_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	imx179->dev = dev;
+	imx179->mode = &imx179_modes[0];
 	v4l2_i2c_subdev_init(&imx179->sd, client, &imx179_subdev_ops);
 	imx179->sd.internal_ops = &imx179_internal_ops;
 
