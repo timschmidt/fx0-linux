@@ -1679,8 +1679,8 @@ int q6afe_port_start(struct q6afe_port *port)
 	void *p;
 
 	if (param_id == AFE_PARAM_ID_SLIMBUS_CONFIG) /* TEST */
-		dev_info(afe->dev, "port 0x%x slim cfg ver %u dev %u bits %u ch %u fmt %u rate %u map %u %u %u %u size %zu\n",
-			 port_id, port->port_cfg.slim_cfg.sb_cfg_minor_version,
+		dev_info(afe->dev, "t=%lld us port 0x%x slim cfg ver %u dev %u bits %u ch %u fmt %u rate %u map %u %u %u %u size %zu\n",
+			 ktime_to_us(ktime_get()), port_id, port->port_cfg.slim_cfg.sb_cfg_minor_version,
 			 port->port_cfg.slim_cfg.slimbus_dev_id,
 			 port->port_cfg.slim_cfg.bit_width,
 			 port->port_cfg.slim_cfg.num_channels,

@@ -1058,6 +1058,9 @@ static int qcom_slim_ngd_enable_stream(struct slim_stream_runtime *rt)
 	txn.mc = SLIM_USR_MC_DEF_ACT_CHAN;
 	txn.rl = txn.msg->num_bytes + 4;
 	ret = qcom_slim_ngd_xfer_msg_sync(ctrl, &txn);
+	dev_info(&sdev->dev, "TEST def_act la %u nports %d ch0 %u bps %u ret %d t=%lld us\n",
+		 sdev->laddr, rt->num_ports, rt->ports[0].ch.id, rt->bps, ret,
+		 ktime_to_us(ktime_get()));
 	if (ret) {
 		slim_free_txn_tid(ctrl, &txn);
 		dev_err(&sdev->dev, "TX timed out:MC:0x%x,mt:0x%x", txn.mc,
@@ -1130,6 +1133,8 @@ static int qcom_slim_ngd_disable_stream(struct slim_stream_runtime *rt)
 	txn.mc = SLIM_USR_MC_CHAN_CTRL;
 	txn.rl = txn.msg->num_bytes + 4;
 	ret = qcom_slim_ngd_xfer_msg_sync(ctrl, &txn);
+	dev_info(&sdev->dev, "TEST remove la %u ch0 %u ret %d t=%lld us\n",
+		 sdev->laddr, rt->ports[0].ch.id, ret, ktime_to_us(ktime_get()));
 	if (ret) {
 		slim_free_txn_tid(ctrl, &txn);
 		dev_err(&sdev->dev, "TX timed out:MC:0x%x,mt:0x%x", txn.mc,
