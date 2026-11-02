@@ -587,6 +587,7 @@
 		avdd-supply = <&cam_avdd>;
 		dvdd-supply = <&pm8226_l26>;
 		reset-gpios = <&tlmm 114 GPIO_ACTIVE_LOW>;
+		orientation = <1>; /* back */
 
 		port {
 			rear_camera_ep: endpoint {
