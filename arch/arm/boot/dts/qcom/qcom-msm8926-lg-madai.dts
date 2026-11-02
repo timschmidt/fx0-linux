@@ -545,6 +545,9 @@
 		reg = <0x0c>;
 		avdd-supply = <&pm8226_l19>;
 		dvdd-supply = <&pm8226_lvs1>;
+		mount-matrix = "0", "-1", "0",
+			       "1", "0", "0",
+			       "0", "0", "1";
 	};
 
 	imu@68 {
@@ -615,6 +618,7 @@
 		dvdd-supply = <&pm8226_l26>;
 		reset-gpios = <&tlmm 114 GPIO_ACTIVE_LOW>;
 		orientation = <1>; /* back */
+		rotation = <270>;
 
 		port {
 			rear_camera_ep: endpoint {
