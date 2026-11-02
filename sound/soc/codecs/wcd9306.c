@@ -858,25 +858,55 @@ static int wcd9306_slim_set_hw_params(struct wcd9306_codec *wcd, int dai_id,
 }
 
 /*
- * The codec unpacks each SLIMbus RX port according to a 2-bit sample
+ * The codec packs and unpacks each SLIMbus port according to a 2-bit sample
  * format field: 0 for 24-bit and 2 for 16-bit samples.
  */
+static int wcd9306_port_format(unsigned int width, unsigned int *bit_sel)
+{
+	switch (width) {
+	case 16:
+		*bit_sel = 0x2;
+		return 0;
+	case 24:
+		*bit_sel = 0x0;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+/* TX port n has its format in bits 5:4 of CDC_CONN_TX_SB_B(n + 1)_CTL. */
+static int wcd9306_set_tx_port_format(struct wcd9306_codec *wcd,
+				      unsigned int width, unsigned int channels)
+{
+	unsigned int bit_sel, i;
+	int ret;
+
+	ret = wcd9306_port_format(width, &bit_sel);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < channels && i < wcd->num_tx_port; i++) {
+		ret = regmap_update_bits(wcd->regmap,
+					 WCD9306_CDC_CONN_TX_SB_B1_CTL +
+					 wcd->tx_chs[i].port,
+					 0x30, bit_sel << 4);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 static int wcd9306_set_rx_port_format(struct wcd9306_codec *wcd,
 				      unsigned int width, unsigned int channels)
 {
 	unsigned int bit_sel, reg, shift, i;
 	int ret;
 
-	switch (width) {
-	case 16:
-		bit_sel = 0x2;
-		break;
-	case 24:
-		bit_sel = 0x0;
-		break;
-	default:
-		return -EINVAL;
-	}
+	ret = wcd9306_port_format(width, &bit_sel);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < channels && i < wcd->num_rx_port; i++) {
 		unsigned int port = wcd->rx_chs[i].port - WCD9306_RX_PORT_START;
@@ -923,12 +953,14 @@ static int wcd9306_hw_params(struct snd_pcm_substream *substream,
 	}
 	wcd->sconfig[dai->id].rate = params_rate(params);
 
-	if (dai->id == AIF1_PB) {
+	if (dai->id == AIF1_PB)
 		ret = wcd9306_set_rx_port_format(wcd, params_width(params),
 						 params_channels(params));
-		if (ret)
-			return ret;
-	}
+	else
+		ret = wcd9306_set_tx_port_format(wcd, params_width(params),
+						 params_channels(params));
+	if (ret)
+		return ret;
 
 	return wcd9306_slim_set_hw_params(wcd, dai->id, params_channels(params));
 }
