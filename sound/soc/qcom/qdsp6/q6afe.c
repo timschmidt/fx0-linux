@@ -1678,6 +1678,19 @@ int q6afe_port_start(struct q6afe_port *port)
 	int pkt_size;
 	void *p;
 
+	if (param_id == AFE_PARAM_ID_SLIMBUS_CONFIG) /* TEST */
+		dev_info(afe->dev, "port 0x%x slim cfg ver %u dev %u bits %u ch %u fmt %u rate %u map %u %u %u %u size %zu\n",
+			 port_id, port->port_cfg.slim_cfg.sb_cfg_minor_version,
+			 port->port_cfg.slim_cfg.slimbus_dev_id,
+			 port->port_cfg.slim_cfg.bit_width,
+			 port->port_cfg.slim_cfg.num_channels,
+			 port->port_cfg.slim_cfg.data_format,
+			 port->port_cfg.slim_cfg.sample_rate,
+			 port->port_cfg.slim_cfg.shared_ch_mapping[0],
+			 port->port_cfg.slim_cfg.shared_ch_mapping[1],
+			 port->port_cfg.slim_cfg.shared_ch_mapping[2],
+			 port->port_cfg.slim_cfg.shared_ch_mapping[3],
+			 sizeof(port->port_cfg));
 	ret  = q6afe_port_set_param_v2(port, &port->port_cfg, param_id,
 				       AFE_MODULE_AUDIO_DEV_INTERFACE,
 				       sizeof(port->port_cfg));
