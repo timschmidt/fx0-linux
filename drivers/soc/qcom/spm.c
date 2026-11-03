@@ -64,6 +64,7 @@ enum spm_reg {
 struct spm_reg_data {
 	const u16 *reg_offset;
 	u32 spm_cfg;
+	u32 spm_ctl;
 	u32 spm_dly;
 	u32 pmic_dly;
 	u32 pmic_data[MAX_PMIC_DATA];
@@ -210,6 +211,7 @@ static const struct spm_reg_data spm_reg_8974_8084_cpu  = {
 static const struct spm_reg_data spm_reg_8226_cpu  = {
 	.reg_offset = spm_reg_offset_v2_1,
 	.spm_cfg = 0x0,
+	.spm_ctl = 0x8,
 	.spm_dly = 0x3C102800,
 	.seq = { 0x60, 0x03, 0x60, 0x0B, 0x0F, 0x20, 0x10, 0x80, 0x30, 0x90,
 		0x5B, 0x60, 0x03, 0x60, 0x3B, 0x76, 0x76, 0x0B, 0x94, 0x5B,
@@ -549,8 +551,10 @@ static int spm_dev_probe(struct platform_device *pdev)
 				drv->reg_data->pmic_data[1]);
 
 	/* Set up Standby as the default low power mode */
-	if (drv->reg_data->reg_offset[SPM_REG_SPM_CTL])
+	if (drv->reg_data->reg_offset[SPM_REG_SPM_CTL]) {
+		spm_register_write(drv, SPM_REG_SPM_CTL, drv->reg_data->spm_ctl);
 		spm_set_low_power_mode(drv, PM_SLEEP_MODE_STBY);
+	}
 
 	if (IS_ENABLED(CONFIG_REGULATOR))
 		return spm_register_regulator(&pdev->dev, drv);
