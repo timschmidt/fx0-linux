@@ -51,6 +51,7 @@
 			operating-points-v2 = <&cpu_opp_table>;
 			qcom,acc = <&acc0>;
 			qcom,saw = <&saw0>;
+			cpu-idle-states = <&cpu_spc>;
 			#cooling-cells = <2>;
 		};
 
@@ -64,6 +65,7 @@
 			operating-points-v2 = <&cpu_opp_table>;
 			qcom,acc = <&acc1>;
 			qcom,saw = <&saw1>;
+			cpu-idle-states = <&cpu_spc>;
 			#cooling-cells = <2>;
 		};
 
@@ -77,6 +79,7 @@
 			operating-points-v2 = <&cpu_opp_table>;
 			qcom,acc = <&acc2>;
 			qcom,saw = <&saw2>;
+			cpu-idle-states = <&cpu_spc>;
 			#cooling-cells = <2>;
 		};
 
@@ -90,6 +93,7 @@
 			operating-points-v2 = <&cpu_opp_table>;
 			qcom,acc = <&acc3>;
 			qcom,saw = <&saw3>;
+			cpu-idle-states = <&cpu_spc>;
 			#cooling-cells = <2>;
 		};
 
@@ -97,6 +101,17 @@
 			compatible = "cache";
 			cache-level = <2>;
 			cache-unified;
+		};
+
+		idle-states {
+			cpu_spc: cpu-spc {
+				compatible = "qcom,idle-state-spc",
+					     "arm,idle-state";
+				entry-latency-us = <150>;
+				exit-latency-us = <350>;
+				min-residency-us = <2000>;
+				local-timer-stop;
+			};
 		};
 	};
 
