@@ -992,6 +992,17 @@ static int wcd9306_prepare(struct snd_pcm_substream *substream,
 	struct wcd9306_codec *wcd = snd_soc_component_get_drvdata(dai->component);
 	int ret = 0;
 
+	if (slim_early == 5 && dai->id == AIF1_PB) { /* TEST: sacrificial activation */
+		int r1 = slim_stream_prepare(wcd->sruntime[dai->id], &wcd->sconfig[dai->id]);
+		int r2 = r1 ? r1 : slim_stream_enable(wcd->sruntime[dai->id]);
+
+		if (!r2)
+			slim_stream_disable(wcd->sruntime[dai->id]);
+		if (!r1)
+			slim_stream_unprepare(wcd->sruntime[dai->id]);
+		dev_info(wcd->dev, "TEST %s sacrificial activation %d %d\n", dai->name, r1, r2);
+	}
+
 	if (slim_early == 2 && !wcd->slim_on[dai->id]) { /* TEST */
 		if (slim_delay_ms > 0)
 			msleep(slim_delay_ms);
