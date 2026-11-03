@@ -612,6 +612,14 @@ static void qcom_slim_ngd_rx(struct qcom_slim_ngd_ctrl *ctrl, u8 *buf)
 		mt == SLIM_MSG_MT_SRC_REFERRED_USER)
 		queue_work(ctrl->mwq, &ctrl->m_work);
 
+	/* TEST: show every message from the manager, and ACK status codes */
+	if (mc == SLIM_USR_MC_GENERIC_ACK && mt == SLIM_MSG_MT_SRC_REFERRED_USER)
+		dev_info(ctrl->dev, "TEST rx ack tid %u code 0x%02x t=%lld us\n",
+			 buf[3], buf[4], ktime_to_us(ktime_get()));
+	else if (!(mc == SLIM_MSG_MC_REPLY_VALUE || mc == SLIM_MSG_MC_REPLY_INFORMATION))
+		dev_info(ctrl->dev, "TEST rx mt %u mc 0x%02x len %u: %*ph\n",
+			 mt, mc, len, min_t(int, len, 12), buf);
+
 	if (mc == SLIM_MSG_MC_REPLY_INFORMATION ||
 	    mc == SLIM_MSG_MC_REPLY_VALUE || (mc == SLIM_USR_MC_ADDR_REPLY &&
 	    mt == SLIM_MSG_MT_SRC_REFERRED_USER) ||
@@ -859,6 +867,11 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 		txn->msg->rbuf = rbuf;
 		txn->rl = txn->msg->num_bytes + 4;
 	}
+
+	if (txn->mt == SLIM_MSG_MT_DEST_REFERRED_USER) /* TEST */
+		dev_info(ctrl->dev, "TEST tx mc 0x%02x tid %u la %u: %*ph t=%lld us\n",
+			 txn->mc, txn->tid, txn->la, min_t(int, txn->msg ? txn->msg->num_bytes : 0, 10),
+			 txn->msg ? txn->msg->wbuf : NULL, ktime_to_us(ktime_get()));
 
 	/* HW expects length field to be excluded */
 	txn->rl--;
