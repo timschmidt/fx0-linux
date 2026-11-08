@@ -2,6 +2,7 @@
 #ifndef __QCOM_CPR_MSM8926_FUSES_H__
 #define __QCOM_CPR_MSM8926_FUSES_H__
 
+#include <linux/device.h>
 #include <linux/err.h>
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <linux/nvmem-consumer.h>
@@ -21,13 +22,17 @@ static inline int cpr_msm8926_read_row(struct device *dev, const char *name,
 
 	cell = nvmem_cell_get(dev, name);
 	if (IS_ERR(cell))
-		return PTR_ERR(cell);
+		return dev_err_probe(dev, PTR_ERR(cell),
+				     "%s cell lookup failed\n", name);
 	data = nvmem_cell_read(cell, &length);
 	nvmem_cell_put(cell);
 	if (IS_ERR(data))
-		return PTR_ERR(data);
+		return dev_err_probe(dev, PTR_ERR(data),
+				     "%s cell read failed\n", name);
 	if (length != sizeof(*row))
-		ret = -EINVAL;
+		ret = dev_err_probe(dev, -EINVAL,
+				    "%s cell has %zu bytes, expected %zu\n",
+				    name, length, sizeof(*row));
 	else
 		*row = get_unaligned_le64(data);
 	kfree_sensitive(data);
@@ -55,7 +60,8 @@ cpr_msm8926_read_calibration(struct device *dev,
 
 	ret = qcom_scm_legacy_fuse_read(0xfc4b81b0, &conditional);
 	if (ret)
-		return ret < 0 ? ret : -EIO;
+		return dev_err_probe(dev, ret < 0 ? ret : -EIO,
+				     "conditional fuse SCM read failed\n");
 	fuses.conditional_matches = ((conditional >> 42) & 63) == 7;
 	ret = cpr_msm8926_read_row(dev, "cpu_calibration", &fuses.row22);
 	if (ret)
@@ -67,7 +73,12 @@ cpr_msm8926_read_calibration(struct device *dev,
 	if (ret)
 		return ret;
 
-	return cpr_msm8926_decode(&fuses, calibration);
+	ret = cpr_msm8926_decode(&fuses, calibration);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "MSM8926 fuse calibration decode failed\n");
+
+	return 0;
 }
 
 #endif
