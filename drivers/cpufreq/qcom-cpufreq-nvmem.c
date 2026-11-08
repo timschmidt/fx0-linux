@@ -28,6 +28,7 @@
 #include <linux/pm_opp.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
+#include <linux/soc/qcom/cpr.h>
 #include <linux/soc/qcom/smem.h>
 
 #include <dt-bindings/arm/qcom,ids.h>
@@ -54,6 +55,7 @@ struct qcom_cpufreq_match_data {
 			   struct qcom_cpufreq_drv *drv);
 	const char **pd_names;
 	unsigned int num_pd_names;
+	bool cpr_supported_hw;
 };
 
 struct qcom_cpufreq_drv_cpu {
@@ -419,6 +421,12 @@ static const struct qcom_cpufreq_match_data match_data_qcs404 = {
 	.num_pd_names = 1,
 };
 
+static const struct qcom_cpufreq_match_data match_data_msm8926 = {
+	.pd_names = (const char *[]) { "cpr" },
+	.num_pd_names = 1,
+	.cpr_supported_hw = true,
+};
+
 static const struct qcom_cpufreq_match_data match_data_ipq6018 = {
 	.get_version = qcom_cpufreq_ipq6018_name_version,
 };
@@ -452,7 +460,13 @@ static int qcom_cpufreq_probe(struct platform_device *pdev)
 	char *pvs_name = pvs_name_buffer;
 	unsigned cpu;
 	const struct of_device_id *match;
+	const struct qcom_cpufreq_match_data *data;
 	int ret;
+
+	match = pdev->dev.platform_data;
+	if (!match || !match->data)
+		return -EINVAL;
+	data = match->data;
 
 	cpu_dev = get_cpu_device(0);
 	if (!cpu_dev)
@@ -463,8 +477,11 @@ static int qcom_cpufreq_probe(struct platform_device *pdev)
 	if (!np)
 		return -ENOENT;
 
-	ret = of_device_is_compatible(np, "operating-points-v2-kryo-cpu") ||
-	      of_device_is_compatible(np, "operating-points-v2-krait-cpu");
+	if (data->cpr_supported_hw)
+		ret = of_device_is_compatible(np, "operating-points-v2-msm8926-cpu");
+	else
+		ret = of_device_is_compatible(np, "operating-points-v2-kryo-cpu") ||
+		      of_device_is_compatible(np, "operating-points-v2-krait-cpu");
 	if (!ret)
 		return -ENOENT;
 
@@ -473,12 +490,14 @@ static int qcom_cpufreq_probe(struct platform_device *pdev)
 	if (!drv)
 		return -ENOMEM;
 
-	match = pdev->dev.platform_data;
-	drv->data = match->data;
-	if (!drv->data)
-		return -ENODEV;
+	drv->data = data;
 
-	if (drv->data->get_version) {
+	if (data->cpr_supported_hw) {
+		ret = qcom_cpr_msm8926_get_supported_hw(cpu_dev, &drv->versions);
+		if (ret)
+			return dev_err_probe(cpu_dev, ret, "CPR eligibility unavailable\n");
+		pvs_name = NULL;
+	} else if (data->get_version) {
 		speedbin_nvmem = of_nvmem_cell_get(np, NULL);
 		if (IS_ERR(speedbin_nvmem))
 			return dev_err_probe(cpu_dev, PTR_ERR(speedbin_nvmem),
@@ -504,7 +523,7 @@ static int qcom_cpufreq_probe(struct platform_device *pdev)
 			goto free_opp;
 		}
 
-		if (drv->data->get_version) {
+		if (drv->data->get_version || drv->data->cpr_supported_hw) {
 			config.supported_hw = &drv->versions;
 			config.supported_hw_count = 1;
 
@@ -592,6 +611,7 @@ static struct platform_driver qcom_cpufreq_driver = {
 static const struct of_device_id qcom_cpufreq_match_list[] __initconst __maybe_unused = {
 	{ .compatible = "qcom,apq8096", .data = &match_data_kryo },
 	{ .compatible = "qcom,msm8909", .data = &match_data_msm8909 },
+	{ .compatible = "qcom,msm8926", .data = &match_data_msm8926 },
 	{ .compatible = "qcom,msm8996", .data = &match_data_kryo },
 	{ .compatible = "qcom,qcs404", .data = &match_data_qcs404 },
 	{ .compatible = "qcom,ipq5332", .data = &match_data_kryo },
@@ -625,6 +645,16 @@ static int __init qcom_cpufreq_init(void)
 	match = of_match_node(qcom_cpufreq_match_list, np);
 	if (!match)
 		return -ENODEV;
+
+	if (((const struct qcom_cpufreq_match_data *)match->data)->cpr_supported_hw) {
+		struct device_node *cpu __free(device_node) = of_cpu_device_node_get(0);
+		struct device_node *opps __free(device_node) =
+			of_parse_phandle(cpu, "operating-points-v2", 0);
+
+		/* Legacy MSM8926 boards keep their ordinary cpufreq-dt route. */
+		if (!of_device_is_compatible(opps, "operating-points-v2-msm8926-cpu"))
+			return -ENODEV;
+	}
 
 	ret = platform_driver_register(&qcom_cpufreq_driver);
 	if (unlikely(ret < 0))
