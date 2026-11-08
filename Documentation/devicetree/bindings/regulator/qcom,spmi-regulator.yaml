@@ -106,7 +106,7 @@ patternProperties:
           PM8226 S2 uses its immutable power-on FTS2 voltage range through
           the L2 SAW controller. Expose only that range, acknowledge voltage
           commands and allow the PMIC slew time before returning success.
-          Requires a SAW leader, an initialized Madai L2 master controller
+          Requires an always-on rail, a SAW leader, an initialized Madai L2 master controller
           and disabled hardware AVS.
         type: boolean
 
@@ -119,7 +119,9 @@ patternProperties:
       - if:
           required: ["qcom,saw-fixed-range"]
         then:
-          required: ["qcom,saw-leader"]
+          required:
+            - qcom,saw-leader
+            - regulator-always-on
           properties:
             qcom,saw-slave: false
 
