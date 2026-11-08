@@ -14,6 +14,7 @@
 #include <linux/list.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/bitops.h>
 #include <linux/slab.h>
 #include <linux/of.h>
@@ -758,6 +759,37 @@ static int cpr_msm8926_check_refclock(struct regmap *apcs)
 	return value & BIT(0) ? -EINVAL : 0;
 }
 
+/*
+ * Probe has not installed an IRQ handler yet; configuration/resume holds the
+ * domain lock. Stop inherited measurements before changing their reference.
+ */
+static int cpr_msm8926_init_refclock(struct cpr_drv *drv, struct regmap *apcs)
+{
+	u32 value;
+	int ret;
+
+	writel(0, drv->base + REG_RBIF_IRQ_EN(0));
+	writel(0, drv->base + REG_RBCPR_CTL);
+	/* Ordered readbacks complete the CPR writes before accessing APCS. */
+	if (readl(drv->base + REG_RBIF_IRQ_EN(0)) ||
+	    readl(drv->base + REG_RBCPR_CTL))
+		return -EIO;
+
+	ret = readl_poll_timeout(drv->base + REG_RBCPR_RESULT_0, value,
+				!(value & RBCPR_RESULT0_BUSY_MASK), 1, 1000);
+	if (ret)
+		return ret;
+	writel(CPR_INT_ALL, drv->base + REG_RBIF_IRQ_CLEAR);
+
+	/* Preserve every APCS bit except the CPR XO/AHB selector. */
+	ret = regmap_update_bits(apcs, 0x64, BIT(0), 0);
+	if (ret)
+		return ret;
+
+	/* A successful bus write alone does not prove that XO was selected. */
+	return cpr_msm8926_check_refclock(apcs);
+}
+
 static int cpr_config(struct cpr_drv *drv)
 {
 	int i, ret;
@@ -765,9 +797,9 @@ static int cpr_config(struct cpr_drv *drv)
 	struct corner *corner;
 	const struct cpr_desc *desc = drv->desc;
 
-	/* Do not program XO-derived targets against an inherited AHB source. */
+	/* Establish XO with the measurement engine stopped before target setup. */
 	if (drv->msm8926) {
-		ret = cpr_msm8926_check_refclock(drv->msm8926->apcs);
+		ret = cpr_msm8926_init_refclock(drv, drv->msm8926->apcs);
 		if (ret)
 			return ret;
 	}
@@ -1193,7 +1225,7 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 	if (IS_ERR(data->apcs))
 		return dev_err_probe(drv->dev, PTR_ERR(data->apcs),
 				     "APCS reference register map unavailable\n");
-	ret = cpr_msm8926_check_refclock(data->apcs);
+	ret = cpr_msm8926_init_refclock(drv, data->apcs);
 	if (ret)
 		return dev_err_probe(drv->dev, ret,
 				     "CPR reference source check failed\n");
@@ -1246,7 +1278,7 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 					     cpr_msm8926_rates[i], rounded);
 	}
 
-	/* Read/calculation only. Attachment establishes the live MX vote later. */
+	/* Attachment establishes the live MX vote and CPU rate later. */
 	for (i = 0; i < 3; i++) {
 		fuse = &drv->fuse_corners[i];
 		fuse->min_uV = data->plan.floor_uV[i];
