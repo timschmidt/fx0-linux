@@ -3,6 +3,7 @@
 #define __QCOM_CPR_VOLTAGE_H__
 
 #include <linux/errno.h>
+#include <linux/panic.h>
 #include <linux/regulator/consumer.h>
 
 /* The caller owns locking and must retain MX while APC can remain live. */
@@ -17,14 +18,27 @@ struct cpr_voltage {
 
 static inline int cpr_voltage_vote_mx(struct cpr_voltage *rails, int min_uV)
 {
-	int ret;
+	int ret, recovery;
 
 	if (!rails->mx || min_uV <= 0 || min_uV > rails->mx_max_uV)
 		return -EINVAL;
 
 	ret = regulator_set_voltage(rails->mx, min_uV, rails->mx_max_uV);
-	if (!ret)
+	if (!ret) {
 		rails->mx_min_uV = min_uV;
+	} else if (rails->mx_enabled && rails->mx_min_uV > 0) {
+		/*
+		 * A timed-out RPM request may already have changed the vote.
+		 * Core restored the old consumer request on failure; force it
+		 * through the provider instead of accepting a cached same vote.
+		 * RPM must correlate replies before this can confirm restoration.
+		 */
+		recovery = regulator_sync_voltage(rails->mx);
+		if (recovery)
+			recovery = regulator_sync_voltage(rails->mx);
+		if (recovery)
+			panic("CPR MX vote recovery failed: %d", recovery);
+	}
 
 	return ret;
 }
