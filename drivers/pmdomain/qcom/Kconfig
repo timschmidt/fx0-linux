@@ -17,6 +17,18 @@ config QCOM_CPR
 	  To compile this driver as a module, choose M here: the module will
 	  be called qcom-cpr
 
+config QCOM_CPR_MSM8926
+	bool "MSM8926 CPR calibration and CPU domain support"
+	depends on QCOM_CPR=y && QCOM_SCM=y
+	help
+	  Use the MSM8926 raw and secure calibration rows and the PM8226 fixed
+	  boot-range APC regulator. This CPU rail remains powered independently
+	  of domain state, so its MX dependency is retained for the driver lifetime.
+	  This support must be built in and has no manual bind/unbind interface.
+	  Board description, CPU domain attachment and OPP eligibility are required
+	  separately. Only suspend-to-idle retains the active-only MX vote; deeper
+	  suspend is rejected until an RPM sleep-state handoff is implemented.
+
 config QCOM_RPMHPD
 	tristate "Qualcomm RPMh Power domain driver"
 	depends on QCOM_RPMH && QCOM_COMMAND_DB
