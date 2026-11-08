@@ -674,6 +674,10 @@ static int inv_mpu6050_read_channel_data(struct iio_dev *indio_dev,
 	if (result)
 		return result;
 
+	result = inv_mpu6515_dmp_recover(st);
+	if (result)
+		goto error_power_off;
+
 	switch (chan->type) {
 	case IIO_ANGL_VEL:
 		if (!st->chip_config.gyro_en) {
@@ -771,8 +775,17 @@ inv_mpu6050_read_raw(struct iio_dev *indio_dev,
 		mutex_unlock(&st->lock);
 		iio_device_release_direct(indio_dev);
 		return ret;
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		if (chan->type != IIO_ROT)
+			return -EINVAL;
+		*val = 25;
+		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
 		switch (chan->type) {
+		case IIO_ROT:
+			*val = 1;
+			*val2 = 30;
+			return IIO_VAL_FRACTIONAL_LOG2;
 		case IIO_ANGL_VEL:
 			mutex_lock(&st->lock);
 			*val  = 0;
@@ -824,7 +837,9 @@ inv_mpu6050_read_raw(struct iio_dev *indio_dev,
 		if (ret)
 			return ret;
 		mutex_lock(&st->lock);
-		ret = inv_mpu6050_sensor_show(st, reg, chan->channel2, val);
+		ret = inv_mpu6515_dmp_recover(st);
+		if (!ret)
+			ret = inv_mpu6050_sensor_show(st, reg, chan->channel2, val);
 		mutex_unlock(&st->lock);
 		pm_runtime_put_autosuspend(pdev);
 		return ret;
@@ -918,6 +933,10 @@ static int inv_mpu6050_write_raw(struct iio_dev *indio_dev,
 	if (result)
 		goto error_write_raw_unlock;
 
+	result = inv_mpu6515_dmp_recover(st);
+	if (result)
+		goto error_write_raw_power_off;
+
 	switch (mask) {
 	case IIO_CHAN_INFO_SCALE:
 		switch (chan->type) {
@@ -954,6 +973,7 @@ static int inv_mpu6050_write_raw(struct iio_dev *indio_dev,
 		break;
 	}
 
+error_write_raw_power_off:
 	pm_runtime_put_autosuspend(pdev);
 error_write_raw_unlock:
 	mutex_unlock(&st->lock);
@@ -1135,6 +1155,9 @@ static int inv_mpu6050_enable_wom(struct inv_mpu6050_state *st, bool en)
 	unsigned int mask;
 	int result;
 
+	if (st->dmp_active || st->dmp_saved_valid)
+		return -EBUSY;
+
 	if (en) {
 		result = pm_runtime_resume_and_get(pdev);
 		if (result)
@@ -1254,6 +1277,8 @@ static int inv_mpu6050_write_event_value(struct iio_dev *indio_dev,
 		return -EINVAL;
 
 	guard(mutex)(&st->lock);
+	if (st->dmp_active || st->dmp_saved_valid)
+		return -EBUSY;
 
 	result = pm_runtime_resume_and_get(pdev);
 	if (result)
@@ -1333,6 +1358,10 @@ inv_mpu6050_fifo_rate_store(struct device *dev, struct device_attribute *attr,
 	fifo_period = NSEC_PER_SEC / fifo_rate;
 
 	mutex_lock(&st->lock);
+	if (st->dmp_active || st->dmp_saved_valid) {
+		result = -EBUSY;
+		goto fifo_rate_fail_unlock;
+	}
 	if (d == st->chip_config.divider) {
 		result = 0;
 		goto fifo_rate_fail_unlock;
@@ -1560,6 +1589,38 @@ static const struct iio_chan_spec inv_mpu6500_channels[] = {
 			       inv_wom_events, ARRAY_SIZE(inv_wom_events)),
 };
 
+static const struct iio_chan_spec inv_mpu6515_channels[] = {
+	IIO_CHAN_SOFT_TIMESTAMP(INV_MPU6515_SCAN_TIMESTAMP),
+
+	INV_MPU6050_TEMP_CHAN(INV_MPU6050_SCAN_TEMP),
+
+	INV_MPU6050_CHAN(IIO_ANGL_VEL, IIO_MOD_X, INV_MPU6050_SCAN_GYRO_X),
+	INV_MPU6050_CHAN(IIO_ANGL_VEL, IIO_MOD_Y, INV_MPU6050_SCAN_GYRO_Y),
+	INV_MPU6050_CHAN(IIO_ANGL_VEL, IIO_MOD_Z, INV_MPU6050_SCAN_GYRO_Z),
+
+	INV_MPU6050_CHAN(IIO_ACCEL, IIO_MOD_X, INV_MPU6050_SCAN_ACCL_X),
+	INV_MPU6050_CHAN(IIO_ACCEL, IIO_MOD_Y, INV_MPU6050_SCAN_ACCL_Y),
+	INV_MPU6050_CHAN(IIO_ACCEL, IIO_MOD_Z, INV_MPU6050_SCAN_ACCL_Z),
+
+	INV_MPU6050_EVENT_CHAN(IIO_ACCEL, IIO_MOD_X_OR_Y_OR_Z,
+			       inv_wom_events, ARRAY_SIZE(inv_wom_events)),
+	{
+		.type = IIO_ROT,
+		.modified = 1,
+		.channel2 = IIO_MOD_QUATERNION,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_SCALE) |
+				      BIT(IIO_CHAN_INFO_SAMP_FREQ),
+		.scan_index = INV_MPU6515_SCAN_QUATERNION,
+		.scan_type = {
+			.sign = 's',
+			.realbits = 32,
+			.storagebits = 32,
+			.repeat = 4,
+			.endianness = IIO_CPU,
+		},
+	},
+};
+
 #define INV_MPU6050_SCAN_MASK_3AXIS_ACCEL	\
 	(BIT(INV_MPU6050_SCAN_ACCL_X)		\
 	| BIT(INV_MPU6050_SCAN_ACCL_Y)		\
@@ -1583,6 +1644,21 @@ static const unsigned long inv_mpu_scan_masks[] = {
 	INV_MPU6050_SCAN_MASK_3AXIS_ACCEL | INV_MPU6050_SCAN_MASK_3AXIS_GYRO,
 	INV_MPU6050_SCAN_MASK_3AXIS_ACCEL | INV_MPU6050_SCAN_MASK_3AXIS_GYRO
 		| INV_MPU6050_SCAN_MASK_TEMP,
+	0,
+};
+
+static const unsigned long inv_mpu6515_scan_masks[] = {
+	/* 3-axis accel */
+	INV_MPU6050_SCAN_MASK_3AXIS_ACCEL,
+	INV_MPU6050_SCAN_MASK_3AXIS_ACCEL | INV_MPU6050_SCAN_MASK_TEMP,
+	/* 3-axis gyro */
+	INV_MPU6050_SCAN_MASK_3AXIS_GYRO,
+	INV_MPU6050_SCAN_MASK_3AXIS_GYRO | INV_MPU6050_SCAN_MASK_TEMP,
+	/* 6-axis accel + gyro */
+	INV_MPU6050_SCAN_MASK_3AXIS_ACCEL | INV_MPU6050_SCAN_MASK_3AXIS_GYRO,
+	INV_MPU6050_SCAN_MASK_3AXIS_ACCEL | INV_MPU6050_SCAN_MASK_3AXIS_GYRO
+		| INV_MPU6050_SCAN_MASK_TEMP,
+	BIT(INV_MPU6515_SCAN_QUATERNION),
 	0,
 };
 
@@ -2045,6 +2121,11 @@ int inv_mpu_core_probe(struct regmap *regmap, int irq, const char *name,
 		return result;
 
 	switch (chip_type) {
+	case INV_MPU6515:
+		indio_dev->channels = inv_mpu6515_channels;
+		indio_dev->num_channels = ARRAY_SIZE(inv_mpu6515_channels);
+		indio_dev->available_scan_masks = inv_mpu6515_scan_masks;
+		break;
 	case INV_MPU6000:
 	case INV_MPU6050:
 		indio_dev->channels = inv_mpu6050_channels;
@@ -2189,6 +2270,10 @@ static int inv_mpu_suspend(struct device *dev)
 	int result;
 
 	guard(mutex)(&st->lock);
+
+	/* DMP event retention/wake is not implemented yet. */
+	if (st->dmp_active || st->dmp_saved_valid)
+		return -EBUSY;
 
 	st->suspended_sensors = 0;
 	if (pm_runtime_suspended(dev))

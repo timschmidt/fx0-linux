@@ -167,6 +167,32 @@ static int inv_mpu6050_set_enable(struct iio_dev *indio_dev, bool enable)
 	unsigned int scan;
 	int result;
 
+	if (st->chip_type == INV_MPU6515 && indio_dev->active_scan_mask &&
+	    test_bit(INV_MPU6515_SCAN_QUATERNION, indio_dev->active_scan_mask)) {
+		if (enable) {
+			result = pm_runtime_resume_and_get(pdev);
+			if (result)
+				return result;
+			result = inv_mpu6515_dmp_start(st);
+			if (result)
+				pm_runtime_put_autosuspend(pdev);
+			return result;
+		}
+		result = inv_mpu6515_dmp_stop(st);
+		pm_runtime_put_autosuspend(pdev);
+		return result;
+	}
+	/* A failed DMP restoration must succeed before raw capture resumes. */
+	if (st->dmp_saved_valid) {
+		result = pm_runtime_resume_and_get(pdev);
+		if (result)
+			return result;
+		result = inv_mpu6515_dmp_stop(st);
+		pm_runtime_put_autosuspend(pdev);
+		if (result)
+			return result;
+	}
+
 	if (enable) {
 		scan = inv_scan_query(indio_dev);
 		result = pm_runtime_resume_and_get(pdev);
@@ -280,6 +306,9 @@ static irqreturn_t inv_mpu6050_interrupt_handle(int irq, void *p)
 			return IRQ_HANDLED;
 		}
 
+		if (st->dmp_active && (int_status & INV_MPU6050_BIT_FIFO_OVERFLOW_INT))
+			st->dmp_overflow = true;
+
 		/* handle WoM event */
 		if (st->chip_config.wom_en && (int_status & wom_bits)) {
 			ev_code = IIO_MOD_EVENT_CODE(IIO_ACCEL, 0, IIO_MOD_X_OR_Y_OR_Z,
@@ -290,7 +319,9 @@ static irqreturn_t inv_mpu6050_interrupt_handle(int irq, void *p)
 
 data_ready_interrupt:
 	/* handle raw data interrupt */
-	if (int_status & INV_MPU6050_BIT_RAW_DATA_RDY_INT) {
+	if (int_status & (READ_ONCE(st->dmp_active) ?
+			  (INV_MPU6050_BIT_DMP_INT_EN | INV_MPU6050_BIT_FIFO_OVERFLOW_INT) :
+			  INV_MPU6050_BIT_RAW_DATA_RDY_INT)) {
 		indio_dev->pollfunc->timestamp = st->it_timestamp;
 		iio_trigger_poll_nested(st->trig);
 	}
