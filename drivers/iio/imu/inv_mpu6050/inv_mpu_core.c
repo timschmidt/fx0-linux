@@ -1201,6 +1201,12 @@ static int inv_mpu6050_read_event_config(struct iio_dev *indio_dev,
 {
 	struct inv_mpu6050_state *st = iio_priv(indio_dev);
 
+	if (chan->type == IIO_ACTIVITY && chan->channel2 == IIO_MOD_STILL &&
+	    type == IIO_EV_TYPE_CHANGE && dir == IIO_EV_DIR_FALLING) {
+		guard(mutex)(&st->lock);
+		return st->dmp_smd_armed;
+	}
+
 	/* support only WoM (accel roc rising) event */
 	if (chan->type != IIO_ACCEL || type != IIO_EV_TYPE_ROC ||
 	    dir != IIO_EV_DIR_RISING)
@@ -1218,6 +1224,19 @@ static int inv_mpu6050_write_event_config(struct iio_dev *indio_dev,
 					  bool state)
 {
 	struct inv_mpu6050_state *st = iio_priv(indio_dev);
+
+	if (chan->type == IIO_ACTIVITY && chan->channel2 == IIO_MOD_STILL &&
+	    type == IIO_EV_TYPE_CHANGE && dir == IIO_EV_DIR_FALLING) {
+		int ret;
+
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
+		mutex_lock(&st->lock);
+		ret = inv_mpu6515_dmp_smd_set(st, state);
+		mutex_unlock(&st->lock);
+		iio_device_release_direct(indio_dev);
+		return ret;
+	}
 
 	/* support only WoM (accel roc rising) event */
 	if (chan->type != IIO_ACCEL || type != IIO_EV_TYPE_ROC ||
@@ -1496,6 +1515,14 @@ static const struct iio_chan_spec_ext_info inv_ext_info[] = {
 	{ }
 };
 
+static const struct iio_event_spec inv_smd_events[] = {
+	{
+		.type = IIO_EV_TYPE_CHANGE,
+		.dir = IIO_EV_DIR_FALLING,
+		.mask_separate = BIT(IIO_EV_INFO_ENABLE),
+	},
+};
+
 static const struct iio_event_spec inv_wom_events[] = {
 	{
 		.type = IIO_EV_TYPE_ROC,
@@ -1604,6 +1631,8 @@ static const struct iio_chan_spec inv_mpu6515_channels[] = {
 
 	INV_MPU6050_EVENT_CHAN(IIO_ACCEL, IIO_MOD_X_OR_Y_OR_Z,
 			       inv_wom_events, ARRAY_SIZE(inv_wom_events)),
+	INV_MPU6050_EVENT_CHAN(IIO_ACTIVITY, IIO_MOD_STILL,
+			       inv_smd_events, ARRAY_SIZE(inv_smd_events)),
 	{
 		.type = IIO_ROT,
 		.modified = 1,
@@ -2201,6 +2230,10 @@ int inv_mpu_core_probe(struct regmap *regmap, int irq, const char *name,
 			return result;
 		}
 	}
+
+	result = devm_add_action_or_reset(dev, inv_mpu6515_dmp_cleanup, st);
+	if (result)
+		return result;
 
 	result = devm_iio_device_register(dev, indio_dev);
 	if (result) {

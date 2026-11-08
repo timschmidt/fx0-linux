@@ -6,6 +6,7 @@
 #include <linux/firmware.h>
 #include <linux/lockdep.h>
 #include <linux/module.h>
+#include <linux/pm_runtime.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
@@ -257,6 +258,36 @@ int inv_mpu6515_dmp_decode(const u8 *data, size_t len,
 	return size;
 }
 
+/* Manufacturer SMD defaults; physical threshold units are not exposed. */
+static int inv_mpu6515_dmp_configure_smd(struct inv_mpu6050_state *st)
+{
+	static const struct {
+		u16 address;
+		u8 length;
+		u8 data[4];
+	} patches[] = {
+		{ 1770, 2, { 0xf4, 0x12 } }, /* no accel FIFO producer */
+		{ 1701, 2, { 0xf4, 0x13 } }, /* no quaternion FIFO producer */
+		{ 1983, 1, { 0xa3 } }, /* algorithm events only */
+		{ 1985, 1, { 0xff } }, /* pedometer disabled */
+		{ 2796, 3, { 0xf1, 0xf1, 0xf1 } }, /* pedometer IRQ disabled */
+		{ 344, 4, { 0x05, 0xdc, 0, 0 } }, /* threshold 1500 << 16 */
+		{ 340, 4, { 0, 0, 0x02, 0x58 } }, /* 3 seconds at 200 Hz */
+		{ 348, 4, { 0, 0, 0, 0xc8 } }, /* 1 second at 200 Hz */
+		{ 288, 2, { 0, 1 } }, /* SMD enable */
+	};
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(patches); i++) {
+		ret = inv_mpu6515_dmp_mem_write(st, patches[i].address,
+					      patches[i].data, patches[i].length);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 /* Registers changed by the DMP mode; restore cached raw settings verbatim. */
 static const u8 inv_dmp_saved_regs[] = {
 	0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x23, 0x38, 0x6a,
@@ -359,6 +390,15 @@ int inv_mpu6515_dmp_start(struct inv_mpu6050_state *st)
 	ret = inv_mpu6515_dmp_configure(st);
 	if (ret)
 		goto fail;
+	if (st->dmp_smd_mode) {
+		ret = inv_mpu6515_dmp_configure_smd(st);
+		if (ret)
+			goto fail;
+		/* Clear a previous algorithm status before enabling a new run. */
+		ret = regmap_read(st->map, 0x39, &value);
+		if (ret)
+			goto fail;
+	}
 	ret = regmap_multi_reg_write(st->map, setup, ARRAY_SIZE(setup));
 	if (ret)
 		goto fail;
@@ -374,12 +414,13 @@ int inv_mpu6515_dmp_start(struct inv_mpu6050_state *st)
 	st->dmp_last_timestamp = 0;
 	ret = regmap_write(st->map, st->reg->user_ctrl,
 			   st->chip_config.user_ctrl | INV_MPU6050_BIT_DMP_EN |
-			   INV_MPU6050_BIT_FIFO_EN);
+			   (st->dmp_smd_mode ? 0 : INV_MPU6050_BIT_FIFO_EN));
 	if (ret)
 		goto fail;
 	st->dmp_active = true;
 	ret = regmap_write(st->map, st->reg->int_enable,
-			   INV_MPU6050_BIT_DMP_INT_EN | INV_MPU6050_BIT_FIFO_OVERFLOW_INT);
+			   INV_MPU6050_BIT_DMP_INT_EN |
+			   (st->dmp_smd_mode ? 0 : INV_MPU6050_BIT_FIFO_OVERFLOW_INT));
 	if (!ret)
 		return 0;
 fail:
@@ -504,4 +545,72 @@ flush:
 	if (inv_mpu6515_dmp_flush(st))
 		inv_mpu6515_dmp_stop(st);
 	return ret;
+}
+
+/* Enable owns a direct-mode claim; all callers hold lock. Event owns PM vote. */
+int inv_mpu6515_dmp_smd_set(struct inv_mpu6050_state *st, bool enable)
+{
+	struct device *dev = regmap_get_device(st->map);
+	int ret;
+
+	lockdep_assert_held(&st->lock);
+	if (st->chip_type != INV_MPU6515 || st->irq <= 0)
+		return -EOPNOTSUPP;
+	if (!enable) {
+		if (!st->dmp_smd_pm)
+			return 0;
+		ret = inv_mpu6515_dmp_stop(st);
+		st->dmp_smd_mode = false;
+		st->dmp_smd_armed = false;
+		st->dmp_smd_pm = false;
+		pm_runtime_put_autosuspend(dev);
+		return ret;
+	}
+	if (st->dmp_smd_armed)
+		return 0;
+	if (st->dmp_active || st->chip_config.wom_en)
+		return -EBUSY;
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret)
+		return ret;
+	st->dmp_smd_mode = true;
+	ret = inv_mpu6515_dmp_start(st);
+	if (ret) {
+		st->dmp_smd_mode = false;
+		pm_runtime_put_autosuspend(dev);
+		return ret;
+	}
+	st->dmp_smd_armed = true;
+	st->dmp_smd_pm = true;
+	return 0;
+}
+
+/* One-shot event attribution: only manufacturer status 0x39 bit 0x04 qualifies. */
+int inv_mpu6515_dmp_smd_event(struct inv_mpu6050_state *st)
+{
+	unsigned int status;
+	int ret;
+
+	lockdep_assert_held(&st->lock);
+	if (!st->dmp_smd_mode || !st->dmp_smd_armed)
+		return 0;
+	ret = regmap_read(st->map, 0x39, &status);
+	if (ret)
+		return ret;
+	if (!(status & BIT(2)))
+		return 0;
+	dev_dbg(regmap_get_device(st->map), "DMP significant motion status %#x\n", status);
+	ret = inv_mpu6515_dmp_smd_set(st, false);
+	if (ret)
+		dev_err(regmap_get_device(st->map), "DMP event cleanup failed: %d\n", ret);
+	return 1;
+}
+
+void inv_mpu6515_dmp_cleanup(void *data)
+{
+	struct inv_mpu6050_state *st = data;
+
+	guard(mutex)(&st->lock);
+	if (st->dmp_smd_pm)
+		inv_mpu6515_dmp_smd_set(st, false);
 }
