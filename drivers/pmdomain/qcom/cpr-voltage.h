@@ -5,13 +5,14 @@
 #include <linux/errno.h>
 #include <linux/regulator/consumer.h>
 
-/* The caller owns regulator activation, handoff and locking. */
+/* The caller owns locking and must retain MX while APC can remain live. */
 struct cpr_voltage {
 	struct regulator *apc;
 	struct regulator *mx;
 	int mx_max_uV;
 	int mx_min_uV;
 	int mx_lower_error;
+	bool mx_enabled;
 };
 
 static inline int cpr_voltage_vote_mx(struct cpr_voltage *rails, int min_uV)
@@ -29,20 +30,34 @@ static inline int cpr_voltage_vote_mx(struct cpr_voltage *rails, int min_uV)
 }
 
 /*
- * Establish a floor covering every possible boot corner before any APC
- * transition. Repeating handoff must not lower an existing MX vote.
+ * Establish and activate a floor covering every possible boot corner before
+ * any APC transition. Repeating handoff never lowers an existing MX vote or
+ * takes another enable reference. A failed enable retains the requested floor
+ * for retry, but cannot authorize APC transitions. There is deliberately no
+ * automatic disable: an always-on APC rail can outlive CPR domain power-off.
  */
 static inline int cpr_voltage_bootstrap(struct cpr_voltage *rails, int boot_min_uV)
 {
+	int ret;
+
 	if (!rails->mx)
 		return 0;
 	if (boot_min_uV <= 0 || boot_min_uV > rails->mx_max_uV ||
 	    rails->mx_min_uV < 0 || rails->mx_min_uV > rails->mx_max_uV)
 		return -EINVAL;
-	if (rails->mx_min_uV >= boot_min_uV)
+	if (rails->mx_min_uV < boot_min_uV) {
+		ret = cpr_voltage_vote_mx(rails, boot_min_uV);
+		if (ret)
+			return ret;
+	}
+	if (rails->mx_enabled)
 		return 0;
 
-	return cpr_voltage_vote_mx(rails, boot_min_uV);
+	ret = regulator_enable(rails->mx);
+	if (!ret)
+		rails->mx_enabled = true;
+
+	return ret;
 }
 
 static inline int cpr_voltage_set(struct cpr_voltage *rails, int apc_uV,
@@ -57,7 +72,7 @@ static inline int cpr_voltage_set(struct cpr_voltage *rails, int apc_uV,
 		return regulator_set_voltage(rails->apc, apc_uV, apc_uV);
 
 	/* Never infer an initial vote from a rounded-down boot clock corner. */
-	if (rails->mx_min_uV <= 0 || rails->mx_min_uV > rails->mx_max_uV ||
+	if (!rails->mx_enabled || rails->mx_min_uV <= 0 || rails->mx_min_uV > rails->mx_max_uV ||
 	    mx_min_uV <= 0 || mx_min_uV > rails->mx_max_uV ||
 	    apc_uV > mx_min_uV)
 		return -EINVAL;
