@@ -34,11 +34,11 @@ properties:
 
   clocks:
     minItems: 1
-    maxItems: 2
+    maxItems: 3
 
   clock-names:
     minItems: 1
-    maxItems: 2
+    maxItems: 3
 
   vdd-apc-supply:
     description: APC regulator supply.
@@ -84,10 +84,12 @@ allOf:
           items:
             - description: Reference clock.
             - description: CPU cluster clock, retained across CPU attachments.
+            - description: GPLL0 vote supplying the 300 MHz startup/notifier path.
         clock-names:
           items:
             - const: ref
             - const: cpu
+            - const: aux
         acc-syscon: false
         nvmem-cells:
           items:
