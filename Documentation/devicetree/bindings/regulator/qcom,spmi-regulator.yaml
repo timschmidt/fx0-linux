@@ -101,15 +101,48 @@ patternProperties:
         description: SAW controlled gang slave. Will not be configured.
         type: boolean
 
+      qcom,saw-fixed-range:
+        description:
+          PM8226 S2 uses its immutable power-on FTS2 voltage range through
+          the L2 SAW controller. Expose only that range, acknowledge voltage
+          commands and allow the PMIC slew time before returning success.
+          Requires a SAW leader, an initialized Madai L2 master controller
+          and disabled hardware AVS.
+        type: boolean
+
       qcom,saw-leader:
         description:
           SAW controlled gang leader. Will be configured as SAW regulator.
         type: boolean
 
+    allOf:
+      - if:
+          required: ["qcom,saw-fixed-range"]
+        then:
+          required: ["qcom,saw-leader"]
+          properties:
+            qcom,saw-slave: false
+
+  "^(?!s2$)(5vs[1-2]|(l|s)[1-9][0-9]?|lvs[1-4])$":
+    type: object
+    properties:
+      qcom,saw-fixed-range: false
+
 required:
   - compatible
 
 allOf:
+  - if:
+      required: [s2]
+      properties:
+        s2:
+          required: ["qcom,saw-fixed-range"]
+    then:
+      required: ["qcom,saw-reg"]
+      properties:
+        compatible:
+          const: qcom,pm8226-regulators
+
   - if:
       properties:
         compatible:
