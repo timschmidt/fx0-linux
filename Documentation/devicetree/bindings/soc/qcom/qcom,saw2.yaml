@@ -47,6 +47,14 @@ properties:
           - qcom,apq8064-saw2-v1.1-cpu
       - const: qcom,saw2
 
+  qcom,pmic-arbiter-master:
+    description:
+      Initialize the MSM8226 L2 controller as the shared APC PMIC arbiter
+      master and publish its register map to the PM8226 S2 regulator. This
+      mode leaves the low-power sequencer disabled and issues no voltage
+      commands during initialization. The owner must be built into the kernel.
+    type: boolean
+
   reg:
     items:
       - description: Base address and size of the SPM register region
@@ -61,6 +69,19 @@ properties:
 required:
   - compatible
   - reg
+
+allOf:
+  - if:
+      required: ["qcom,pmic-arbiter-master"]
+    then:
+      properties:
+        compatible:
+          items:
+            - const: qcom,msm8226-saw2-v2.1-l2
+            - const: qcom,saw2
+        reg:
+          maxItems: 1
+        regulator: false
 
 additionalProperties: false
 

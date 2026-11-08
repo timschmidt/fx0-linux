@@ -24,6 +24,8 @@ patternProperties:
     properties:
       opp-level: true
 
+      opp-supported-hw: true
+
       qcom,opp-fuse-level:
         description: |
           A positive value representing the fuse corner/level associated with
