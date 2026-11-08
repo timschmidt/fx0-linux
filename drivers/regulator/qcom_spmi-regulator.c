@@ -2598,10 +2598,14 @@ static int qcom_spmi_regulator_probe(struct platform_device *pdev)
 	syscon = of_parse_phandle(node, "qcom,saw-reg", 0);
 	if (syscon) {
 		saw_regmap = syscon_node_to_regmap(syscon);
+		ret = PTR_ERR_OR_ZERO(saw_regmap);
+		if (ret == -EINVAL &&
+		    of_device_is_compatible(syscon, "qcom,msm8226-saw2-v2.1-l2") &&
+		    of_property_read_bool(syscon, "qcom,pmic-arbiter-master"))
+			ret = -EPROBE_DEFER;
 		of_node_put(syscon);
-		if (IS_ERR(saw_regmap))
-			return dev_err_probe(dev, PTR_ERR(saw_regmap),
-					     "could not get SAW regmap\n");
+		if (ret)
+			return dev_err_probe(dev, ret, "could not get SAW regmap\n");
 	}
 
 	for (; reg->name; reg++) {

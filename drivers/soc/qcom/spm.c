@@ -13,6 +13,8 @@
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/linear_range.h>
+#include <linux/mfd/syscon.h>
+#include <linux/regmap.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -22,6 +24,8 @@
 #include <linux/regulator/driver.h>
 
 #include <soc/qcom/spm.h>
+
+#include "spm-msm8226-l2.h"
 
 #define FIELD_SET(current, mask, val)	\
 	(((current) & ~(mask)) | FIELD_PREP((mask), (val)))
@@ -62,6 +66,7 @@ enum spm_reg {
 #define MAX_SEQ_DATA		64
 
 struct spm_reg_data {
+	bool pmic_arbiter_master;
 	const u16 *reg_offset;
 	u32 spm_cfg;
 	u32 spm_dly;
@@ -207,6 +212,10 @@ static const struct spm_reg_data spm_reg_8974_8084_cpu  = {
 };
 
 /* SPM register data for 8226 */
+static const struct spm_reg_data spm_reg_8226_l2 = {
+	.pmic_arbiter_master = true,
+};
+
 static const struct spm_reg_data spm_reg_8226_cpu  = {
 	.reg_offset = spm_reg_offset_v2_1,
 	.spm_cfg = 0x0,
@@ -293,6 +302,11 @@ void spm_set_low_power_mode(struct spm_driver_data *drv,
 	u32 start_index;
 	u32 ctl_val;
 
+	/* This owner supplies voltage arbitration, not L2 low-power sequences. */
+	if (drv->reg_data->pmic_arbiter_master) {
+		dev_warn_ratelimited(drv->dev, "L2 master has no low-power sequence\n");
+		return;
+	}
 	start_index = drv->reg_data->start_index[mode];
 
 	ctl_val = spm_register_read(drv, SPM_REG_SPM_CTL);
@@ -479,6 +493,8 @@ static const struct of_device_id spm_match_table[] = {
 	  .data = &spm_reg_660_gold_l2 },
 	{ .compatible = "qcom,sdm660-silver-saw2-v4.1-l2",
 	  .data = &spm_reg_660_silver_l2 },
+	{ .compatible = "qcom,msm8226-saw2-v2.1-l2",
+	  .data = &spm_reg_8226_l2 },
 	{ .compatible = "qcom,msm8226-saw2-v2.1-cpu",
 	  .data = &spm_reg_8226_cpu },
 	{ .compatible = "qcom,msm8909-saw2-v3.0-cpu",
@@ -505,6 +521,77 @@ static const struct of_device_id spm_match_table[] = {
 };
 MODULE_DEVICE_TABLE(of, spm_match_table);
 
+static const struct regmap_range spm_8226_l2_read_ranges[] = {
+	regmap_reg_range(0x04, 0x08),
+	regmap_reg_range(0x14, 0x14),
+	regmap_reg_range(0x1c, 0x20),
+	regmap_reg_range(0x30, 0x34),
+	regmap_reg_range(0x40, 0x44),
+	regmap_reg_range(0xfd0, 0xfd0),
+};
+
+static const struct regmap_range spm_8226_l2_write_ranges[] = {
+	regmap_reg_range(0x08, 0x08),
+	regmap_reg_range(0x18, 0x1c),
+	regmap_reg_range(0x34, 0x34),
+	regmap_reg_range(0x40, 0x44),
+};
+
+static const struct regmap_access_table spm_8226_l2_read_table = {
+	.yes_ranges = spm_8226_l2_read_ranges,
+	.n_yes_ranges = ARRAY_SIZE(spm_8226_l2_read_ranges),
+};
+
+static const struct regmap_access_table spm_8226_l2_write_table = {
+	.yes_ranges = spm_8226_l2_write_ranges,
+	.n_yes_ranges = ARRAY_SIZE(spm_8226_l2_write_ranges),
+};
+
+static const struct regmap_config spm_8226_l2_regmap_config = {
+	.name = "l2-master",
+	.reg_bits = 32,
+	.val_bits = 32,
+	.reg_stride = 4,
+	.max_register = 0xffc,
+	.fast_io = true,
+	.rd_table = &spm_8226_l2_read_table,
+	.wr_table = &spm_8226_l2_write_table,
+};
+
+static int spm_8226_l2_register(struct platform_device *pdev,
+				struct spm_driver_data *drv)
+{
+	struct device *dev = &pdev->dev;
+	struct resource *resource;
+	struct regmap *map;
+	int ret;
+
+	if (!of_property_read_bool(dev->of_node, "qcom,pmic-arbiter-master"))
+		return -ENODEV;
+	/* The syscon registry has no unregister operation: this owner persists. */
+	if (IS_MODULE(CONFIG_QCOM_SPM))
+		return -EOPNOTSUPP;
+	resource = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!resource || resource_size(resource) < 0x1000)
+		return -EINVAL;
+	/* A generic syscon could expose the map before setup has completed. */
+	if (of_device_is_compatible(dev->of_node, "syscon"))
+		return -EINVAL;
+	map = syscon_node_to_regmap(dev->of_node);
+	if (!IS_ERR(map))
+		return -EEXIST;
+	if (PTR_ERR(map) != -EINVAL)
+		return PTR_ERR(map);
+	map = devm_regmap_init_mmio(dev, drv->reg_base, &spm_8226_l2_regmap_config);
+	if (IS_ERR(map))
+		return PTR_ERR(map);
+	ret = spm_8226_l2_master_init(map);
+	if (ret)
+		return dev_err_probe(dev, ret, "could not initialize L2 master\n");
+	/* Nothing fallible may follow publication of this permanent mapping. */
+	return of_syscon_register_regmap(dev->of_node, map);
+}
+
 static int spm_dev_probe(struct platform_device *pdev)
 {
 	const struct of_device_id *match_id;
@@ -526,6 +613,9 @@ static int spm_dev_probe(struct platform_device *pdev)
 	drv->reg_data = match_id->data;
 	drv->dev = &pdev->dev;
 	platform_set_drvdata(pdev, drv);
+
+	if (drv->reg_data->pmic_arbiter_master)
+		return spm_8226_l2_register(pdev, drv);
 
 	/* Write the SPM sequences first.. */
 	addr = drv->reg_base + drv->reg_data->reg_offset[SPM_REG_SEQ_ENTRY];
@@ -562,6 +652,8 @@ static struct platform_driver spm_driver = {
 	.probe = spm_dev_probe,
 	.driver = {
 		.name = "qcom_spm",
+		/* CPU users and the syscon registry retain controller references. */
+		.suppress_bind_attrs = true,
 		.of_match_table = spm_match_table,
 	},
 };
