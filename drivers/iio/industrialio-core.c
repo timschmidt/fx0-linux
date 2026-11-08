@@ -20,6 +20,7 @@
 #include <linux/kdev_t.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/math64.h>
 #include <linux/mutex.h>
 #include <linux/poll.h>
 #include <linux/property.h>
@@ -650,6 +651,25 @@ int iio_read_mount_matrix(struct device *dev, struct iio_mount_matrix *matrix)
 }
 EXPORT_SYMBOL(iio_read_mount_matrix);
 
+/* Power-of-two fractions terminate after at most shift decimal places. */
+static ssize_t iio_format_tiny_log2(char *buf, size_t offset, int numerator, unsigned int shift)
+{
+	u64 remainder = numerator < 0 ? -(s64)numerator : numerator;
+	u64 divisor = BIT_ULL(shift);
+	char fraction[64];
+	unsigned int digit, count = 0;
+
+	while (remainder && count < shift) {
+		digit = mul_u64_u64_div_u64(remainder, 10, divisor);
+		/* Unsigned wrap cancels here; the resulting remainder is < divisor. */
+		remainder = remainder * 10 - digit * divisor;
+		fraction[count++] = '0' + digit;
+	}
+	fraction[count] = '\0';
+
+	return sysfs_emit_at(buf, offset, "%s0.%s", numerator < 0 ? "-" : "", fraction);
+}
+
 static ssize_t __iio_format_value(char *buf, size_t offset, unsigned int type,
 				  int size, const int *vals)
 {
@@ -688,6 +708,9 @@ static ssize_t __iio_format_value(char *buf, size_t offset, unsigned int type,
 					     abs(tmp1));
 	case IIO_VAL_FRACTIONAL_LOG2:
 		tmp2 = shift_right((s64)vals[0] * 1000000000LL, vals[1]);
+		/* Preserve nonzero scales smaller than the usual nine decimal places. */
+		if (!tmp2 && vals[0] && vals[1] > 0 && vals[1] < 64)
+			return iio_format_tiny_log2(buf, offset, vals[0], vals[1]);
 		tmp0 = (int)div_s64_rem(tmp2, 1000000000LL, &tmp1);
 		if (tmp0 == 0 && tmp2 < 0)
 			return sysfs_emit_at(buf, offset, "-0.%09u", abs(tmp1));
