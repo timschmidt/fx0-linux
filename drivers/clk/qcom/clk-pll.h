@@ -34,6 +34,7 @@ struct pll_freq_tbl {
  * @status_reg: status register
  * @status_bit: ANDed with @status_reg to determine if PLL is enabled
  * @freq_tbl: PLL frequency table
+ * @critical_rate: Stop on uncertain CPU PLL programming; CCF can discard errors
  * @hw: handle between common and hardware-specific interfaces
  */
 struct clk_pll {
@@ -46,6 +47,7 @@ struct clk_pll {
 	u8	status_bit;
 	u8	post_div_width;
 	u8	post_div_shift;
+	bool	critical_rate;
 
 	const struct pll_freq_tbl *freq_tbl;
 
