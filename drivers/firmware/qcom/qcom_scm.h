@@ -110,6 +110,9 @@ int qcom_scm_shm_bridge_enable(struct device *scm_dev);
 #define QCOM_SCM_IO_READ		0x01
 #define QCOM_SCM_IO_WRITE		0x02
 
+#define QCOM_SCM_SVC_FUSE		0x08
+#define QCOM_SCM_FUSE_READ_LEGACY		0x07
+
 #define QCOM_SCM_SVC_INFO		0x06
 #define QCOM_SCM_INFO_IS_CALL_AVAIL	0x01
 

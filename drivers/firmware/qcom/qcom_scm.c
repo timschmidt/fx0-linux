@@ -883,6 +883,48 @@ static const struct reset_control_ops qcom_scm_pas_reset_ops = {
 	.deassert = qcom_scm_pas_reset_deassert,
 };
 
+/**
+ * qcom_scm_legacy_fuse_read() - Read a fuse row using the legacy firmware ABI
+ * @address: Eight-byte-aligned physical address of the fuse row.
+ * @value: Receives the row; unchanged on error.
+ *
+ * MSM8226/MSM8926 CPR calibration uses a two-word request (physical address,
+ * address type zero) and a three-word reply (low data, high data, status).
+ * Do not apply that response layout to the newer SMCCC conventions. Callers
+ * must use a sleepable context.
+ *
+ * Return: 0 on success, or a negative error code.
+ */
+int qcom_scm_legacy_fuse_read(u32 address, u64 *value)
+{
+	const struct qcom_scm_desc desc = {
+		.svc = QCOM_SCM_SVC_FUSE,
+		.cmd = QCOM_SCM_FUSE_READ_LEGACY,
+		.arginfo = QCOM_SCM_ARGS(2),
+		.args = { address, 0 },
+		.owner = ARM_SMCCC_OWNER_SIP,
+	};
+	struct qcom_scm_res res = {};
+	int ret;
+
+	if (!value || (address & 7))
+		return -EINVAL;
+	if (!qcom_scm_is_available())
+		return -EPROBE_DEFER;
+	if (__get_convention() != SMC_CONVENTION_LEGACY)
+		return -EOPNOTSUPP;
+
+	ret = qcom_scm_call(__scm->dev, &desc, &res);
+	if (ret)
+		return ret < 0 ? ret : -EIO;
+	if (res.result[2])
+		return -EIO;
+
+	*value = ((u64)(u32)res.result[1] << 32) | (u32)res.result[0];
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_legacy_fuse_read);
+
 int qcom_scm_io_readl(phys_addr_t addr, unsigned int *val)
 {
 	struct qcom_scm_desc desc = {
