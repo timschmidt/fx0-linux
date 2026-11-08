@@ -1182,52 +1182,68 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 
 	data = devm_kzalloc(drv->dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
-		return -ENOMEM;
+		return dev_err_probe(drv->dev, -ENOMEM,
+				     "MSM8926 state allocation failed\n");
 	ret = cpr_msm8926_read_calibration(drv->dev, &data->calibration);
 	if (ret)
-		return ret;
+		return dev_err_probe(drv->dev, ret,
+				     "MSM8926 calibration acquisition failed\n");
 	data->apcs = syscon_regmap_lookup_by_phandle(drv->dev->of_node,
 						     "qcom,apcs-syscon");
 	if (IS_ERR(data->apcs))
-		return PTR_ERR(data->apcs);
+		return dev_err_probe(drv->dev, PTR_ERR(data->apcs),
+				     "APCS reference register map unavailable\n");
 	ret = cpr_msm8926_check_refclock(data->apcs);
 	if (ret)
-		return ret;
+		return dev_err_probe(drv->dev, ret,
+				     "CPR reference source check failed\n");
 	mx = devm_regulator_get(drv->dev, "vdd-mx");
 	if (IS_ERR(mx))
-		return PTR_ERR(mx);
+		return dev_err_probe(drv->dev, PTR_ERR(mx),
+				     "MX supply unavailable\n");
 	boot_uV = regulator_get_voltage(drv->rails.apc);
 	ret = cpr_msm8926_plan_voltages(&data->calibration, drv->rails.apc,
 					mx, boot_uV, 1337500, &data->plan);
 	if (ret)
-		return ret;
+		return dev_err_probe(drv->dev, ret,
+				     "APC/MX voltage plan rejected (boot APC %d uV)\n",
+				     boot_uV);
 
 	ret = cpr_msm8926_supported_hw(&data->calibration, &data->plan,
 				       &data->supported_hw);
 	if (ret)
-		return ret;
+		return dev_err_probe(drv->dev, ret,
+				     "CPU eligibility mask rejected\n");
 
 	/* The provider owns this handle across virtual CPU detach/probe retries. */
 	cpu_clk = devm_clk_get(drv->dev, "cpu");
 	if (IS_ERR(cpu_clk))
-		return PTR_ERR(cpu_clk);
+		return dev_err_probe(drv->dev, PTR_ERR(cpu_clk),
+				     "CPU cluster clock unavailable\n");
 	data->aux_clk = devm_clk_get(drv->dev, "aux");
 	if (IS_ERR(data->aux_clk))
-		return PTR_ERR(data->aux_clk);
+		return dev_err_probe(drv->dev, PTR_ERR(data->aux_clk),
+				     "GPLL0 auxiliary clock unavailable\n");
 	/* The source-4, HID-3 notifier path must be the lowest CPU OPP. */
 	if (clk_get_rate(data->aux_clk) != 600000000)
-		return -ERANGE;
+		return dev_err_probe(drv->dev, -ERANGE,
+				     "startup auxiliary clock must be 600 MHz\n");
 	data->pll_clk = devm_clk_get(drv->dev, "pll");
 	if (IS_ERR(data->pll_clk))
-		return PTR_ERR(data->pll_clk);
+		return dev_err_probe(drv->dev, PTR_ERR(data->pll_clk),
+				     "A7 PLL clock unavailable\n");
 	for (i = 0; i < ARRAY_SIZE(cpr_msm8926_rates); i++) {
 		if (!(data->supported_hw & (1U << i)))
 			continue;
 		rounded = clk_round_rate(cpu_clk, cpr_msm8926_rates[i]);
 		if (rounded < 0)
-			return rounded;
+			return dev_err_probe(drv->dev, rounded,
+					     "CPU rate rounding failed for %lu Hz\n",
+					     cpr_msm8926_rates[i]);
 		if ((unsigned long)rounded != cpr_msm8926_rates[i])
-			return -ERANGE;
+			return dev_err_probe(drv->dev, -ERANGE,
+					     "CPU rate %lu Hz rounded to %ld Hz\n",
+					     cpr_msm8926_rates[i], rounded);
 	}
 
 	/* Read/calculation only. Attachment establishes the live MX vote later. */
