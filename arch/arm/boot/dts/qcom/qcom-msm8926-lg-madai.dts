@@ -7,6 +7,7 @@
 
 #include "qcom-msm8226.dtsi"
 #include "pm8226.dtsi"
+#include <dt-bindings/clock/qcom,rpmcc.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
@@ -171,6 +172,30 @@
 };
 
 &tlmm {
+	nfc_irq_default: nfc-irq-default-state {
+		pins = "gpio21";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-down;
+		output-disable;
+	};
+
+	nfc_enable_default: nfc-enable-default-state {
+		pins = "gpio20";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-low;
+	};
+
+	nfc_firmware_default: nfc-firmware-default-state {
+		pins = "gpio22";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+		output-low;
+	};
+
 	cam_mclk0_default: cam-mclk0-default-state {
 		pins = "gpio26";
 		function = "cam_mclk0";
@@ -224,6 +249,29 @@
 
 &blsp1_uart3 {
 	status = "okay";
+};
+
+&blsp1_i2c3 {
+	clock-frequency = <100000>;
+	status = "okay";
+
+	nfc@28 {
+		compatible = "nxp,pn547", "nxp,nxp-nci-i2c";
+		reg = <0x28>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <21 IRQ_TYPE_EDGE_RISING>;
+		enable-gpios = <&tlmm 20 GPIO_ACTIVE_HIGH>;
+		firmware-gpios = <&tlmm 22 GPIO_ACTIVE_HIGH>;
+		clocks = <&rpmcc RPM_SMD_CXO_D1_PIN>;
+		clock-names = "ref";
+		pinctrl-0 = <&nfc_irq_default &nfc_enable_default
+			     &nfc_firmware_default>;
+		pinctrl-names = "default";
+	};
+};
+
+&blsp1_i2c3_pins {
+	drive-strength = <8>;
 };
 
 &mba_region {
