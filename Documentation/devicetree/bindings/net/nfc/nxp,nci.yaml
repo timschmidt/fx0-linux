@@ -24,6 +24,13 @@ properties:
   enable-gpios:
     description: Output GPIO pin used for enabling/disabling the controller
 
+  clocks:
+    maxItems: 1
+    description: Optional external reference clock for the controller
+
+  clock-names:
+    const: ref
+
   firmware-gpios:
     description: Output GPIO pin used to enter firmware download mode
 
@@ -38,6 +45,10 @@ required:
   - enable-gpios
   - interrupts
   - reg
+
+dependencies:
+  clocks: [clock-names]
+  clock-names: [clocks]
 
 additionalProperties: false
 
