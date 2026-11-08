@@ -33,12 +33,12 @@ properties:
     maxItems: 1
 
   clocks:
-    items:
-      - description: Reference clock.
+    minItems: 1
+    maxItems: 2
 
   clock-names:
-    items:
-      - const: ref
+    minItems: 1
+    maxItems: 2
 
   vdd-apc-supply:
     description: APC regulator supply.
@@ -53,6 +53,12 @@ properties:
     description: |
       A phandle to the OPP table containing the performance states
       supported by the CPR power domain.
+
+  qcom,apcs-syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: |
+      MSM8926 APCS syscon containing the CPR reference selector. The driver
+      requires bit 0 at offset 0x64 to select the 19.2 MHz XO source.
 
   acc-syscon:
     $ref: /schemas/types.yaml#/definitions/phandle
@@ -74,6 +80,14 @@ allOf:
             const: qcom,msm8926-cpr
     then:
       properties:
+        clocks:
+          items:
+            - description: Reference clock.
+            - description: CPU cluster clock, retained across CPU attachments.
+        clock-names:
+          items:
+            - const: ref
+            - const: cpu
         acc-syscon: false
         nvmem-cells:
           items:
@@ -87,9 +101,17 @@ allOf:
             - const: cpr_redundant
       required:
         - vdd-mx-supply
+        - qcom,apcs-syscon
     else:
       properties:
+        clocks:
+          items:
+            - description: Reference clock.
+        clock-names:
+          items:
+            - const: ref
         vdd-mx-supply: false
+        qcom,apcs-syscon: false
         nvmem-cells:
           items:
             - description: Corner 1 quotient offset

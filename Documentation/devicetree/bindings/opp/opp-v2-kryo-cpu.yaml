@@ -11,6 +11,24 @@ maintainers:
 
 allOf:
   - $ref: opp-v2-base.yaml#
+  - if:
+      properties:
+        compatible:
+          const: operating-points-v2-msm8926-cpu
+    then:
+      properties:
+        nvmem-cells: false
+      required:
+        - opp-shared
+      patternProperties:
+        '^opp-?[0-9]+$':
+          properties:
+            opp-microvolt: false
+          patternProperties:
+            '^opp-microvolt-speed[0-9]+-pvs[0-9]+$': false
+          required:
+            - opp-supported-hw
+            - required-opps
 
 description: |
   In certain Qualcomm Technologies, Inc. SoCs like APQ8096 and MSM8996,
@@ -24,11 +42,18 @@ description: |
   This is used to determine the voltage and frequency value for each OPP of
   operating-points-v2 table when it is parsed by the OPP framework.
 
+  On MSM8926 the CPR provider reads the calibration and supplies the same
+  eligibility mask for both CPU and CPR domain OPP tables. Each CPU OPP
+  requires its matching CPR state, which owns voltage programming. Bits 0-13
+  correspond to the frequencies defined in dt-bindings/opp/qcom,msm8926.h;
+  this is a per-frequency mask, rather than a speed-bin index.
+
 properties:
   compatible:
     enum:
       - operating-points-v2-krait-cpu
       - operating-points-v2-kryo-cpu
+      - operating-points-v2-msm8926-cpu
 
   nvmem-cells:
     description: |
@@ -73,6 +98,10 @@ patternProperties:
           1:  IPQ8064/IPQ8066/IPQ8068
           2:  IPQ8065/IPQ8069
           3-31:  unused
+
+          On MSM8926, each bit corresponds to one canonical frequency in
+          dt-bindings/opp/qcom,msm8926.h. Use one bit per OPP in both CPU and
+          CPR domain tables.
 
           Other platforms use bits directly corresponding to speedbin index.
 
