@@ -13,6 +13,7 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
@@ -36,6 +37,8 @@ struct nxp_nci_i2c_phy {
 
 	struct gpio_desc *gpiod_en;
 	struct gpio_desc *gpiod_fw;
+	struct clk *ref_clk;
+	bool ref_clk_enabled;
 
 	int hard_fault; /*
 			 * < 0 if hardware error occurred (e.g. i2c err)
@@ -47,13 +50,26 @@ static int nxp_nci_i2c_set_mode(void *phy_id,
 				    enum nxp_nci_mode mode)
 {
 	struct nxp_nci_i2c_phy *phy = (struct nxp_nci_i2c_phy *) phy_id;
+	int r;
+
+	if (mode != NXP_NCI_MODE_COLD && !phy->ref_clk_enabled) {
+		r = clk_prepare_enable(phy->ref_clk);
+		if (r)
+			return r;
+		phy->ref_clk_enabled = true;
+	}
 
 	gpiod_set_value_cansleep(phy->gpiod_fw, (mode == NXP_NCI_MODE_FW) ? 1 : 0);
 	gpiod_set_value_cansleep(phy->gpiod_en, (mode != NXP_NCI_MODE_COLD) ? 1 : 0);
 	usleep_range(10000, 15000);
 
-	if (mode == NXP_NCI_MODE_COLD)
+	if (mode == NXP_NCI_MODE_COLD) {
+		if (phy->ref_clk_enabled) {
+			clk_disable_unprepare(phy->ref_clk);
+			phy->ref_clk_enabled = false;
+		}
 		phy->hard_fault = 0;
+	}
 
 	return 0;
 }
@@ -283,6 +299,11 @@ static int nxp_nci_i2c_probe(struct i2c_client *client)
 
 	phy->i2c_dev = client;
 	i2c_set_clientdata(client, phy);
+
+	phy->ref_clk = devm_clk_get_optional(dev, "ref");
+	if (IS_ERR(phy->ref_clk))
+		return dev_err_probe(dev, PTR_ERR(phy->ref_clk),
+				     "Failed to get reference clock\n");
 
 	r = devm_acpi_dev_add_driver_gpios(dev, acpi_nxp_nci_gpios);
 	if (r)
