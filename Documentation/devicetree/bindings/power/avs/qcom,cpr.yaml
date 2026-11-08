@@ -22,6 +22,7 @@ properties:
     items:
       - enum:
           - qcom,qcs404-cpr
+          - qcom,msm8926-cpr
       - const: qcom,cpr
 
   reg:
@@ -42,6 +43,9 @@ properties:
   vdd-apc-supply:
     description: APC regulator supply.
 
+  vdd-mx-supply:
+    description: Memory rail dependency of the MSM8926 APC supply.
+
   '#power-domain-cells':
     const: 0
 
@@ -55,36 +59,68 @@ properties:
     description: A phandle to the syscon used for writing ACC settings.
 
   nvmem-cells:
-    items:
-      - description: Corner 1 quotient offset
-      - description: Corner 2 quotient offset
-      - description: Corner 3 quotient offset
-      - description: Corner 1 initial voltage
-      - description: Corner 2 initial voltage
-      - description: Corner 3 initial voltage
-      - description: Corner 1 quotient
-      - description: Corner 2 quotient
-      - description: Corner 3 quotient
-      - description: Corner 1 ring oscillator
-      - description: Corner 2 ring oscillator
-      - description: Corner 3 ring oscillator
-      - description: Fuse revision
+    minItems: 3
+    maxItems: 13
 
   nvmem-cell-names:
-    items:
-      - const: cpr_quotient_offset1
-      - const: cpr_quotient_offset2
-      - const: cpr_quotient_offset3
-      - const: cpr_init_voltage1
-      - const: cpr_init_voltage2
-      - const: cpr_init_voltage3
-      - const: cpr_quotient1
-      - const: cpr_quotient2
-      - const: cpr_quotient3
-      - const: cpr_ring_osc1
-      - const: cpr_ring_osc2
-      - const: cpr_ring_osc3
-      - const: cpr_fuse_revision
+    minItems: 3
+    maxItems: 13
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,msm8926-cpr
+    then:
+      properties:
+        acc-syscon: false
+        nvmem-cells:
+          items:
+            - description: Complete raw CPU/PVS row22 including the uplift selector
+            - description: Complete raw primary CPR row138
+            - description: Complete raw redundant CPR row139
+        nvmem-cell-names:
+          items:
+            - const: cpu_calibration
+            - const: cpr_primary
+            - const: cpr_redundant
+      required:
+        - vdd-mx-supply
+    else:
+      properties:
+        vdd-mx-supply: false
+        nvmem-cells:
+          items:
+            - description: Corner 1 quotient offset
+            - description: Corner 2 quotient offset
+            - description: Corner 3 quotient offset
+            - description: Corner 1 initial voltage
+            - description: Corner 2 initial voltage
+            - description: Corner 3 initial voltage
+            - description: Corner 1 quotient
+            - description: Corner 2 quotient
+            - description: Corner 3 quotient
+            - description: Corner 1 ring oscillator
+            - description: Corner 2 ring oscillator
+            - description: Corner 3 ring oscillator
+            - description: Fuse revision
+
+        nvmem-cell-names:
+          items:
+            - const: cpr_quotient_offset1
+            - const: cpr_quotient_offset2
+            - const: cpr_quotient_offset3
+            - const: cpr_init_voltage1
+            - const: cpr_init_voltage2
+            - const: cpr_init_voltage3
+            - const: cpr_quotient1
+            - const: cpr_quotient2
+            - const: cpr_quotient3
+            - const: cpr_ring_osc1
+            - const: cpr_ring_osc2
+            - const: cpr_ring_osc3
+            - const: cpr_fuse_revision
 
 required:
   - compatible
