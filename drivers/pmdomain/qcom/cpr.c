@@ -239,6 +239,7 @@ struct cpr_msm8926_data {
 	u32 supported_hw;
 	int opp_token;
 	struct regmap *apcs;
+	struct clk *aux_clk;
 };
 
 static struct platform_driver cpr_driver;
@@ -1183,6 +1184,12 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 	cpu_clk = devm_clk_get(drv->dev, "cpu");
 	if (IS_ERR(cpu_clk))
 		return PTR_ERR(cpu_clk);
+	data->aux_clk = devm_clk_get(drv->dev, "aux");
+	if (IS_ERR(data->aux_clk))
+		return PTR_ERR(data->aux_clk);
+	/* The source-4, HID-3 notifier path must be the lowest CPU OPP. */
+	if (clk_get_rate(data->aux_clk) != 600000000)
+		return -ERANGE;
 	for (i = 0; i < ARRAY_SIZE(cpr_msm8926_rates); i++) {
 		if (!(data->supported_hw & (1U << i)))
 			continue;
@@ -1710,6 +1717,67 @@ static int cpr_power_on(struct generic_pm_domain *domain)
 	return cpr_enable(drv);
 }
 
+/*
+ * lk2nd can hand over an unlisted 800 MHz rate before cpufreq-dt is loaded.
+ * Retain APC's boot target while moving to the 300 MHz GPLL0/2 path. Never
+ * label the old clock with a rounded-down corner or lower voltage here.
+ * This is a startup handoff; runtime clock-error qualification is separate.
+ */
+static int cpr_msm8926_bootstrap_clock(struct cpr_drv *drv)
+{
+	struct cpr_msm8926_data *data = drv->msm8926;
+	u32 cmd, cmd_after, cfg, cfg_after;
+	unsigned long rate;
+	int ret, boot_uV;
+
+	if (!data || !drv->num_corners || drv->corners[0].freq != 300000000)
+		return -EINVAL;
+	if (clk_get_rate(data->aux_clk) != 600000000)
+		return -ERANGE;
+	rate = clk_get_rate(drv->cpu_clk);
+	if (rate < drv->corners[0].freq)
+		return -ERANGE;
+	boot_uV = regulator_get_voltage(drv->rails.apc);
+	if (boot_uV < 0)
+		return boot_uV;
+	if (boot_uV < drv->corners[0].uV || boot_uV > data->plan.bootstrap_mx_uV)
+		return -ERANGE;
+
+	ret = cpr_voltage_bootstrap(&drv->rails, data->plan.bootstrap_mx_uV);
+	if (ret)
+		return ret;
+	if (!data->apc_enabled) {
+		ret = regulator_enable(drv->rails.apc);
+		if (ret)
+			return ret;
+		data->apc_enabled = true;
+	}
+
+	ret = clk_set_rate(drv->cpu_clk, drv->corners[0].freq);
+	if (ret)
+		return ret;
+
+	/* CCF can discard provider set-rate errors. Verify the actual mux. */
+	ret = regmap_read(data->apcs, 0x50, &cmd);
+	if (ret)
+		return ret;
+	ret = regmap_read(data->apcs, 0x54, &cfg);
+	if (ret)
+		return ret;
+	ret = regmap_read(data->apcs, 0x50, &cmd_after);
+	if (ret)
+		return ret;
+	ret = regmap_read(data->apcs, 0x54, &cfg_after);
+	if (ret)
+		return ret;
+	if ((cmd | cmd_after) & (BIT(0) | BIT(4) | BIT(31)) || cfg != cfg_after ||
+	    (cfg & (GENMASK(10, 8) | GENMASK(4, 0))) != (4 << 8 | 3) ||
+	    clk_get_rate(drv->cpu_clk) != drv->corners[0].freq)
+		return -EIO;
+
+	return 0;
+}
+
 static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 			     struct device *dev)
 {
@@ -1790,6 +1858,12 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	if (ret)
 		return ret;
 
+	if (drv->msm8926) {
+		ret = cpr_msm8926_bootstrap_clock(drv);
+		if (ret)
+			return ret;
+	}
+
 	ret = cpr_find_initial_corner(drv);
 	if (ret)
 		return ret;
@@ -1808,20 +1882,6 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 				 acc_desc->enable_mask);
 		if (ret)
 			return ret;
-	}
-
-	if (drv->msm8926) {
-		/* No clock/APC change before a floor covering the real boot rail. */
-		ret = cpr_voltage_bootstrap(&drv->rails,
-					    drv->msm8926->plan.bootstrap_mx_uV);
-		if (ret)
-			return ret;
-		if (!drv->msm8926->apc_enabled) {
-			ret = regulator_enable(drv->rails.apc);
-			if (ret)
-				return ret;
-			drv->msm8926->apc_enabled = true;
-		}
 	}
 
 	/* Only a fully initialized attachment may bypass setup on retry. */
