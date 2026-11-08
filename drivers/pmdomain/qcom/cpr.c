@@ -1069,7 +1069,7 @@ static unsigned long cpr_get_opp_hz_for_req(struct dev_pm_opp *ref,
 	return 0;
 }
 
-static int cpr_corner_init(struct cpr_drv *drv)
+static int cpr_corner_init(struct cpr_drv *drv, struct device *cpu_dev)
 {
 	const struct cpr_desc *desc = drv->desc;
 	const struct cpr_fuse *fuses = drv->cpr_fuses;
@@ -1112,7 +1112,7 @@ static int cpr_corner_init(struct cpr_drv *drv)
 			return -EINVAL;
 		}
 		fnum = fc - 1;
-		freq = cpr_get_opp_hz_for_req(opp, drv->attached_cpu_dev);
+		freq = cpr_get_opp_hz_for_req(opp, cpu_dev);
 		if (!freq) {
 			dev_pm_opp_put(opp);
 			return -EINVAL;
@@ -1470,10 +1470,7 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 		return dev_err_probe(drv->dev, PTR_ERR(drv->cpu_clk),
 				     "could not get cpu clk\n");
 
-	drv->attached_cpu_dev = dev;
-
-	dev_dbg(drv->dev, "using cpu clk from: %s\n",
-		dev_name(drv->attached_cpu_dev));
+	dev_dbg(drv->dev, "using cpu clk from: %s\n", dev_name(dev));
 
 	/*
 	 * Everything related to (virtual) corners has to be initialized
@@ -1501,7 +1498,7 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	if (!drv->corners)
 		return -ENOMEM;
 
-	ret = cpr_corner_init(drv);
+	ret = cpr_corner_init(drv, dev);
 	if (ret)
 		return ret;
 
@@ -1520,15 +1517,24 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	if (ret)
 		return ret;
 
-	if (acc_desc->config)
-		regmap_multi_reg_write(drv->tcsr, acc_desc->config,
-				       acc_desc->num_regs_per_fuse);
+	if (acc_desc->config) {
+		ret = regmap_multi_reg_write(drv->tcsr, acc_desc->config,
+				     acc_desc->num_regs_per_fuse);
+		if (ret)
+			return ret;
+	}
 
 	/* Enable ACC if required */
-	if (acc_desc->enable_mask)
-		regmap_update_bits(drv->tcsr, acc_desc->enable_reg,
-				   acc_desc->enable_mask,
-				   acc_desc->enable_mask);
+	if (acc_desc->enable_mask) {
+		ret = regmap_update_bits(drv->tcsr, acc_desc->enable_reg,
+				 acc_desc->enable_mask,
+				 acc_desc->enable_mask);
+		if (ret)
+			return ret;
+	}
+
+	/* Only a fully initialized attachment may bypass setup on retry. */
+	drv->attached_cpu_dev = dev;
 
 	dev_info(drv->dev, "driver initialized with %u OPPs\n",
 		 drv->num_corners);
