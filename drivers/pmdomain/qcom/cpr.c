@@ -25,8 +25,11 @@
 #include <linux/regulator/consumer.h>
 #include <linux/clk.h>
 #include <linux/nvmem-consumer.h>
+#include <linux/suspend.h>
 
 #include "cpr-voltage.h"
+#include "cpr-msm8926-corner.h"
+#include "cpr-msm8926-fuses.h"
 
 /* Register Offsets for RB-CPR and Bit Definitions */
 
@@ -184,6 +187,7 @@ struct cpr_desc {
 	struct cpr_fuses cpr_fuses;
 	bool reduce_to_fuse_uV;
 	bool reduce_to_corner_uV;
+	bool msm8926;
 };
 
 struct acc_desc {
@@ -201,6 +205,7 @@ struct cpr_acc_desc {
 };
 
 struct fuse_corner {
+	int mx_min_uV;
 	int min_uV;
 	int max_uV;
 	int uV;
@@ -222,6 +227,13 @@ struct corner {
 	u32 save_irq;
 	unsigned long freq;
 	struct fuse_corner *fuse_corner;
+};
+
+struct cpr_msm8926_data {
+	struct cpr_msm8926_calibration calibration;
+	struct cpr_msm8926_voltage_plan plan;
+	bool apc_enabled;
+	bool applied;
 };
 
 struct cpr_drv {
@@ -249,11 +261,14 @@ struct cpr_drv {
 	const struct cpr_fuse *cpr_fuses;
 
 	struct dentry *debugfs;
+	struct cpr_msm8926_data *msm8926;
+	bool suspended;
 };
 
 static bool cpr_is_allowed(struct cpr_drv *drv)
 {
-	return !drv->loop_disabled;
+	return !drv->loop_disabled && !drv->suspended &&
+	       (!drv->msm8926 || drv->msm8926->applied);
 }
 
 static void cpr_write(struct cpr_drv *drv, u32 offset, u32 value)
@@ -441,7 +456,9 @@ static int cpr_scale_voltage(struct cpr_drv *drv, struct corner *corner,
 	if (ret)
 		return ret;
 
-	ret = cpr_voltage_set(&drv->rails, new_uV, fuse_corner->max_uV);
+	ret = cpr_voltage_set(&drv->rails, new_uV,
+			      drv->msm8926 ? fuse_corner->mx_min_uV :
+			      fuse_corner->max_uV);
 	if (ret) {
 		dev_err_ratelimited(drv->dev, "failed to set apc voltage %d\n",
 				    new_uV);
@@ -565,6 +582,10 @@ static int cpr_scale(struct cpr_drv *drv, enum voltage_change_dir dir)
 
 	ret = cpr_scale_voltage(drv, corner, new_uV, dir);
 	if (ret) {
+		if (drv->msm8926) {
+			cpr_ctl_disable(drv);
+			drv->msm8926->applied = false;
+		}
 		cpr_irq_clr_nack(drv);
 		return ret;
 	}
@@ -641,7 +662,8 @@ static irqreturn_t cpr_irq_handler(int irq, void *dev)
 		}
 
 		/* Save register values for the corner */
-		cpr_corner_save(drv, drv->corner);
+		if (cpr_is_allowed(drv))
+			cpr_corner_save(drv, drv->corner);
 	}
 
 	mutex_unlock(&drv->lock);
@@ -653,9 +675,15 @@ static int cpr_enable(struct cpr_drv *drv)
 {
 	int ret;
 
-	ret = regulator_enable(drv->rails.apc);
-	if (ret)
-		return ret;
+	if (drv->msm8926 && !drv->rails.mx_enabled)
+		return -EPROBE_DEFER;
+	if (!drv->msm8926 || !drv->msm8926->apc_enabled) {
+		ret = regulator_enable(drv->rails.apc);
+		if (ret)
+			return ret;
+		if (drv->msm8926)
+			drv->msm8926->apc_enabled = true;
+	}
 
 	mutex_lock(&drv->lock);
 
@@ -681,6 +709,9 @@ static int cpr_disable(struct cpr_drv *drv)
 
 	mutex_unlock(&drv->lock);
 
+	/* The live CPU rail can outlast the domain; retain both supply votes. */
+	if (drv->msm8926)
+		return 0;
 	return regulator_disable(drv->rails.apc);
 }
 
@@ -762,6 +793,13 @@ static int cpr_set_performance_state(struct generic_pm_domain *domain,
 	dev_dbg(drv->dev, "%s: setting perf state: %u (prev state: %u)\n",
 		__func__, state, cpr_get_cur_perf_state(drv));
 
+	if (drv->suspended)
+		return -EBUSY;
+	if (!state)
+		return drv->msm8926 ? 0 : -EINVAL;
+	if (!drv->attached_cpu_dev || state > drv->num_corners)
+		return -EINVAL;
+
 	/*
 	 * Determine new corner we're going to.
 	 * Remove one since lowest performance state is 1.
@@ -788,12 +826,19 @@ static int cpr_set_performance_state(struct generic_pm_domain *domain,
 		cpr_ctl_disable(drv);
 
 	ret = cpr_scale_voltage(drv, corner, new_uV, dir);
-	if (ret)
+	if (ret) {
+		if (drv->msm8926)
+			drv->msm8926->applied = false;
 		return ret;
+	}
+	if (drv->msm8926) {
+		drv->msm8926->applied = true;
+		corner->last_uV = new_uV;
+	}
 
 	if (cpr_is_allowed(drv)) {
 		cpr_irq_clr(drv);
-		if (drv->corner != corner)
+		if (drv->msm8926 || drv->corner != corner)
 			cpr_corner_restore(drv, corner);
 		cpr_ctl_enable(drv, corner);
 	}
@@ -1069,6 +1114,101 @@ static unsigned long cpr_get_opp_hz_for_req(struct dev_pm_opp *ref,
 	return 0;
 }
 
+static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
+{
+	struct cpr_msm8926_data *data;
+	struct regulator *mx;
+	struct fuse_corner *fuse;
+	int ret, boot_uV;
+	unsigned int i;
+
+	data = devm_kzalloc(drv->dev, sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+	ret = cpr_msm8926_read_calibration(drv->dev, &data->calibration);
+	if (ret)
+		return ret;
+	mx = devm_regulator_get(drv->dev, "vdd-mx");
+	if (IS_ERR(mx))
+		return PTR_ERR(mx);
+	boot_uV = regulator_get_voltage(drv->rails.apc);
+	ret = cpr_msm8926_plan_voltages(&data->calibration, drv->rails.apc,
+					mx, boot_uV, 1337500, &data->plan);
+	if (ret)
+		return ret;
+
+	/* Read/calculation only. Attachment establishes the live MX vote later. */
+	for (i = 0; i < 3; i++) {
+		fuse = &drv->fuse_corners[i];
+		fuse->min_uV = data->plan.floor_uV[i];
+		fuse->max_uV = data->plan.ceiling_uV[i];
+		fuse->uV = data->plan.initial_uV[i];
+		fuse->mx_min_uV = data->plan.mx_min_uV[i];
+		fuse->quot = data->calibration.quotient[i];
+		fuse->ring_osc_idx = data->calibration.ring_osc[i];
+		fuse->step_quot = 30;
+	}
+	drv->rails.mx = mx;
+	drv->rails.mx_max_uV = 1337500;
+	drv->msm8926 = data;
+	return 0;
+}
+
+static int cpr_msm8926_corner_init(struct cpr_drv *drv, struct device *cpu_dev)
+{
+	const struct cpr_msm8926_calibration *cal = &drv->msm8926->calibration;
+	const struct cpr_msm8926_voltage_plan *plan = &drv->msm8926->plan;
+	struct cpr_msm8926_corner mapped;
+	struct dev_pm_opp *opp;
+	struct fuse_corner *fuse;
+	struct corner *corner;
+	unsigned long freq, previous = 0;
+	unsigned int level, fc, i;
+	long rounded;
+	int ret;
+
+	if (drv->num_corners > 14)
+		return -EINVAL;
+	for (i = 0; i < 3; i++)
+		drv->fuse_corners[i].max_freq = 0;
+	for (level = 1; level <= drv->num_corners; level++) {
+		opp = dev_pm_opp_find_level_exact(&drv->pd.dev, level);
+		if (IS_ERR(opp))
+			return PTR_ERR(opp);
+		fc = cpr_get_fuse_corner(opp);
+		freq = cpr_get_opp_hz_for_req(opp, cpu_dev);
+		dev_pm_opp_put(opp);
+		if (!freq || freq <= previous || !fc || fc > 3)
+			return -EINVAL;
+		/* Bad clock/feedback fuses cannot authorize faster CPU operation. */
+		if (freq > 787200000 && (!cal->clock_bin_valid || !cal->fuse_allows_loop))
+			return -ERANGE;
+		rounded = clk_round_rate(drv->cpu_clk, freq);
+		if (rounded < 0)
+			return rounded;
+		if ((unsigned long)rounded != freq)
+			return -ERANGE;
+		ret = cpr_msm8926_map_corner(cal, plan, freq, &mapped);
+		if (ret)
+			return ret;
+		if (mapped.fuse_corner != fc)
+			return -EINVAL;
+
+		fuse = &drv->fuse_corners[fc - 1];
+		corner = &drv->corners[level - 1];
+		corner->fuse_corner = fuse;
+		corner->freq = freq;
+		corner->min_uV = mapped.floor_uV;
+		corner->max_uV = mapped.ceiling_uV;
+		corner->uV = mapped.initial_uV;
+		corner->last_uV = mapped.initial_uV;
+		corner->quot_adjust = fuse->quot - mapped.quotient;
+		fuse->max_freq = freq;
+		previous = freq;
+	}
+	return 0;
+}
+
 static int cpr_corner_init(struct cpr_drv *drv, struct device *cpu_dev)
 {
 	const struct cpr_desc *desc = drv->desc;
@@ -1085,6 +1225,9 @@ static int cpr_corner_init(struct cpr_drv *drv, struct device *cpu_dev)
 	unsigned long freq;
 	int step_volt = regulator_get_linear_step(drv->rails.apc);
 	struct dev_pm_opp *opp;
+
+	if (drv->msm8926)
+		return cpr_msm8926_corner_init(drv, cpu_dev);
 
 	if (!step_volt)
 		return -EINVAL;
@@ -1107,7 +1250,7 @@ static int cpr_corner_init(struct cpr_drv *drv, struct device *cpu_dev)
 		if (IS_ERR(opp))
 			return -EINVAL;
 		fc = cpr_get_fuse_corner(opp);
-		if (!fc) {
+		if (!fc || fc > desc->num_fuse_corners) {
 			dev_pm_opp_put(opp);
 			return -EINVAL;
 		}
@@ -1263,7 +1406,8 @@ static const struct cpr_fuse *cpr_get_fuses(struct cpr_drv *drv)
 
 static void cpr_set_loop_allowed(struct cpr_drv *drv)
 {
-	drv->loop_disabled = false;
+	drv->loop_disabled = drv->msm8926 &&
+		!drv->msm8926->calibration.fuse_allows_loop;
 }
 
 static int cpr_init_parameters(struct cpr_drv *drv)
@@ -1277,6 +1421,9 @@ static int cpr_init_parameters(struct cpr_drv *drv)
 
 	drv->ref_clk_khz = clk_get_rate(clk) / 1000;
 	clk_put(clk);
+
+	if (drv->msm8926 && drv->ref_clk_khz != 19200)
+		return -EINVAL;
 
 	if (desc->timer_cons_up > RBIF_TIMER_ADJ_CONS_UP_MASK ||
 	    desc->timer_cons_down > RBIF_TIMER_ADJ_CONS_DOWN_MASK ||
@@ -1330,7 +1477,7 @@ static int cpr_find_initial_corner(struct cpr_drv *drv)
 			drv->corner = iter;
 	}
 
-	if (!drv->corner) {
+	if (!drv->corner || (drv->msm8926 && drv->corner->freq != rate)) {
 		dev_err(drv->dev, "boot up corner not found\n");
 		return -EINVAL;
 	}
@@ -1421,6 +1568,23 @@ static const struct cpr_acc_desc qcs404_cpr_acc_desc = {
 	.acc_desc = &qcs404_acc_desc,
 };
 
+#if IS_ENABLED(CONFIG_QCOM_CPR_MSM8926)
+static const struct cpr_desc msm8926_cpr_desc = {
+	.num_fuse_corners = 3,
+	.timer_delay_us = 5000,
+	.timer_cons_down = 2,
+	.down_threshold = 2,
+	.gcnt_us = 1,
+	.vdd_apc_step_up_limit = 1,
+	.vdd_apc_step_down_limit = 1,
+	.msm8926 = true,
+};
+
+static const struct cpr_acc_desc msm8926_cpr_acc_desc = {
+	.cpr_desc = &msm8926_cpr_desc,
+};
+#endif
+
 static int cpr_power_off(struct generic_pm_domain *domain)
 {
 	struct cpr_drv *drv = container_of(domain, struct cpr_drv, pd);
@@ -1497,6 +1661,7 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 				    GFP_KERNEL);
 	if (!drv->corners)
 		return -ENOMEM;
+	drv->corner = NULL;
 
 	ret = cpr_corner_init(drv, dev);
 	if (ret)
@@ -1517,7 +1682,7 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	if (ret)
 		return ret;
 
-	if (acc_desc->config) {
+	if (acc_desc && acc_desc->config) {
 		ret = regmap_multi_reg_write(drv->tcsr, acc_desc->config,
 				     acc_desc->num_regs_per_fuse);
 		if (ret)
@@ -1525,12 +1690,26 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	}
 
 	/* Enable ACC if required */
-	if (acc_desc->enable_mask) {
+	if (acc_desc && acc_desc->enable_mask) {
 		ret = regmap_update_bits(drv->tcsr, acc_desc->enable_reg,
 				 acc_desc->enable_mask,
 				 acc_desc->enable_mask);
 		if (ret)
 			return ret;
+	}
+
+	if (drv->msm8926) {
+		/* No clock/APC change before a floor covering the real boot rail. */
+		ret = cpr_voltage_bootstrap(&drv->rails,
+					    drv->msm8926->plan.bootstrap_mx_uV);
+		if (ret)
+			return ret;
+		if (!drv->msm8926->apc_enabled) {
+			ret = regulator_enable(drv->rails.apc);
+			if (ret)
+				return ret;
+			drv->msm8926->apc_enabled = true;
+		}
 	}
 
 	/* Only a fully initialized attachment may bypass setup on retry. */
@@ -1550,7 +1729,12 @@ static int cpr_debug_info_show(struct seq_file *s, void *unused)
 	struct fuse_corner *fuse_corner;
 	struct corner *corner;
 
+	guard(mutex)(&drv->lock);
 	corner = drv->corner;
+	if (!corner) {
+		seq_puts(s, "CPU domain is not attached\n");
+		return 0;
+	}
 	fuse_corner = corner->fuse_corner;
 
 	seq_printf(s, "corner, current_volt = %d uV\n",
@@ -1610,7 +1794,8 @@ static int cpr_probe(struct platform_device *pdev)
 	u32 cpr_rev = FUSE_REVISION_UNKNOWN;
 
 	data = of_device_get_match_data(dev);
-	if (!data || !data->cpr_desc || !data->acc_desc)
+	if (!data || !data->cpr_desc ||
+	    (!data->acc_desc && !data->cpr_desc->msm8926))
 		return -EINVAL;
 
 	drv = devm_kzalloc(dev, sizeof(*drv), GFP_KERNEL);
@@ -1626,14 +1811,16 @@ static int cpr_probe(struct platform_device *pdev)
 	if (!drv->fuse_corners)
 		return -ENOMEM;
 
-	np = of_parse_phandle(dev->of_node, "acc-syscon", 0);
-	if (!np)
-		return -ENODEV;
+	if (!drv->desc->msm8926) {
+		np = of_parse_phandle(dev->of_node, "acc-syscon", 0);
+		if (!np)
+			return -ENODEV;
 
-	drv->tcsr = syscon_node_to_regmap(np);
-	of_node_put(np);
-	if (IS_ERR(drv->tcsr))
-		return PTR_ERR(drv->tcsr);
+		drv->tcsr = syscon_node_to_regmap(np);
+		of_node_put(np);
+		if (IS_ERR(drv->tcsr))
+			return PTR_ERR(drv->tcsr);
+	}
 
 	drv->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(drv->base))
@@ -1654,23 +1841,31 @@ static int cpr_probe(struct platform_device *pdev)
 	 * initialized after attaching to the power domain,
 	 * since it depends on the CPU's OPP table.
 	 */
-	ret = nvmem_cell_read_variable_le_u32(dev, "cpr_fuse_revision", &cpr_rev);
-	if (ret)
-		return ret;
+	if (IS_ENABLED(CONFIG_QCOM_CPR_MSM8926) && drv->desc->msm8926) {
+		ret = cpr_msm8926_init(drv);
+		if (ret)
+			return dev_err_probe(dev, ret, "MSM8926 calibration failed\n");
+	} else {
+		ret = nvmem_cell_read_variable_le_u32(dev, "cpr_fuse_revision", &cpr_rev);
+		if (ret)
+			return ret;
 
-	drv->cpr_fuses = cpr_get_fuses(drv);
-	if (IS_ERR(drv->cpr_fuses))
-		return PTR_ERR(drv->cpr_fuses);
+		drv->cpr_fuses = cpr_get_fuses(drv);
+		if (IS_ERR(drv->cpr_fuses))
+			return PTR_ERR(drv->cpr_fuses);
 
-	ret = cpr_populate_ring_osc_idx(drv);
-	if (ret)
-		return ret;
+		ret = cpr_populate_ring_osc_idx(drv);
+		if (ret)
+			return ret;
 
-	ret = cpr_fuse_corner_init(drv);
-	if (ret)
-		return ret;
+		ret = cpr_fuse_corner_init(drv);
+		if (ret)
+			return ret;
+	}
 
 	mutex_init(&drv->lock);
+	if (drv->msm8926)
+		cpr_ctl_disable(drv);
 
 	ret = devm_request_threaded_irq(dev, irq, NULL,
 					cpr_irq_handler,
@@ -1689,7 +1884,10 @@ static int cpr_probe(struct platform_device *pdev)
 	drv->pd.set_performance_state = cpr_set_performance_state;
 	drv->pd.attach_dev = cpr_pd_attach_dev;
 
-	ret = pm_genpd_init(&drv->pd, NULL, true);
+	if (drv->msm8926)
+		drv->pd.flags |= GENPD_FLAG_ALWAYS_ON | GENPD_FLAG_ACTIVE_WAKEUP;
+
+	ret = pm_genpd_init(&drv->pd, NULL, !drv->msm8926);
 	if (ret)
 		return ret;
 
@@ -1722,8 +1920,59 @@ static void cpr_remove(struct platform_device *pdev)
 	debugfs_remove_recursive(drv->debugfs);
 }
 
+static int cpr_pm_prepare(struct device *dev)
+{
+	struct cpr_drv *drv = dev_get_drvdata(dev);
+
+	/* Active-only MX requests do not establish an RPM sleep-state vote. */
+	if (drv->msm8926 && pm_suspend_target_state != PM_SUSPEND_TO_IDLE)
+		return -EOPNOTSUPP;
+	return 0;
+}
+
+static int cpr_pm_suspend(struct device *dev)
+{
+	struct cpr_drv *drv = dev_get_drvdata(dev);
+
+	if (!drv->msm8926)
+		return 0;
+	guard(mutex)(&drv->lock);
+	if (drv->corner && cpr_is_allowed(drv))
+		cpr_corner_save(drv, drv->corner);
+	cpr_ctl_disable(drv);
+	drv->suspended = true;
+	/* Do not run feedback on assumed boot/resume voltage. */
+	drv->msm8926->applied = false;
+	return 0;
+}
+
+static int cpr_pm_resume(struct device *dev)
+{
+	struct cpr_drv *drv = dev_get_drvdata(dev);
+	int ret;
+
+	if (!drv->msm8926)
+		return 0;
+	guard(mutex)(&drv->lock);
+	ret = cpr_config(drv);
+	if (ret)
+		return ret;
+	drv->suspended = false;
+	/* The next performance request establishes voltage before feedback. */
+	return 0;
+}
+
+static const struct dev_pm_ops cpr_pm_ops = {
+	.prepare = cpr_pm_prepare,
+	.suspend_late = cpr_pm_suspend,
+	.resume_early = cpr_pm_resume,
+};
+
 static const struct of_device_id cpr_match_table[] = {
 	{ .compatible = "qcom,qcs404-cpr", .data = &qcs404_cpr_acc_desc },
+#if IS_ENABLED(CONFIG_QCOM_CPR_MSM8926)
+	{ .compatible = "qcom,msm8926-cpr", .data = &msm8926_cpr_acc_desc },
+#endif
 	{ }
 };
 MODULE_DEVICE_TABLE(of, cpr_match_table);
@@ -1734,6 +1983,9 @@ static struct platform_driver cpr_driver = {
 	.driver		= {
 		.name	= "qcom-cpr",
 		.of_match_table = cpr_match_table,
+		.pm = &cpr_pm_ops,
+		/* The MSM8926 MX vote must outlive the permanently live APC rail. */
+		.suppress_bind_attrs = IS_ENABLED(CONFIG_QCOM_CPR_MSM8926),
 	},
 };
 module_platform_driver(cpr_driver);
