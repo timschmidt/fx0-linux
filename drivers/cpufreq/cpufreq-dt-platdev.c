@@ -220,6 +220,15 @@ static bool __init cpu0_node_has_opp_v2_prop(void)
 	return ret;
 }
 
+static bool __init cpu0_uses_msm8926_cpr(void)
+{
+	struct device_node *cpu __free(device_node) = of_cpu_device_node_get(0);
+	struct device_node *opps __free(device_node) =
+		of_parse_phandle(cpu, "operating-points-v2", 0);
+
+	return of_device_is_compatible(opps, "operating-points-v2-msm8926-cpu");
+}
+
 static int __init cpufreq_dt_platdev_init(void)
 {
 	struct device_node *np __free(device_node) = of_find_node_by_path("/");
@@ -227,6 +236,10 @@ static int __init cpufreq_dt_platdev_init(void)
 	const void *data = NULL;
 
 	if (!np)
+		return -ENODEV;
+
+	/* This table requires calibrated CPU/domain filtering before registration. */
+	if (cpu0_uses_msm8926_cpr())
 		return -ENODEV;
 
 	match = of_match_node(allowlist, np);

@@ -16,6 +16,7 @@
 #include <linux/bitops.h>
 #include <linux/slab.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_opp.h>
@@ -26,6 +27,7 @@
 #include <linux/clk.h>
 #include <linux/nvmem-consumer.h>
 #include <linux/suspend.h>
+#include <linux/soc/qcom/cpr.h>
 
 #include "cpr-voltage.h"
 #include "cpr-msm8926-corner.h"
@@ -234,7 +236,12 @@ struct cpr_msm8926_data {
 	struct cpr_msm8926_voltage_plan plan;
 	bool apc_enabled;
 	bool applied;
+	u32 supported_hw;
+	int opp_token;
+	struct regmap *apcs;
 };
+
+static struct platform_driver cpr_driver;
 
 struct cpr_drv {
 	unsigned int		num_corners;
@@ -242,7 +249,7 @@ struct cpr_drv {
 
 	struct generic_pm_domain pd;
 	struct device		*dev;
-	struct device		*attached_cpu_dev;
+	bool			initialized;
 	struct mutex		lock;
 	void __iomem		*base;
 	struct corner		*corner;
@@ -711,12 +718,31 @@ static int cpr_disable(struct cpr_drv *drv)
 	return regulator_disable(drv->rails.apc);
 }
 
+/* MSM8226 APCS + 0x64 bit 0: zero selects XO, one selects AHB. */
+static int cpr_msm8926_check_refclock(struct regmap *apcs)
+{
+	unsigned int value;
+	int ret;
+
+	ret = regmap_read(apcs, 0x64, &value);
+	if (ret)
+		return ret;
+	return value & BIT(0) ? -EINVAL : 0;
+}
+
 static int cpr_config(struct cpr_drv *drv)
 {
-	int i;
+	int i, ret;
 	u32 val, gcnt;
 	struct corner *corner;
 	const struct cpr_desc *desc = drv->desc;
+
+	/* Do not program XO-derived targets against an inherited AHB source. */
+	if (drv->msm8926) {
+		ret = cpr_msm8926_check_refclock(drv->msm8926->apcs);
+		if (ret)
+			return ret;
+	}
 
 	/* Disable interrupt and CPR */
 	cpr_write(drv, REG_RBIF_IRQ_EN(0), 0);
@@ -794,7 +820,7 @@ static int cpr_set_performance_state(struct generic_pm_domain *domain,
 		return -EBUSY;
 	if (!state)
 		return drv->msm8926 ? 0 : -EINVAL;
-	if (!drv->attached_cpu_dev || state > drv->num_corners)
+	if (!drv->initialized || state > drv->num_corners)
 		return -EINVAL;
 
 	/*
@@ -1121,6 +1147,8 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 	struct cpr_msm8926_data *data;
 	struct regulator *mx;
 	struct fuse_corner *fuse;
+	struct clk *cpu_clk;
+	long rounded;
 	int ret, boot_uV;
 	unsigned int i;
 
@@ -1128,6 +1156,13 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 	if (!data)
 		return -ENOMEM;
 	ret = cpr_msm8926_read_calibration(drv->dev, &data->calibration);
+	if (ret)
+		return ret;
+	data->apcs = syscon_regmap_lookup_by_phandle(drv->dev->of_node,
+						     "qcom,apcs-syscon");
+	if (IS_ERR(data->apcs))
+		return PTR_ERR(data->apcs);
+	ret = cpr_msm8926_check_refclock(data->apcs);
 	if (ret)
 		return ret;
 	mx = devm_regulator_get(drv->dev, "vdd-mx");
@@ -1139,6 +1174,25 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 	if (ret)
 		return ret;
 
+	ret = cpr_msm8926_supported_hw(&data->calibration, &data->plan,
+				       &data->supported_hw);
+	if (ret)
+		return ret;
+
+	/* The provider owns this handle across virtual CPU detach/probe retries. */
+	cpu_clk = devm_clk_get(drv->dev, "cpu");
+	if (IS_ERR(cpu_clk))
+		return PTR_ERR(cpu_clk);
+	for (i = 0; i < ARRAY_SIZE(cpr_msm8926_rates); i++) {
+		if (!(data->supported_hw & (1U << i)))
+			continue;
+		rounded = clk_round_rate(cpu_clk, cpr_msm8926_rates[i]);
+		if (rounded < 0)
+			return rounded;
+		if ((unsigned long)rounded != cpr_msm8926_rates[i])
+			return -ERANGE;
+	}
+
 	/* Read/calculation only. Attachment establishes the live MX vote later. */
 	for (i = 0; i < 3; i++) {
 		fuse = &drv->fuse_corners[i];
@@ -1146,15 +1200,68 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 		fuse->max_uV = data->plan.ceiling_uV[i];
 		fuse->uV = data->plan.initial_uV[i];
 		fuse->mx_min_uV = data->plan.mx_min_uV[i];
-		fuse->quot = data->calibration.quotient[i];
-		fuse->ring_osc_idx = data->calibration.ring_osc[i];
+		fuse->quot = data->calibration.fuse_allows_loop ?
+			data->calibration.quotient[i] : 0;
+		fuse->ring_osc_idx = data->calibration.fuse_allows_loop ?
+			data->calibration.ring_osc[i] : 0;
 		fuse->step_quot = 30;
 	}
+	drv->cpu_clk = cpu_clk;
 	drv->rails.mx = mx;
 	drv->rails.mx_max_uV = 1337500;
 	drv->msm8926 = data;
 	return 0;
 }
+
+#if IS_ENABLED(CONFIG_QCOM_CPR_MSM8926)
+/**
+ * qcom_cpr_msm8926_get_supported_hw() - CPU eligibility from its CPR supplier
+ * @cpu: CPU device naming its zero-cell MSM8926 domain as "cpr"
+ * @mask: output mask shared with the supplier's already-filtered OPP table
+ *
+ * Calibration and provider voltages are validated once in the supplier probe.
+ * This sleepable query changes no regulator, clock or OPP configuration.
+ * Return: 0 on success, -EPROBE_DEFER until the supplier is ready, or an error.
+ */
+int qcom_cpr_msm8926_get_supported_hw(struct device *cpu, u32 *mask)
+{
+	struct of_phandle_args args;
+	struct platform_device *provider;
+	struct cpr_drv *drv;
+	int index, ret;
+
+	if (!cpu || !cpu->of_node || !mask)
+		return -EINVAL;
+	index = of_property_match_string(cpu->of_node, "power-domain-names", "cpr");
+	if (index < 0)
+		return index;
+	ret = of_parse_phandle_with_args(cpu->of_node, "power-domains",
+					 "#power-domain-cells", index, &args);
+	if (ret)
+		return ret;
+	if (args.args_count || !of_device_is_compatible(args.np, "qcom,msm8926-cpr")) {
+		of_node_put(args.np);
+		return -EINVAL;
+	}
+	provider = of_find_device_by_node(args.np);
+	of_node_put(args.np);
+	if (!provider)
+		return -EPROBE_DEFER;
+
+	device_lock(&provider->dev);
+	drv = platform_get_drvdata(provider);
+	ret = -EPROBE_DEFER;
+	if (provider->dev.driver == &cpr_driver.driver && drv && drv->msm8926) {
+		ret = drv->msm8926->supported_hw ? 0 : -EINVAL;
+		if (!ret)
+			*mask = drv->msm8926->supported_hw;
+	}
+	device_unlock(&provider->dev);
+	put_device(&provider->dev);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(qcom_cpr_msm8926_get_supported_hw);
+#endif
 
 static int cpr_msm8926_corner_init(struct cpr_drv *drv, struct device *cpu_dev)
 {
@@ -1169,7 +1276,8 @@ static int cpr_msm8926_corner_init(struct cpr_drv *drv, struct device *cpu_dev)
 	long rounded;
 	int ret;
 
-	if (drv->num_corners > 14)
+	if (!drv->num_corners || drv->num_corners > 14 ||
+	    drv->msm8926->supported_hw != (1U << drv->num_corners) - 1)
 		return -EINVAL;
 	for (i = 0; i < 3; i++)
 		drv->fuse_corners[i].max_freq = 0;
@@ -1180,7 +1288,8 @@ static int cpr_msm8926_corner_init(struct cpr_drv *drv, struct device *cpu_dev)
 		fc = cpr_get_fuse_corner(opp);
 		freq = cpr_get_opp_hz_for_req(opp, cpu_dev);
 		dev_pm_opp_put(opp);
-		if (!freq || freq <= previous || !fc || fc > 3)
+		if (!freq || freq <= previous || !fc || fc > 3 ||
+		    freq != cpr_msm8926_rates[level - 1])
 			return -EINVAL;
 		/* Bad clock/feedback fuses cannot authorize faster CPU operation. */
 		if (freq > 787200000 && (!cal->clock_bin_valid || !cal->fuse_allows_loop))
@@ -1615,11 +1724,10 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	/*
 	 * This driver only supports scaling voltage for a CPU cluster
 	 * where all CPUs in the cluster share a single regulator.
-	 * Therefore, save the struct device pointer only for the first
-	 * CPU device that gets attached. There is no need to do any
-	 * additional initialization when further CPUs get attached.
+	 * Initialize the shared plan once. Further CPU attachments reuse
+	 * the immutable calibration and OPP configuration.
 	 */
-	if (drv->attached_cpu_dev)
+	if (drv->initialized)
 		return 0;
 
 	/*
@@ -1631,10 +1739,12 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	 * set by the bootloader, so that we can determine the direction
 	 * the first time cpr_set_performance_state() is called.
 	 */
-	drv->cpu_clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(drv->cpu_clk))
-		return dev_err_probe(drv->dev, PTR_ERR(drv->cpu_clk),
-				     "could not get cpu clk\n");
+	if (!drv->msm8926) {
+		drv->cpu_clk = devm_clk_get(dev, NULL);
+		if (IS_ERR(drv->cpu_clk))
+			return dev_err_probe(drv->dev, PTR_ERR(drv->cpu_clk),
+					     "could not get cpu clk\n");
+	}
 
 	dev_dbg(drv->dev, "using cpu clk from: %s\n", dev_name(dev));
 
@@ -1715,7 +1825,7 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	}
 
 	/* Only a fully initialized attachment may bypass setup on retry. */
-	drv->attached_cpu_dev = dev;
+	drv->initialized = true;
 
 	dev_info(drv->dev, "driver initialized with %u OPPs\n",
 		 drv->num_corners);
@@ -1784,6 +1894,38 @@ static void cpr_debugfs_init(struct cpr_drv *drv)
 
 	debugfs_create_file("debug_info", 0444, drv->debugfs,
 			    drv, &cpr_debug_info_fops);
+}
+
+static int cpr_register_domain(struct cpr_drv *drv)
+{
+	struct device *dev = drv->dev;
+	int ret;
+
+	ret = pm_genpd_init(&drv->pd, NULL, !drv->msm8926);
+	if (ret)
+		return ret;
+	if (drv->msm8926) {
+		/* Configure filtering before provider registration parses its table. */
+		drv->pd.dev.of_node = dev->of_node;
+		ret = dev_pm_opp_set_supported_hw(&drv->pd.dev,
+						  &drv->msm8926->supported_hw, 1);
+		if (ret < 0)
+			goto err_remove_genpd;
+		drv->msm8926->opp_token = ret;
+	}
+
+	ret = of_genpd_add_provider_simple(dev->of_node, &drv->pd);
+	if (ret)
+		goto err_clear_opp;
+
+	return 0;
+
+err_clear_opp:
+	if (drv->msm8926)
+		dev_pm_opp_clear_config(drv->msm8926->opp_token);
+err_remove_genpd:
+	pm_genpd_remove(&drv->pd);
+	return ret;
 }
 
 static int cpr_probe(struct platform_device *pdev)
@@ -1889,22 +2031,14 @@ static int cpr_probe(struct platform_device *pdev)
 	if (drv->msm8926)
 		drv->pd.flags |= GENPD_FLAG_ALWAYS_ON | GENPD_FLAG_ACTIVE_WAKEUP;
 
-	ret = pm_genpd_init(&drv->pd, NULL, !drv->msm8926);
+	ret = cpr_register_domain(drv);
 	if (ret)
 		return ret;
-
-	ret = of_genpd_add_provider_simple(dev->of_node, &drv->pd);
-	if (ret)
-		goto err_remove_genpd;
 
 	platform_set_drvdata(pdev, drv);
 	cpr_debugfs_init(drv);
 
 	return 0;
-
-err_remove_genpd:
-	pm_genpd_remove(&drv->pd);
-	return ret;
 }
 
 static void cpr_remove(struct platform_device *pdev)
@@ -1917,6 +2051,8 @@ static void cpr_remove(struct platform_device *pdev)
 	}
 
 	of_genpd_del_provider(pdev->dev.of_node);
+	if (drv->msm8926)
+		dev_pm_opp_clear_config(drv->msm8926->opp_token);
 	pm_genpd_remove(&drv->pd);
 
 	debugfs_remove_recursive(drv->debugfs);
