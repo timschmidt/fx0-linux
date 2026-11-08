@@ -4,6 +4,7 @@
 */
 
 #include <linux/pm_runtime.h>
+#include <linux/pm_wakeup.h>
 
 #include <linux/iio/common/inv_sensors_timestamp.h>
 #include <linux/iio/events.h>
@@ -302,6 +303,10 @@ static irqreturn_t inv_mpu6050_interrupt_handle(int irq, void *p)
 	}
 
 	scoped_guard(mutex, &st->lock) {
+		if (st->dmp_smd_suspended) {
+			pm_wakeup_event(regmap_get_device(st->map), 0);
+			return IRQ_HANDLED;
+		}
 		/* ack interrupt and check status */
 		result = regmap_read(st->map, st->reg->int_status, &int_status);
 		if (result) {

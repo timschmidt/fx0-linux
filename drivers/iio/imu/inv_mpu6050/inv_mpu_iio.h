@@ -217,6 +217,9 @@ struct inv_mpu6050_state {
 	bool dmp_smd_mode;
 	bool dmp_smd_armed;
 	bool dmp_smd_pm;
+	bool dmp_smd_suspended;
+	bool dmp_smd_irq_wake;
+	u8 dmp_smd_last_status;
 	bool dmp_overflow;
 	bool dmp_saved_valid;
 	u8 dmp_saved[12];
@@ -533,6 +536,8 @@ int inv_mpu6515_dmp_start(struct inv_mpu6050_state *st);
 int inv_mpu6515_dmp_smd_set(struct inv_mpu6050_state *st, bool enable);
 int inv_mpu6515_dmp_smd_event(struct inv_mpu6050_state *st);
 void inv_mpu6515_dmp_cleanup(void *data);
+int inv_mpu6515_dmp_smd_suspend(struct inv_mpu6050_state *st, bool *event);
+int inv_mpu6515_dmp_smd_resume(struct inv_mpu6050_state *st, bool *event);
 int inv_mpu6515_dmp_stop(struct inv_mpu6050_state *st);
 int inv_mpu6515_dmp_recover(struct inv_mpu6050_state *st);
 int inv_mpu6515_dmp_read_fifo(struct iio_dev *indio_dev, s64 timestamp);

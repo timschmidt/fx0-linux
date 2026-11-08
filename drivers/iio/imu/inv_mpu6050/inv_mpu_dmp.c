@@ -7,6 +7,8 @@
 #include <linux/lockdep.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_wakeup.h>
+#include <linux/interrupt.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
@@ -418,6 +420,11 @@ int inv_mpu6515_dmp_start(struct inv_mpu6050_state *st)
 	if (ret)
 		goto fail;
 	st->dmp_active = true;
+	if (st->dmp_smd_mode) {
+		ret = regmap_read(st->map, st->reg->int_status, &value);
+		if (ret)
+			goto fail;
+	}
 	ret = regmap_write(st->map, st->reg->int_enable,
 			   INV_MPU6050_BIT_DMP_INT_EN |
 			   (st->dmp_smd_mode ? 0 : INV_MPU6050_BIT_FIFO_OVERFLOW_INT));
@@ -551,21 +558,30 @@ flush:
 int inv_mpu6515_dmp_smd_set(struct inv_mpu6050_state *st, bool enable)
 {
 	struct device *dev = regmap_get_device(st->map);
-	int ret;
+	int ret, wake_ret = 0;
 
 	lockdep_assert_held(&st->lock);
 	if (st->chip_type != INV_MPU6515 || st->irq <= 0)
 		return -EOPNOTSUPP;
+	if (st->dmp_smd_suspended)
+		return -EBUSY;
 	if (!enable) {
+		if (st->dmp_smd_irq_wake) {
+			wake_ret = disable_irq_wake(st->irq);
+			if (!wake_ret)
+				st->dmp_smd_irq_wake = false;
+		}
 		if (!st->dmp_smd_pm)
-			return 0;
+			return wake_ret;
 		ret = inv_mpu6515_dmp_stop(st);
 		st->dmp_smd_mode = false;
 		st->dmp_smd_armed = false;
 		st->dmp_smd_pm = false;
 		pm_runtime_put_autosuspend(dev);
-		return ret;
+		return ret ? ret : wake_ret;
 	}
+	if (st->dmp_smd_irq_wake)
+		return -EBUSY;
 	if (st->dmp_smd_armed)
 		return 0;
 	if (st->dmp_active || st->chip_config.wom_en)
@@ -594,11 +610,17 @@ int inv_mpu6515_dmp_smd_event(struct inv_mpu6050_state *st)
 	lockdep_assert_held(&st->lock);
 	if (!st->dmp_smd_mode || !st->dmp_smd_armed)
 		return 0;
+	if (st->dmp_smd_suspended)
+		return -EBUSY;
+	st->dmp_smd_last_status = 0;
 	ret = regmap_read(st->map, 0x39, &status);
 	if (ret)
 		return ret;
+	st->dmp_smd_last_status = status;
 	if (!(status & BIT(2)))
 		return 0;
+	pm_wakeup_event(regmap_get_device(st->map), 0);
+	st->dmp_smd_armed = false;
 	dev_dbg(regmap_get_device(st->map), "DMP significant motion status %#x\n", status);
 	ret = inv_mpu6515_dmp_smd_set(st, false);
 	if (ret)
@@ -611,6 +633,71 @@ void inv_mpu6515_dmp_cleanup(void *data)
 	struct inv_mpu6050_state *st = data;
 
 	guard(mutex)(&st->lock);
-	if (st->dmp_smd_pm)
+	if (st->dmp_smd_pm || st->dmp_smd_irq_wake)
 		inv_mpu6515_dmp_smd_set(st, false);
+}
+
+/* IRQ synchronization must occur outside st->lock: the IRQ thread takes it. */
+int inv_mpu6515_dmp_smd_suspend(struct inv_mpu6050_state *st, bool *event)
+{
+	struct device *dev = regmap_get_device(st->map);
+	int ret;
+
+	*event = false;
+	if (!device_may_wakeup(dev))
+		return -EBUSY;
+	disable_irq(st->irq);
+	mutex_lock(&st->lock);
+	if (!st->dmp_smd_pm || !st->dmp_smd_armed || !st->dmp_active ||
+	    st->dmp_smd_suspended || st->dmp_smd_irq_wake) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+	/* Attribute a pre-entry event, then abort rather than silently lose it. */
+	ret = inv_mpu6515_dmp_smd_event(st);
+	if (ret) {
+		*event = ret > 0;
+		ret = ret > 0 ? -EBUSY : ret;
+		goto unlock;
+	}
+	ret = enable_irq_wake(st->irq);
+	if (ret)
+		goto unlock;
+	st->dmp_smd_irq_wake = true;
+	st->dmp_smd_suspended = true;
+	mutex_unlock(&st->lock);
+	/* No registers, regulators or firmware are changed while the bus sleeps. */
+	return 0;
+unlock:
+	mutex_unlock(&st->lock);
+	enable_irq(st->irq);
+	return ret;
+}
+
+/* Parent I2C adapter has resumed before this child's system-resume callback. */
+int inv_mpu6515_dmp_smd_resume(struct inv_mpu6050_state *st, bool *event)
+{
+	int ret = 0, status_ret;
+
+	*event = false;
+	mutex_lock(&st->lock);
+	if (!st->dmp_smd_suspended) {
+		mutex_unlock(&st->lock);
+		return 0;
+	}
+	if (st->dmp_smd_irq_wake) {
+		ret = disable_irq_wake(st->irq);
+		if (!ret)
+			st->dmp_smd_irq_wake = false;
+	}
+	st->dmp_smd_suspended = false;
+	status_ret = inv_mpu6515_dmp_smd_event(st);
+	*event = status_ret > 0;
+	dev_dbg(regmap_get_device(st->map), "DMP resume status %#x, event %d\n",
+		st->dmp_smd_last_status, *event);
+	if (!ret && status_ret < 0)
+		ret = status_ret;
+	mutex_unlock(&st->lock);
+	enable_irq(st->irq);
+	return ret;
 }

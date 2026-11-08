@@ -24,6 +24,8 @@
 #include <linux/iio/common/inv_sensors_timestamp.h>
 #include <linux/iio/iio.h>
 
+#include <linux/iio/events.h>
+
 #include "inv_mpu_iio.h"
 #include "inv_mpu_magn.h"
 
@@ -2256,6 +2258,18 @@ static int inv_mpu_resume(struct device *dev)
 	bool wakeup;
 	int result;
 
+	if (READ_ONCE(st->dmp_smd_suspended)) {
+		bool event;
+
+		result = inv_mpu6515_dmp_smd_resume(st, &event);
+		if (event)
+			iio_push_event(indio_dev,
+				IIO_MOD_EVENT_CODE(IIO_ACTIVITY, 0, IIO_MOD_STILL,
+						   IIO_EV_TYPE_CHANGE, IIO_EV_DIR_FALLING),
+				iio_get_time_ns(indio_dev));
+		return result;
+	}
+
 	guard(mutex)(&st->lock);
 
 	wakeup = device_may_wakeup(dev) && st->chip_config.wom_en;
@@ -2302,10 +2316,22 @@ static int inv_mpu_suspend(struct device *dev)
 	bool wakeup;
 	int result;
 
+	if (READ_ONCE(st->dmp_smd_pm)) {
+		bool event;
+
+		result = inv_mpu6515_dmp_smd_suspend(st, &event);
+		if (event)
+			iio_push_event(indio_dev,
+				IIO_MOD_EVENT_CODE(IIO_ACTIVITY, 0, IIO_MOD_STILL,
+						   IIO_EV_TYPE_CHANGE, IIO_EV_DIR_FALLING),
+				iio_get_time_ns(indio_dev));
+		return result;
+	}
+
 	guard(mutex)(&st->lock);
 
-	/* DMP event retention/wake is not implemented yet. */
-	if (st->dmp_active || st->dmp_saved_valid)
+	/* Streaming suspend and unresolved wake/restore failures are unsupported. */
+	if (st->dmp_active || st->dmp_saved_valid || st->dmp_smd_irq_wake)
 		return -EBUSY;
 
 	st->suspended_sensors = 0;
