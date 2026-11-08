@@ -10,6 +10,8 @@
 #include <linux/io.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/unaligned.h>
 
 #include <linux/rpmsg.h>
 #include <linux/soc/qcom/smd-rpm.h>
@@ -23,6 +25,10 @@
  * @ack:		completion for acks
  * @lock:		mutual exclusion around the send/complete pair
  * @ack_status:		result of the rpm request
+ * @ack_lock:		protects response matching and completion retirement
+ * @msg_id:		last request identifier allocated on this channel
+ * @pending_id:		identifier expected by the current waiter
+ * @waiting:		whether the current request can still accept a response
  */
 struct qcom_smd_rpm {
 	struct rpmsg_endpoint *rpm_channel;
@@ -31,6 +37,10 @@ struct qcom_smd_rpm {
 	struct completion ack;
 	struct mutex lock;
 	int ack_status;
+	spinlock_t ack_lock; /* Protects response matching and completion retirement. */
+	u32 msg_id;
+	u32 pending_id;
+	bool waiting;
 };
 
 /**
@@ -62,7 +72,7 @@ struct qcom_rpm_request {
 /**
  * struct qcom_rpm_message - response message from the rpm
  * @msg_type:	indicator of the type of message
- * @length:	the size of this message, including the message header
+ * @length:	the size of this message's payload
  * @msg_id:	message id
  * @message:	textual message from the rpm
  *
@@ -97,7 +107,8 @@ int qcom_rpm_smd_write(struct qcom_smd_rpm *rpm,
 		       void *buf,
 		       size_t count)
 {
-	static unsigned msg_id = 1;
+	unsigned long flags;
+	u32 request_id;
 	int left;
 	int ret;
 	struct {
@@ -108,7 +119,7 @@ int qcom_rpm_smd_write(struct qcom_smd_rpm *rpm,
 	size_t size = sizeof(*pkt) + count;
 
 	/* SMD packets to the RPM may not exceed 256 bytes */
-	if (WARN_ON(size >= 256))
+	if (WARN_ON(count >= 256 - sizeof(*pkt)))
 		return -EINVAL;
 
 	pkt = kmalloc(size, GFP_ATOMIC);
@@ -120,24 +131,40 @@ int qcom_rpm_smd_write(struct qcom_smd_rpm *rpm,
 	pkt->hdr.service_type = cpu_to_le32(RPM_SERVICE_TYPE_REQUEST);
 	pkt->hdr.length = cpu_to_le32(sizeof(struct qcom_rpm_request) + count);
 
-	pkt->req.msg_id = cpu_to_le32(msg_id++);
+	request_id = ++rpm->msg_id;
+	if (!request_id)
+		request_id = ++rpm->msg_id;
+	pkt->req.msg_id = cpu_to_le32(request_id);
 	pkt->req.flags = cpu_to_le32(state);
 	pkt->req.type = cpu_to_le32(type);
 	pkt->req.id = cpu_to_le32(id);
 	pkt->req.data_len = cpu_to_le32(count);
 	memcpy(pkt->payload, buf, count);
 
+	spin_lock_irqsave(&rpm->ack_lock, flags);
+	reinit_completion(&rpm->ack);
+	rpm->pending_id = request_id;
+	rpm->ack_status = -ETIMEDOUT;
+	rpm->waiting = true;
+	spin_unlock_irqrestore(&rpm->ack_lock, flags);
+
 	ret = rpmsg_send(rpm->rpm_channel, pkt, size);
 	if (ret)
 		goto out;
 
 	left = wait_for_completion_timeout(&rpm->ack, RPM_REQUEST_TIMEOUT);
-	if (!left)
+	if (!left) {
 		ret = -ETIMEDOUT;
-	else
+	} else {
+		spin_lock_irqsave(&rpm->ack_lock, flags);
 		ret = rpm->ack_status;
+		spin_unlock_irqrestore(&rpm->ack_lock, flags);
+	}
 
 out:
+	spin_lock_irqsave(&rpm->ack_lock, flags);
+	rpm->waiting = false;
+	spin_unlock_irqrestore(&rpm->ack_lock, flags);
 	kfree(pkt);
 	mutex_unlock(&rpm->lock);
 	return ret;
@@ -150,45 +177,63 @@ static int qcom_smd_rpm_callback(struct rpmsg_device *rpdev,
 				 void *priv,
 				 u32 addr)
 {
-	const struct qcom_rpm_header *hdr = data;
-	size_t hdr_length = le32_to_cpu(hdr->length);
-	const struct qcom_rpm_message *msg;
 	struct qcom_smd_rpm *rpm = dev_get_drvdata(&rpdev->dev);
-	const u8 *buf = data + sizeof(struct qcom_rpm_header);
-	const u8 *end = buf + hdr_length;
-	char msgbuf[32];
+	const u8 *buf = data, *end;
+	unsigned long flags;
+	u32 length, type, msg_length, response_id = 0;
+	size_t remaining;
+	bool have_id = false, have_error = false;
 	int status = 0;
-	u32 len, msg_length;
 
-	if (le32_to_cpu(hdr->service_type) != RPM_SERVICE_TYPE_REQUEST ||
-	    hdr_length < sizeof(struct qcom_rpm_message)) {
-		dev_err(rpm->dev, "invalid request\n");
+	if (!rpm || count < (int)sizeof(struct qcom_rpm_header))
 		return 0;
-	}
-
+	length = get_unaligned_le32(buf + sizeof(u32));
+	if (get_unaligned_le32(buf) != RPM_SERVICE_TYPE_REQUEST ||
+	    length > count - sizeof(struct qcom_rpm_header))
+		return 0;
+	buf += sizeof(struct qcom_rpm_header);
+	end = buf + length;
 	while (buf < end) {
-		msg = (struct qcom_rpm_message *)buf;
-		msg_length = le32_to_cpu(msg->length);
-		switch (le32_to_cpu(msg->msg_type)) {
+		remaining = end - buf;
+		if (remaining < 2 * sizeof(u32))
+			return 0;
+		type = get_unaligned_le32(buf);
+		msg_length = get_unaligned_le32(buf + sizeof(u32));
+		buf += 2 * sizeof(u32);
+		remaining = end - buf;
+		if (msg_length > remaining || ALIGN(msg_length, 4) > remaining)
+			return 0;
+		switch (type) {
 		case RPM_MSG_TYPE_MSG_ID:
+			if (have_id || msg_length != sizeof(u32))
+				return 0;
+			response_id = get_unaligned_le32(buf);
+			have_id = true;
 			break;
 		case RPM_MSG_TYPE_ERR:
-			len = min_t(u32, ALIGN(msg_length, 4), sizeof(msgbuf));
-			memcpy_fromio(msgbuf, msg->message, len);
-			msgbuf[len - 1] = 0;
-
-			if (!strcmp(msgbuf, "resource does not exist"))
+			if (have_error || !msg_length)
+				return 0;
+			have_error = true;
+			if (msg_length == sizeof("resource does not exist") &&
+			    !memcmp(buf, "resource does not exist", msg_length))
 				status = -ENXIO;
 			else
 				status = -EINVAL;
 			break;
 		}
-
-		buf = PTR_ALIGN(buf + 2 * sizeof(u32) + msg_length, 4);
+		buf += ALIGN(msg_length, 4);
 	}
+	if (!have_id)
+		return 0;
 
-	rpm->ack_status = status;
-	complete(&rpm->ack);
+	spin_lock_irqsave(&rpm->ack_lock, flags);
+	if (rpm->waiting && rpm->pending_id == response_id) {
+		rpm->ack_status = status;
+		rpm->waiting = false;
+		/* Complete before the waiter can retire/reinitialize this request. */
+		complete(&rpm->ack);
+	}
+	spin_unlock_irqrestore(&rpm->ack_lock, flags);
 	return 0;
 }
 
@@ -201,6 +246,7 @@ static int qcom_smd_rpm_probe(struct rpmsg_device *rpdev)
 		return -ENOMEM;
 
 	mutex_init(&rpm->lock);
+	spin_lock_init(&rpm->ack_lock);
 	init_completion(&rpm->ack);
 
 	rpm->dev = &rpdev->dev;
