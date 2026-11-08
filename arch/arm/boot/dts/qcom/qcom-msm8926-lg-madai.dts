@@ -782,7 +782,7 @@
 		#size-cells = <1>;
 
 		cpu_speedbin: cpu-bin@b0 {
-			reg = <0xb0 0x4>;
+			reg = <0xb0 0x8>;
 		};
 
 		cpr_primary: cpr-primary@450 {
