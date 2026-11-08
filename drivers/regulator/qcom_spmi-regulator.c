@@ -21,6 +21,8 @@
 #include <linux/mfd/syscon.h>
 #include <linux/io.h>
 
+#include "qcom-spmi-saw-fts2.h"
+
 /* Pin control enable input pins. */
 #define SPMI_REGULATOR_PIN_CTRL_ENABLE_NONE		0x00
 #define SPMI_REGULATOR_PIN_CTRL_ENABLE_EN0		0x01
@@ -406,6 +408,11 @@ struct spmi_voltage_set_points {
 };
 
 struct spmi_regulator {
+	struct regmap				*saw_regmap;
+	struct regulator_ops			saw_ops;
+	struct spmi_saw_fts2			saw_fts2;
+	struct spmi_voltage_range		saw_range;
+	struct spmi_voltage_set_points		saw_points;
 	struct regulator_desc			desc;
 	struct device				*dev;
 	struct delayed_work			ocp_work;
@@ -1333,14 +1340,21 @@ static irqreturn_t spmi_regulator_vs_ocp_isr(int irq, void *data)
 #define SAW3_AVS_CTL_TGGL_MASK	0x8000000
 #define SAW3_AVS_CTL_CLEAR_MASK	0x7efc00
 
-static struct regmap *saw_regmap;
+struct spmi_saw_request {
+	struct spmi_regulator *vreg;
+	u8 range;
+	u8 selector;
+	int result;
+};
 
 static void spmi_saw_set_vdd(void *data)
 {
 	u32 vctl, data3, avs_ctl, pmic_sts;
 	bool avs_enabled = false;
 	unsigned long timeout;
-	u8 voltage_sel = *(u8 *)data;
+	struct spmi_saw_request *request = data;
+	struct regmap *saw_regmap = request->vreg->saw_regmap;
+	u8 voltage_sel = request->selector;
 
 	regmap_read(saw_regmap, SAW3_AVS_CTL, &avs_ctl);
 	regmap_read(saw_regmap, SAW3_VCTL, &vctl);
@@ -1386,29 +1400,87 @@ static void spmi_saw_set_vdd(void *data)
 	}
 }
 
+static void spmi_saw_fts2_set_vdd(void *data)
+{
+	struct spmi_saw_request *request = data;
+
+	request->result = spmi_saw_fts2_set(&request->vreg->saw_fts2,
+					 request->range, request->selector);
+}
+
 static int
 spmi_regulator_saw_set_voltage(struct regulator_dev *rdev, unsigned selector)
 {
 	struct spmi_regulator *vreg = rdev_get_drvdata(rdev);
+	struct spmi_saw_request request = { .vreg = vreg, .result = -EIO };
 	int ret;
-	u8 range_sel, voltage_sel;
 
-	ret = spmi_sw_selector_to_hw(vreg, selector, &range_sel, &voltage_sel);
+	ret = spmi_sw_selector_to_hw(vreg, selector, &request.range, &request.selector);
 	if (ret)
 		return ret;
 
-	if (0 != range_sel) {
-		dev_dbg(&rdev->dev, "range_sel = %02X voltage_sel = %02X", \
-			range_sel, voltage_sel);
-		return -EINVAL;
+	if (vreg->saw_fts2.pmic) {
+		ret = smp_call_function_single(0, spmi_saw_fts2_set_vdd, &request, true);
+		if (ret || request.result)
+			return ret ? ret : request.result;
+		if (vreg->saw_fts2.mode_restore_error)
+			dev_warn_ratelimited(vreg->dev,
+				"SAW voltage set; PWM mode restore deferred: %d\n",
+				vreg->saw_fts2.mode_restore_error);
+		return 0;
 	}
+	if (request.range)
+		return -EINVAL;
 
-	/* Always do the SAW register writes on the first CPU */
-	return smp_call_function_single(0, spmi_saw_set_vdd, \
-					&voltage_sel, true);
+	/* Legacy SAW users retain their existing transaction sequence. */
+	return smp_call_function_single(0, spmi_saw_set_vdd, &request, true);
 }
 
-static struct regulator_ops spmi_saw_ops = {};
+static int spmi_regulator_saw_fixed_get_voltage(struct regulator_dev *rdev)
+{
+	struct spmi_regulator *vreg = rdev_get_drvdata(rdev);
+	unsigned int range, selector;
+	int ret;
+
+	ret = regmap_read(vreg->regmap, vreg->base + 0x40, &range);
+	if (ret)
+		return ret;
+	if (range != vreg->saw_fts2.range)
+		return -EIO;
+	ret = regmap_read(vreg->regmap, vreg->base + 0x41, &selector);
+	if (ret)
+		return ret;
+	return spmi_hw_selector_to_sw(vreg, selector, &vreg->saw_range);
+}
+
+static int spmi_regulator_saw_fixed_init(struct spmi_regulator *vreg)
+{
+	struct spmi_voltage_range *range = &vreg->saw_range;
+	struct spmi_saw_fts2 *state = &vreg->saw_fts2;
+	int ret;
+
+	state->pmic = vreg->regmap;
+	state->saw = vreg->saw_regmap;
+	state->base = vreg->base;
+	ret = spmi_saw_fts2_init(state);
+	if (ret)
+		return ret;
+
+	range->range_sel = state->range;
+	range->min_uV = 0;
+	range->step_uV = state->step_uV;
+	range->set_point_min_uV = state->range ? 700000 : 350000;
+	range->max_uV = state->range ? 2040000 : 1275000;
+	range->set_point_max_uV = range->max_uV;
+	range->n_voltages = (range->max_uV - range->set_point_min_uV) /
+			    range->step_uV + 1;
+	vreg->saw_points.range = range;
+	vreg->saw_points.count = 1;
+	vreg->saw_points.n_voltages = range->n_voltages;
+	vreg->set_points = &vreg->saw_points;
+	vreg->desc.n_voltages = range->n_voltages;
+	return 0;
+}
 
 static const struct regulator_ops spmi_smps_ops = {
 	.enable			= regulator_enable_regmap,
@@ -2500,7 +2572,7 @@ static int qcom_spmi_regulator_probe(struct platform_device *pdev)
 	struct regulator_config config = { };
 	struct regulator_dev *rdev;
 	struct spmi_regulator *vreg;
-	struct regmap *regmap;
+	struct regmap *regmap, *saw_regmap = NULL;
 	const char *name;
 	struct device *dev = &pdev->dev;
 	struct device_node *node = pdev->dev.of_node;
@@ -2528,7 +2600,8 @@ static int qcom_spmi_regulator_probe(struct platform_device *pdev)
 		saw_regmap = syscon_node_to_regmap(syscon);
 		of_node_put(syscon);
 		if (IS_ERR(saw_regmap))
-			dev_err(dev, "ERROR reading SAW regmap\n");
+			return dev_err_probe(dev, PTR_ERR(saw_regmap),
+					     "could not get SAW regmap\n");
 	}
 
 	for (; reg->name; reg++) {
@@ -2538,8 +2611,14 @@ static int qcom_spmi_regulator_probe(struct platform_device *pdev)
 			reg_prop = of_find_property(reg_node, "qcom,saw-slave",
 						    &lenp);
 			of_node_put(reg_node);
-			if (reg_prop)
+			if (reg_prop) {
+				reg_node = of_get_child_by_name(node, reg->name);
+				ret = of_property_read_bool(reg_node, "qcom,saw-fixed-range");
+				of_node_put(reg_node);
+				if (ret)
+					return -EINVAL;
 				continue;
+			}
 		}
 
 		vreg = devm_kzalloc(dev, sizeof(*vreg), GFP_KERNEL);
@@ -2570,16 +2649,34 @@ static int qcom_spmi_regulator_probe(struct platform_device *pdev)
 		if (ret)
 			continue;
 
-		if (saw_regmap) {
-			reg_node = of_get_child_by_name(node, reg->name);
-			if (of_property_read_bool(reg_node, "qcom,saw-leader")) {
-				spmi_saw_ops = *(vreg->desc.ops);
-				spmi_saw_ops.set_voltage_sel =
-					spmi_regulator_saw_set_voltage;
-				vreg->desc.ops = &spmi_saw_ops;
+		reg_node = of_get_child_by_name(node, reg->name);
+		if (of_property_read_bool(reg_node, "qcom,saw-fixed-range")) {
+			if (!saw_regmap ||
+			    !of_property_read_bool(reg_node, "qcom,saw-leader") ||
+			    !of_device_is_compatible(node, "qcom,pm8226-regulators") ||
+			    reg->base != 0x1700) {
+				of_node_put(reg_node);
+				return -EINVAL;
 			}
-			of_node_put(reg_node);
+			vreg->saw_regmap = saw_regmap;
+			ret = spmi_regulator_saw_fixed_init(vreg);
+			if (ret) {
+				of_node_put(reg_node);
+				return dev_err_probe(dev, ret, "fixed SAW range init failed\n");
+			}
 		}
+		if (saw_regmap && of_property_read_bool(reg_node, "qcom,saw-leader")) {
+			vreg->saw_regmap = saw_regmap;
+			vreg->saw_ops = *vreg->desc.ops;
+			vreg->saw_ops.set_voltage_sel = spmi_regulator_saw_set_voltage;
+			if (vreg->saw_fts2.pmic) {
+				vreg->saw_ops.get_voltage_sel =
+					spmi_regulator_saw_fixed_get_voltage;
+				vreg->saw_ops.map_voltage = spmi_regulator_single_map_voltage;
+			}
+			vreg->desc.ops = &vreg->saw_ops;
+		}
+		of_node_put(reg_node);
 
 		if (vreg->set_points && vreg->set_points->count == 1) {
 			/* since there is only one range */
