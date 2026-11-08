@@ -7,6 +7,7 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
+#include <linux/panic.h>
 #include <linux/regmap.h>
 
 #include "clk-regmap-mux-div.h"
@@ -20,63 +21,97 @@
 #define to_clk_regmap_mux_div(_hw) \
 	container_of(to_clk_regmap(_hw), struct clk_regmap_mux_div, clkr)
 
+static int mux_div_rate_error(struct clk_regmap_mux_div *md, int ret)
+{
+	if (ret && md->critical_rate)
+		panic("%s: CPU mux programming failed: %d",
+		      clk_hw_get_name(&md->clkr.hw), ret);
+	return ret;
+}
+
 int mux_div_set_src_div(struct clk_regmap_mux_div *md, u32 src, u32 div)
 {
 	int ret, count;
-	u32 val, mask;
+	u32 val, mask, expected;
 	const char *name = clk_hw_get_name(&md->clkr.hw);
 
-	val = (div << md->hid_shift) | (src << md->src_shift);
+	expected = (div << md->hid_shift) | (src << md->src_shift);
 	mask = ((BIT(md->hid_width) - 1) << md->hid_shift) |
 	       ((BIT(md->src_width) - 1) << md->src_shift);
 
 	ret = regmap_update_bits(md->clkr.regmap, CFG_RCGR + md->reg_offset,
-				 mask, val);
+				 mask, expected);
 	if (ret)
-		return ret;
+		return mux_div_rate_error(md, ret);
 
 	ret = regmap_update_bits(md->clkr.regmap, CMD_RCGR + md->reg_offset,
 				 CMD_RCGR_UPDATE, CMD_RCGR_UPDATE);
 	if (ret)
-		return ret;
+		return mux_div_rate_error(md, ret);
 
 	/* Wait for update to take effect */
 	for (count = 500; count > 0; count--) {
 		ret = regmap_read(md->clkr.regmap, CMD_RCGR + md->reg_offset,
 				  &val);
 		if (ret)
-			return ret;
-		if (!(val & CMD_RCGR_UPDATE))
+			return mux_div_rate_error(md, ret);
+		if (!(val & CMD_RCGR_UPDATE)) {
+			if (md->critical_rate) {
+				ret = regmap_read(md->clkr.regmap, CFG_RCGR + md->reg_offset, &val);
+				if (ret)
+					return mux_div_rate_error(md, ret);
+				if ((val & mask) != expected)
+					return mux_div_rate_error(md, -EIO);
+				ret = regmap_read(md->clkr.regmap, CMD_RCGR + md->reg_offset, &val);
+				if (ret)
+					return mux_div_rate_error(md, ret);
+				if (val & (CMD_RCGR_UPDATE | CMD_RCGR_DIRTY_CFG |
+					   CMD_RCGR_ROOT_OFF))
+					return mux_div_rate_error(md, -EIO);
+			}
 			return 0;
+		}
 		udelay(1);
 	}
 
 	pr_err("%s: RCG did not update its configuration", name);
-	return -EBUSY;
+	return mux_div_rate_error(md, -EBUSY);
 }
 EXPORT_SYMBOL_GPL(mux_div_set_src_div);
 
-static void mux_div_get_src_div(struct clk_regmap_mux_div *md, u32 *src,
-				u32 *div)
+static int mux_div_get_src_div(struct clk_regmap_mux_div *md, u32 *src, u32 *div)
 {
-	u32 val, d, s;
+	u32 val, cfg, after, cfg_after;
+	u32 busy = CMD_RCGR_UPDATE | CMD_RCGR_DIRTY_CFG;
+	int ret;
 	const char *name = clk_hw_get_name(&md->clkr.hw);
 
-	regmap_read(md->clkr.regmap, CMD_RCGR + md->reg_offset, &val);
+	if (md->critical_rate)
+		busy |= CMD_RCGR_ROOT_OFF;
+	ret = regmap_read(md->clkr.regmap, CMD_RCGR + md->reg_offset, &val);
+	if (ret)
+		return ret;
 
-	if (val & CMD_RCGR_DIRTY_CFG) {
+	if (val & busy) {
 		pr_err("%s: RCG configuration is pending\n", name);
-		return;
+		return -EBUSY;
 	}
 
-	regmap_read(md->clkr.regmap, CFG_RCGR + md->reg_offset, &val);
-	s = (val >> md->src_shift);
-	s &= BIT(md->src_width) - 1;
-	*src = s;
+	ret = regmap_read(md->clkr.regmap, CFG_RCGR + md->reg_offset, &cfg);
+	if (ret)
+		return ret;
+	ret = regmap_read(md->clkr.regmap, CMD_RCGR + md->reg_offset, &after);
+	if (ret)
+		return ret;
+	ret = regmap_read(md->clkr.regmap, CFG_RCGR + md->reg_offset, &cfg_after);
+	if (ret)
+		return ret;
+	if ((after & busy) || cfg != cfg_after)
+		return -EBUSY;
 
-	d = (val >> md->hid_shift);
-	d &= BIT(md->hid_width) - 1;
-	*div = d;
+	*src = cfg >> md->src_shift & (BIT(md->src_width) - 1);
+	*div = cfg >> md->hid_shift & (BIT(md->hid_width) - 1);
+	return 0;
 }
 
 static inline bool is_better_rate(unsigned long req, unsigned long best,
@@ -151,6 +186,8 @@ static int __mux_div_set_rate_and_parent(struct clk_hw *hw, unsigned long rate,
 		}
 	}
 
+	if (!best_rate || best_rate != rate)
+		return mux_div_rate_error(md, -EINVAL);
 	ret = mux_div_set_src_div(md, best_src, best_div);
 	if (!ret) {
 		md->div = best_div;
@@ -166,7 +203,8 @@ static u8 mux_div_get_parent(struct clk_hw *hw)
 	const char *name = clk_hw_get_name(hw);
 	u32 i, div, src = 0;
 
-	mux_div_get_src_div(md, &src, &div);
+	if (mux_div_get_src_div(md, &src, &div))
+		return clk_hw_get_num_parents(hw);
 
 	for (i = 0; i < clk_hw_get_num_parents(hw); i++)
 		if (src == md->parent_map[i])
@@ -207,7 +245,8 @@ static unsigned long mux_div_recalc_rate(struct clk_hw *hw, unsigned long prate)
 	int i, num_parents = clk_hw_get_num_parents(hw);
 	const char *name = clk_hw_get_name(hw);
 
-	mux_div_get_src_div(md, &src, &div);
+	if (mux_div_get_src_div(md, &src, &div))
+		return 0;
 	for (i = 0; i < num_parents; i++)
 		if (src == md->parent_map[i]) {
 			struct clk_hw *p = clk_hw_get_parent_by_index(hw, i);

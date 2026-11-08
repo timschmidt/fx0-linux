@@ -31,6 +31,15 @@ enum {
 	P_GPLL4,
 };
 
+static struct clk_init_data gpll0_init = {
+	.name = "gpll0",
+	.parent_data = &(const struct clk_parent_data){
+		.fw_name = "xo", .name = "xo_board",
+	},
+	.num_parents = 1,
+	.ops = &clk_pll_ops,
+};
+
 static struct clk_pll gpll0 = {
 	.l_reg = 0x0004,
 	.m_reg = 0x0008,
@@ -39,14 +48,7 @@ static struct clk_pll gpll0 = {
 	.mode_reg = 0x0000,
 	.status_reg = 0x001c,
 	.status_bit = 17,
-	.clkr.hw.init = &(struct clk_init_data){
-		.name = "gpll0",
-		.parent_data = &(const struct clk_parent_data){
-			.fw_name = "xo", .name = "xo_board",
-		},
-		.num_parents = 1,
-		.ops = &clk_pll_ops,
-	},
+	.clkr.hw.init = &gpll0_init,
 };
 
 static struct clk_regmap gpll0_vote = {
@@ -2849,6 +2851,7 @@ MODULE_DEVICE_TABLE(of, gcc_msm8974_match_table);
 
 static void msm8226_clock_override(void)
 {
+	gpll0_init.flags |= CLK_GET_RATE_NOCACHE;
 	ce1_clk_src.freq_tbl = ftbl_gcc_ce1_clk_msm8226;
 	gp1_clk_src.freq_tbl = ftbl_gcc_gp_clk_msm8226;
 	gp2_clk_src.freq_tbl = ftbl_gcc_gp_clk_msm8226;

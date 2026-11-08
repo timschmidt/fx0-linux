@@ -10,6 +10,8 @@
 #include <linux/delay.h>
 #include <linux/export.h>
 #include <linux/clk-provider.h>
+#include <linux/limits.h>
+#include <linux/panic.h>
 #include <linux/regmap.h>
 
 #include <asm/div64.h>
@@ -62,18 +64,38 @@ static int clk_pll_enable(struct clk_hw *hw)
 				 PLL_OUTCTRL);
 }
 
-static void clk_pll_disable(struct clk_hw *hw)
+static int clk_pll_rate_error(struct clk_pll *pll, int ret)
+{
+	if (ret && pll->critical_rate)
+		panic("%s: CPU PLL programming failed: %d",
+		      clk_hw_get_name(&pll->clkr.hw), ret);
+	return ret;
+}
+
+static int clk_pll_disable_checked(struct clk_hw *hw)
 {
 	struct clk_pll *pll = to_clk_pll(hw);
+	int ret;
 	u32 mask;
 	u32 val;
 
-	regmap_read(pll->clkr.regmap, pll->mode_reg, &val);
+	ret = regmap_read(pll->clkr.regmap, pll->mode_reg, &val);
+	if (ret)
+		return ret;
 	/* Skip if in FSM mode */
 	if (val & PLL_VOTE_FSM_ENA)
-		return;
+		return 0;
 	mask = PLL_OUTCTRL | PLL_RESET_N | PLL_BYPASSNL;
-	regmap_update_bits(pll->clkr.regmap, pll->mode_reg, mask, 0);
+	return regmap_update_bits(pll->clkr.regmap, pll->mode_reg, mask, 0);
+}
+
+static void clk_pll_disable(struct clk_hw *hw)
+{
+	struct clk_pll *pll = to_clk_pll(hw);
+	int ret = clk_pll_rate_error(pll, clk_pll_disable_checked(hw));
+
+	if (ret)
+		pr_err("%s: PLL disable failed: %d\n", clk_hw_get_name(hw), ret);
 }
 
 static unsigned long
@@ -81,18 +103,18 @@ clk_pll_recalc_rate(struct clk_hw *hw, unsigned long parent_rate)
 {
 	struct clk_pll *pll = to_clk_pll(hw);
 	u32 l, m, n, config;
-	unsigned long rate;
-	u64 tmp;
+	u64 rate, tmp;
 
-	regmap_read(pll->clkr.regmap, pll->l_reg, &l);
-	regmap_read(pll->clkr.regmap, pll->m_reg, &m);
-	regmap_read(pll->clkr.regmap, pll->n_reg, &n);
+	if (regmap_read(pll->clkr.regmap, pll->l_reg, &l) ||
+	    regmap_read(pll->clkr.regmap, pll->m_reg, &m) ||
+	    regmap_read(pll->clkr.regmap, pll->n_reg, &n))
+		return 0;
 
 	l &= 0x3ff;
 	m &= 0x7ffff;
 	n &= 0x7ffff;
 
-	rate = parent_rate * l;
+	rate = (u64)parent_rate * l;
 	if (n) {
 		tmp = parent_rate;
 		tmp *= m;
@@ -100,13 +122,14 @@ clk_pll_recalc_rate(struct clk_hw *hw, unsigned long parent_rate)
 		rate += tmp;
 	}
 	if (pll->post_div_width) {
-		regmap_read(pll->clkr.regmap, pll->config_reg, &config);
+		if (regmap_read(pll->clkr.regmap, pll->config_reg, &config))
+			return 0;
 		config >>= pll->post_div_shift;
 		config &= BIT(pll->post_div_width) - 1;
-		rate /= config + 1;
+		do_div(rate, config + 1);
 	}
 
-	return rate;
+	return rate > ULONG_MAX ? 0 : rate;
 }
 
 static const
@@ -268,13 +291,13 @@ static int clk_pll_sr2_enable(struct clk_hw *hw)
 
 	ret = regmap_read(pll->clkr.regmap, pll->mode_reg, &mode);
 	if (ret)
-		return ret;
+		return clk_pll_rate_error(pll, ret);
 
 	/* Disable PLL bypass mode. */
 	ret = regmap_update_bits(pll->clkr.regmap, pll->mode_reg, PLL_BYPASSNL,
 				 PLL_BYPASSNL);
 	if (ret)
-		return ret;
+		return clk_pll_rate_error(pll, ret);
 
 	/*
 	 * H/W requires a 5us delay between disabling the bypass and
@@ -286,15 +309,24 @@ static int clk_pll_sr2_enable(struct clk_hw *hw)
 	ret = regmap_update_bits(pll->clkr.regmap, pll->mode_reg, PLL_RESET_N,
 				 PLL_RESET_N);
 	if (ret)
-		return ret;
+		return clk_pll_rate_error(pll, ret);
 
 	ret = wait_for_pll(pll);
 	if (ret)
-		return ret;
+		return clk_pll_rate_error(pll, ret);
 
 	/* Enable PLL output. */
-	return regmap_update_bits(pll->clkr.regmap, pll->mode_reg, PLL_OUTCTRL,
+	ret = regmap_update_bits(pll->clkr.regmap, pll->mode_reg, PLL_OUTCTRL,
 				 PLL_OUTCTRL);
+	if (!ret && pll->critical_rate) {
+		ret = regmap_read(pll->clkr.regmap, pll->mode_reg, &mode);
+		if (!ret && (mode & (PLL_OUTCTRL | PLL_BYPASSNL | PLL_RESET_N)) !=
+		    (PLL_OUTCTRL | PLL_BYPASSNL | PLL_RESET_N))
+			ret = -EIO;
+		if (!ret)
+			ret = wait_for_pll(pll);
+	}
+	return clk_pll_rate_error(pll, ret);
 }
 
 static int
@@ -303,25 +335,39 @@ clk_pll_sr2_set_rate(struct clk_hw *hw, unsigned long rate, unsigned long prate)
 	struct clk_pll *pll = to_clk_pll(hw);
 	const struct pll_freq_tbl *f;
 	bool enabled;
+	int ret;
 	u32 mode;
 	u32 enable_mask = PLL_OUTCTRL | PLL_BYPASSNL | PLL_RESET_N;
 
 	f = find_freq(pll->freq_tbl, rate);
 	if (!f)
-		return -EINVAL;
+		return clk_pll_rate_error(pll, -EINVAL);
 
-	regmap_read(pll->clkr.regmap, pll->mode_reg, &mode);
+	ret = regmap_read(pll->clkr.regmap, pll->mode_reg, &mode);
+	if (ret)
+		return clk_pll_rate_error(pll, ret);
 	enabled = (mode & enable_mask) == enable_mask;
 
-	if (enabled)
-		clk_pll_disable(hw);
+	if (enabled) {
+		ret = clk_pll_disable_checked(hw);
+		if (ret)
+			return clk_pll_rate_error(pll, ret);
+	}
 
-	regmap_update_bits(pll->clkr.regmap, pll->l_reg, 0x3ff, f->l);
-	regmap_update_bits(pll->clkr.regmap, pll->m_reg, 0x7ffff, f->m);
-	regmap_update_bits(pll->clkr.regmap, pll->n_reg, 0x7ffff, f->n);
+	ret = regmap_update_bits(pll->clkr.regmap, pll->l_reg, 0x3ff, f->l);
+	if (ret)
+		return clk_pll_rate_error(pll, ret);
+	ret = regmap_update_bits(pll->clkr.regmap, pll->m_reg, 0x7ffff, f->m);
+	if (ret)
+		return clk_pll_rate_error(pll, ret);
+	ret = regmap_update_bits(pll->clkr.regmap, pll->n_reg, 0x7ffff, f->n);
+	if (ret)
+		return clk_pll_rate_error(pll, ret);
+	if (pll->critical_rate && clk_pll_recalc_rate(hw, prate) != f->freq)
+		return clk_pll_rate_error(pll, -EIO);
 
 	if (enabled)
-		clk_pll_sr2_enable(hw);
+		return clk_pll_sr2_enable(hw);
 
 	return 0;
 }
