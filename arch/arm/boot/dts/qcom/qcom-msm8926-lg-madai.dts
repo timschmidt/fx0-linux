@@ -535,6 +535,23 @@
 	vddio-supply = <&pm8226_l8>;
 };
 
+&pm8226_spmi_regulators {
+	qcom,saw-reg = <&saw_l2>;
+
+	pm8226_apc: s2 {
+		regulator-name = "pm8226-apc";
+		regulator-min-microvolt = <900000>;
+		regulator-max-microvolt = <1350000>;
+		regulator-always-on;
+		qcom,saw-leader;
+		qcom,saw-fixed-range;
+	};
+};
+
+&saw_l2 {
+	qcom,pmic-arbiter-master;
+};
+
 &pm8226_1 {
 	pm8226_wled: wled@d800 {
 		compatible = "qcom,pm8941-wled";
