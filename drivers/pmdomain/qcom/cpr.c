@@ -1996,8 +1996,23 @@ static int cpr_debug_info_show(struct seq_file *s, void *unused)
 	}
 	fuse_corner = corner->fuse_corner;
 
-	seq_printf(s, "corner, current_volt = %d uV\n",
-		       corner->last_uV);
+	if (drv->msm8926) {
+		int apc_uV = regulator_get_voltage(drv->rails.apc);
+
+		/* The corner cache is only a plan before the first request. */
+		seq_printf(s, "corner, planned_volt = %d uV\n", corner->uV);
+		seq_printf(s, "corner, cached_volt = %d uV\n", corner->last_uV);
+		seq_printf(s, "corner_voltage_applied = %u\n",
+			   drv->msm8926->applied);
+		seq_printf(s, "feedback_allowed = %u\n", cpr_is_allowed(drv));
+		if (apc_uV < 0)
+			seq_printf(s, "apc_target_read_error = %d\n", apc_uV);
+		else
+			seq_printf(s, "apc_target = %d uV\n", apc_uV);
+	} else {
+		seq_printf(s, "corner, current_volt = %d uV\n",
+			   corner->last_uV);
+	}
 
 	ro_sel = fuse_corner->ring_osc_idx;
 	gcnt = cpr_read(drv, REG_RBCPR_GCNT_TARGET(ro_sel));
