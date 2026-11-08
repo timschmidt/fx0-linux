@@ -9,6 +9,7 @@
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/kernel.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 #include <linux/regmap.h>
@@ -113,6 +114,8 @@ static int qcom_a53pll_probe(struct platform_device *pdev)
 	pll->mode_reg = 0x00;
 	pll->status_reg = 0x1c;
 	pll->status_bit = 16;
+	/* Returning an uncertain CPU PLL to CCF can select it after an error. */
+	pll->critical_rate = of_device_is_compatible(np, "qcom,msm8226-a7pll");
 
 	pll->freq_tbl = qcom_a53pll_get_freq_tbl(dev);
 	if (!pll->freq_tbl) {
@@ -131,6 +134,8 @@ static int qcom_a53pll_probe(struct platform_device *pdev)
 	};
 	init.num_parents = 1;
 	init.ops = &clk_pll_sr2_ops;
+	if (pll->critical_rate)
+		init.flags = CLK_GET_RATE_NOCACHE;
 	pll->clkr.hw.init = &init;
 
 	ret = devm_clk_register_regmap(dev, &pll->clkr);

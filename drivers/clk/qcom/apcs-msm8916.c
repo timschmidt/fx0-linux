@@ -10,6 +10,7 @@
 #include <linux/clk-provider.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -36,7 +37,7 @@ static int a53cc_notifier_cb(struct notifier_block *nb, unsigned long event,
 						     struct clk_regmap_mux_div,
 						     clk_nb);
 	if (event == PRE_RATE_CHANGE)
-		/* set the mux and divider to safe frequency (400mhz) */
+		/* GPLL0 / 2: 300 MHz on MSM8226, 400 MHz on MSM8916. */
 		ret = mux_div_set_src_div(md, 4, 3);
 
 	return notifier_from_errno(ret);
@@ -72,6 +73,9 @@ static int qcom_apcs_msm8916_clk_probe(struct platform_device *pdev)
 	init.num_parents = ARRAY_SIZE(pdata);
 	init.ops = &clk_regmap_mux_div_ops;
 	init.flags = CLK_IS_CRITICAL | CLK_SET_RATE_PARENT;
+	a53cc->critical_rate = of_device_is_compatible(np, "qcom,msm8226-apcs-kpss-global");
+	if (a53cc->critical_rate)
+		init.flags |= CLK_GET_RATE_NOCACHE;
 
 	a53cc->clkr.hw.init = &init;
 	a53cc->clkr.regmap = regmap;

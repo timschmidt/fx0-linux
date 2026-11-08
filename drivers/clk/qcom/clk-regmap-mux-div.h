@@ -23,6 +23,7 @@
  * @clkr:	handle between common and hardware-specific interfaces
  * @pclk:	the input PLL clock
  * @clk_nb:	clock notifier for rate changes of the input PLL
+ * @critical_rate: Stop on uncertain CPU clock programming; CCF can discard errors
  */
 struct clk_regmap_mux_div {
 	u32				reg_offset;
@@ -36,6 +37,7 @@ struct clk_regmap_mux_div {
 	struct clk_regmap		clkr;
 	struct clk			*pclk;
 	struct notifier_block		clk_nb;
+	bool				critical_rate;
 };
 
 extern const struct clk_ops clk_regmap_mux_div_ops;
