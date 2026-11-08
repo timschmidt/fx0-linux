@@ -10,6 +10,7 @@
 #include <linux/debugfs.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
+#include <linux/limits.h>
 #include <linux/list.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -240,6 +241,7 @@ struct cpr_msm8926_data {
 	int opp_token;
 	struct regmap *apcs;
 	struct clk *aux_clk;
+	struct clk *pll_clk;
 };
 
 static struct platform_driver cpr_driver;
@@ -454,12 +456,37 @@ static int cpr_post_voltage(struct cpr_drv *drv,
 	return 0;
 }
 
+/* Refresh both PLLs before the noncached CPU mux query, without reprogramming. */
+static int cpr_msm8926_check_cpu_rate(struct cpr_drv *drv, unsigned long maximum)
+{
+	struct cpr_msm8926_data *data = drv->msm8926;
+	struct clk *gpll0;
+	unsigned long rate;
+
+	if (!data || !data->aux_clk || !data->pll_clk || !maximum)
+		return -EINVAL;
+	gpll0 = clk_get_parent(data->aux_clk);
+	if (!gpll0 || clk_get_rate(gpll0) != 600000000 ||
+	    clk_get_rate(data->aux_clk) != 600000000 || !clk_get_rate(data->pll_clk))
+		return -EIO;
+	rate = clk_get_rate(drv->cpu_clk);
+	if (!rate || rate > maximum)
+		return -ERANGE;
+	return 0;
+}
+
 static int cpr_scale_voltage(struct cpr_drv *drv, struct corner *corner,
 			     int new_uV, enum voltage_change_dir dir)
 {
 	int ret;
 	struct fuse_corner *fuse_corner = corner->fuse_corner;
 
+	if (drv->msm8926) {
+		/* A failed clock reduction must not authorize a lower APC target. */
+		ret = cpr_msm8926_check_cpu_rate(drv, corner->freq);
+		if (ret)
+			return ret;
+	}
 	ret = cpr_pre_voltage(drv, fuse_corner, dir);
 	if (ret)
 		return ret;
@@ -1190,6 +1217,9 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 	/* The source-4, HID-3 notifier path must be the lowest CPU OPP. */
 	if (clk_get_rate(data->aux_clk) != 600000000)
 		return -ERANGE;
+	data->pll_clk = devm_clk_get(drv->dev, "pll");
+	if (IS_ERR(data->pll_clk))
+		return PTR_ERR(data->pll_clk);
 	for (i = 0; i < ARRAY_SIZE(cpr_msm8926_rates); i++) {
 		if (!(data->supported_hw & (1U << i)))
 			continue;
@@ -1732,8 +1762,9 @@ static int cpr_msm8926_bootstrap_clock(struct cpr_drv *drv)
 
 	if (!data || !drv->num_corners || drv->corners[0].freq != 300000000)
 		return -EINVAL;
-	if (clk_get_rate(data->aux_clk) != 600000000)
-		return -ERANGE;
+	ret = cpr_msm8926_check_cpu_rate(drv, ULONG_MAX);
+	if (ret)
+		return ret;
 	rate = clk_get_rate(drv->cpu_clk);
 	if (rate < drv->corners[0].freq)
 		return -ERANGE;
