@@ -582,10 +582,6 @@ static int cpr_scale(struct cpr_drv *drv, enum voltage_change_dir dir)
 
 	ret = cpr_scale_voltage(drv, corner, new_uV, dir);
 	if (ret) {
-		if (drv->msm8926) {
-			cpr_ctl_disable(drv);
-			drv->msm8926->applied = false;
-		}
 		cpr_irq_clr_nack(drv);
 		return ret;
 	}
@@ -787,6 +783,7 @@ static int cpr_set_performance_state(struct generic_pm_domain *domain,
 	struct corner *corner, *end;
 	enum voltage_change_dir dir;
 	int ret, new_uV;
+	bool restore_feedback;
 
 	guard(mutex)(&drv->lock);
 
@@ -817,18 +814,23 @@ static int cpr_set_performance_state(struct generic_pm_domain *domain,
 	else
 		dir = NO_CHANGE;
 
-	if (cpr_is_allowed(drv))
+	restore_feedback = cpr_is_allowed(drv);
+	if (restore_feedback)
 		new_uV = corner->last_uV;
 	else
 		new_uV = corner->uV;
 
-	if (cpr_is_allowed(drv))
+	if (restore_feedback)
 		cpr_ctl_disable(drv);
 
 	ret = cpr_scale_voltage(drv, corner, new_uV, dir);
 	if (ret) {
-		if (drv->msm8926)
-			drv->msm8926->applied = false;
+		if (drv->msm8926 && restore_feedback) {
+			/* APC/MX providers restored the old point before returning. */
+			cpr_irq_clr(drv);
+			cpr_corner_restore(drv, drv->corner);
+			cpr_ctl_enable(drv, drv->corner);
+		}
 		return ret;
 	}
 	if (drv->msm8926) {
