@@ -210,8 +210,8 @@
 		compatible = "qcom,msm8926-cpr", "qcom,cpr";
 		reg = <0xf9018000 0x1000>;
 		interrupts = <GIC_SPI 15 IRQ_TYPE_EDGE_RISING>;
-		clocks = <&xo_board>, <&apcs>, <&gcc GPLL0_VOTE>;
-		clock-names = "ref", "cpu", "aux";
+		clocks = <&xo_board>, <&apcs>, <&gcc GPLL0_VOTE>, <&a7pll>;
+		clock-names = "ref", "cpu", "aux", "pll";
 		qcom,apcs-syscon = <&apcs>;
 		vdd-apc-supply = <&pm8226_apc>;
 		vdd-mx-supply = <&pm8226_l3>;
