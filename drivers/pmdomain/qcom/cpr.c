@@ -14,7 +14,6 @@
 #include <linux/list.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/iopoll.h>
 #include <linux/bitops.h>
 #include <linux/slab.h>
 #include <linux/of.h>
@@ -765,7 +764,6 @@ static int cpr_msm8926_check_refclock(struct regmap *apcs)
  */
 static int cpr_msm8926_init_refclock(struct cpr_drv *drv, struct regmap *apcs)
 {
-	u32 value;
 	int ret;
 
 	writel(0, drv->base + REG_RBIF_IRQ_EN(0));
@@ -775,10 +773,11 @@ static int cpr_msm8926_init_refclock(struct cpr_drv *drv, struct regmap *apcs)
 	    readl(drv->base + REG_RBCPR_CTL))
 		return -EIO;
 
-	ret = readl_poll_timeout(drv->base + REG_RBCPR_RESULT_0, value,
-				!(value & RBCPR_RESULT0_BUSY_MASK), 1, 1000);
-	if (ret)
-		return ret;
+	/*
+	 * Fx0 retains RESULT_0.BUSY with CTL clear before XO setup. The IRQ
+	 * path uses BUSY only while LOOP_EN is set; it is not an idle ack
+	 * for a stopped controller. Verify CTL/IRQ instead of polling it.
+	 */
 	writel(CPR_INT_ALL, drv->base + REG_RBIF_IRQ_CLEAR);
 
 	/* Preserve every APCS bit except the CPR XO/AHB selector. */
@@ -787,7 +786,16 @@ static int cpr_msm8926_init_refclock(struct cpr_drv *drv, struct regmap *apcs)
 		return ret;
 
 	/* A successful bus write alone does not prove that XO was selected. */
-	return cpr_msm8926_check_refclock(apcs);
+	ret = cpr_msm8926_check_refclock(apcs);
+	if (ret)
+		return ret;
+
+	/* Changing the reference must not restart measurements or IRQs. */
+	if (readl(drv->base + REG_RBIF_IRQ_EN(0)) ||
+	    readl(drv->base + REG_RBCPR_CTL))
+		return -EIO;
+
+	return 0;
 }
 
 static int cpr_config(struct cpr_drv *drv)
