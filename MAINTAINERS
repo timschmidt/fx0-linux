@@ -21127,8 +21127,9 @@ L:	linux-pm@vger.kernel.org
 L:	linux-arm-msm@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/power/avs/qcom,cpr.yaml
-F:	drivers/pmdomain/qcom/cpr*.h
 F:	drivers/pmdomain/qcom/cpr.c
+F:	drivers/pmdomain/qcom/cpr*.h
+F:	include/linux/soc/qcom/cpr.h
 
 QUALCOMM CPUCP MAILBOX DRIVER
 M:	Sibi Sankar <sibi.sankar@oss.qualcomm.com>
@@ -21144,6 +21145,7 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/cpufreq/qcom-cpufreq-nvmem.yaml
 F:	Documentation/devicetree/bindings/opp/opp-v2-kryo-cpu.yaml
 F:	drivers/cpufreq/qcom-cpufreq-nvmem.c
+F:	include/dt-bindings/opp/qcom,msm8926.h
 
 QUALCOMM CRYPTO DRIVERS
 M:	Thara Gopinath <thara.gopinath@gmail.com>
