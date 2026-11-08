@@ -231,6 +231,7 @@ config QCOM_SPM
 	tristate "Qualcomm Subsystem Power Manager (SPM)"
 	depends on ARCH_QCOM || COMPILE_TEST
 	select QCOM_SCM
+	select MFD_SYSCON
 	help
 	  Enable the support for the Qualcomm Subsystem Power Manager, used
 	  to manage cores, L2 low power modes and to configure the internal
