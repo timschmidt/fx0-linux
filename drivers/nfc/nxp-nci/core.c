@@ -188,7 +188,12 @@ void nxp_nci_remove(struct nci_dev *ndev)
 		nxp_nci_fw_work_complete(info, -ESHUTDOWN);
 	cancel_work_sync(&info->fw_info.work);
 
+	/* Keep RX available until NCI has completed its closing reset. */
 	nci_unregister_device(ndev);
+
+	/* Drain RX before freeing NCI state, without holding info_lock. */
+	if (info->phy_ops->stop_rx)
+		info->phy_ops->stop_rx(info->phy_id);
 
 	mutex_lock(&info->info_lock);
 	if (info->phy_ops->set_mode)
