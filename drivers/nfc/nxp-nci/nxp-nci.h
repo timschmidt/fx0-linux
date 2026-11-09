@@ -31,6 +31,7 @@ enum nxp_nci_mode {
 struct nxp_nci_phy_ops {
 	int (*set_mode)(void *id, enum nxp_nci_mode mode);
 	int (*write)(void *id, struct sk_buff *skb);
+	void (*stop_rx)(void *id);
 };
 
 struct nxp_nci_fw_info {

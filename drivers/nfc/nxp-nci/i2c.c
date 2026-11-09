@@ -36,6 +36,7 @@ struct nxp_nci_i2c_phy {
 
 	struct gpio_desc *gpiod_en;
 	struct gpio_desc *gpiod_fw;
+	bool irq_requested;
 
 	int hard_fault; /*
 			 * < 0 if hardware error occurred (e.g. i2c err)
@@ -89,9 +90,21 @@ static int nxp_nci_i2c_write(void *phy_id, struct sk_buff *skb)
 	return r;
 }
 
+static void nxp_nci_i2c_stop_rx(void *phy_id)
+{
+	struct nxp_nci_i2c_phy *phy = phy_id;
+
+	if (!phy->irq_requested)
+		return;
+
+	free_irq(phy->i2c_dev->irq, phy);
+	phy->irq_requested = false;
+}
+
 static const struct nxp_nci_phy_ops i2c_phy_ops = {
 	.set_mode = nxp_nci_i2c_set_mode,
 	.write = nxp_nci_i2c_write,
+	.stop_rx = nxp_nci_i2c_stop_rx,
 };
 
 static int nxp_nci_i2c_fw_read(struct nxp_nci_i2c_phy *phy,
@@ -337,6 +350,8 @@ static int nxp_nci_i2c_probe(struct i2c_client *client)
 	if (r < 0) {
 		nfc_err(&client->dev, "Unable to register IRQ handler\n");
 		nxp_nci_remove(phy->ndev);
+	} else {
+		phy->irq_requested = true;
 	}
 
 	return r;
@@ -347,7 +362,6 @@ static void nxp_nci_i2c_remove(struct i2c_client *client)
 	struct nxp_nci_i2c_phy *phy = i2c_get_clientdata(client);
 
 	nxp_nci_remove(phy->ndev);
-	free_irq(client->irq, phy);
 }
 
 static const struct i2c_device_id nxp_nci_i2c_id_table[] = {
