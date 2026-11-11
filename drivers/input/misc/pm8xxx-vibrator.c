@@ -11,9 +11,9 @@
 #include <linux/regmap.h>
 #include <linux/slab.h>
 
-#define VIB_MAX_LEVEL_mV(vib)	(vib->drv2_addr ? 3544 : 3100)
-#define VIB_MIN_LEVEL_mV(vib)	(vib->drv2_addr ? 1504 : 1200)
-#define VIB_PER_STEP_mV(vib)	(vib->drv2_addr ? 8 : 100)
+#define VIB_MAX_LEVEL_mV(vib)	((vib)->regs->drv2_mask ? 3544 : 3100)
+#define VIB_MIN_LEVEL_mV(vib)	((vib)->regs->drv2_mask ? 1504 : 1200)
+#define VIB_PER_STEP_mV(vib)	((vib)->regs->drv2_mask ? 8 : 100)
 #define VIB_MAX_LEVELS(vib) \
 	(VIB_MAX_LEVEL_mV(vib) - VIB_MIN_LEVEL_mV(vib) + VIB_PER_STEP_mV(vib))
 
