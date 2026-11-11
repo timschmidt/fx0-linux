@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /*
  * Experimental CPU/CPR qualification target, separate from the ordinary DTB.
- * This validation tree is not a complete reproduction of installed r50.
- * Reconstruct the current integration before RAM-only controller qualification.
+ * Inherits the integrated board target; select this DTB explicitly for
+ * CPU/CPR qualification. Hardware acceptance remains a separate requirement.
  */
 #include "qcom-msm8926-lg-madai.dts"
 #include <dt-bindings/opp/qcom,msm8926.h>
