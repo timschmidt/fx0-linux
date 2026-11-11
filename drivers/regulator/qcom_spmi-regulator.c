@@ -1405,7 +1405,7 @@ static void spmi_saw_fts2_set_vdd(void *data)
 	struct spmi_saw_request *request = data;
 
 	request->result = spmi_saw_fts2_set(&request->vreg->saw_fts2,
-					 request->range, request->selector);
+					    request->range, request->selector);
 }
 
 static int
@@ -1425,8 +1425,8 @@ spmi_regulator_saw_set_voltage(struct regulator_dev *rdev, unsigned selector)
 			return ret ? ret : request.result;
 		if (vreg->saw_fts2.mode_restore_error)
 			dev_warn_ratelimited(vreg->dev,
-				"SAW voltage set; PWM mode restore deferred: %d\n",
-				vreg->saw_fts2.mode_restore_error);
+					     "SAW voltage set; PWM mode restore deferred: %d\n",
+					     vreg->saw_fts2.mode_restore_error);
 		return 0;
 	}
 	if (request.range)

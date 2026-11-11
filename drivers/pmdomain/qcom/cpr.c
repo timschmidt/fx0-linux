@@ -1957,7 +1957,7 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 
 	if (acc_desc && acc_desc->config) {
 		ret = regmap_multi_reg_write(drv->tcsr, acc_desc->config,
-				     acc_desc->num_regs_per_fuse);
+					     acc_desc->num_regs_per_fuse);
 		if (ret)
 			return ret;
 	}
@@ -1965,8 +1965,8 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 	/* Enable ACC if required */
 	if (acc_desc && acc_desc->enable_mask) {
 		ret = regmap_update_bits(drv->tcsr, acc_desc->enable_reg,
-				 acc_desc->enable_mask,
-				 acc_desc->enable_mask);
+					 acc_desc->enable_mask,
+					 acc_desc->enable_mask);
 		if (ret)
 			return ret;
 	}

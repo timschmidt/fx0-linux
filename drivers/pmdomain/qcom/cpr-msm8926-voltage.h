@@ -17,7 +17,7 @@ struct cpr_msm8926_voltage_plan {
 
 /* Read-only provider metadata: never substitute a higher point for a hole. */
 static inline int cpr_msm8926_check_voltage(struct regulator *regulator,
-					  int count, int wanted_uV)
+					    int count, int wanted_uV)
 {
 	bool found = false;
 	int selector, voltage;
@@ -39,9 +39,9 @@ static inline int cpr_msm8926_check_voltage(struct regulator *regulator,
  */
 static inline int
 cpr_msm8926_plan_voltages(const struct cpr_msm8926_calibration *calibration,
-			 struct regulator *apc, struct regulator *mx,
-			 int boot_apc_uV, int mx_max_uV,
-			 struct cpr_msm8926_voltage_plan *plan)
+			  struct regulator *apc, struct regulator *mx,
+			  int boot_apc_uV, int mx_max_uV,
+			  struct cpr_msm8926_voltage_plan *plan)
 {
 	struct cpr_msm8926_voltage_plan result = {};
 	unsigned int global_max_uV = 0, step_uV;

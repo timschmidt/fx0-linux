@@ -118,7 +118,7 @@ cpr_msm8926_decode(const struct cpr_msm8926_fuses *fuses,
 	result.ceiling_uV[2] = max(result.ceiling_uV[2], result.initial_uV[2]);
 	for (i = 0; i < 2; i++)
 		result.initial_uV[i] = clamp(result.initial_uV[i],
-					   result.floor_uV[i], result.ceiling_uV[i]);
+					     result.floor_uV[i], result.ceiling_uV[i]);
 	/* Vendor leaves the turbo PVS value unclamped, including below its floor. */
 	result.fuse_allows_loop = row && !(fuses->row138 & (1ULL << 36)) &&
 		result.quotient[2] > result.quotient[1] + 50 &&
@@ -135,8 +135,8 @@ cpr_msm8926_decode(const struct cpr_msm8926_fuses *fuses,
 	/* Invalid quotients never enter unsigned interpolation arithmetic. */
 	if (turbo_corner && result.fuse_allows_loop) {
 		result.quotient_scaling = min(650U,
-			1000 * (result.quotient[2] - result.quotient[1]) /
-			(frequency_mhz[turbo_corner - 1] - frequency_mhz[3]));
+					      1000 * (result.quotient[2] - result.quotient[1]) /
+					      (frequency_mhz[turbo_corner - 1] - frequency_mhz[3]));
 		for (i = 4; i < turbo_corner; i++)
 			result.quotient_adjust[i] = result.quotient_scaling *
 				(frequency_mhz[turbo_corner - 1] - frequency_mhz[i]) / 1000;

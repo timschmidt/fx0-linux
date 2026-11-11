@@ -176,7 +176,7 @@ spmi_saw_fts2_recover(struct spmi_saw_fts2 *state, unsigned int vctl,
 
 /* Called synchronously on CPU0 with the regulator core's lock held. */
 static inline int spmi_saw_fts2_set(struct spmi_saw_fts2 *state,
-				   unsigned int range, unsigned int selector)
+				    unsigned int range, unsigned int selector)
 {
 	unsigned int current_range, mode, old_selector, avs, vctl;
 	unsigned int target_uV, old_uV, delta_uV;

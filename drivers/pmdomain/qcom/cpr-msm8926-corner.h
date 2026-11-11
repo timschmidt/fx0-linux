@@ -67,13 +67,13 @@ cpr_msm8926_map_corner(const struct cpr_msm8926_calibration *calibration,
 	}
 	if (rate > frequency[maximum - 1])
 		return -ERANGE;
-	if (rate <= frequency[1])
+	if (rate <= frequency[1]) {
 		selected = 2;
-	else if (rate <= frequency[3])
+	} else if (rate <= frequency[3]) {
 		selected = 4;
-	else if (!extended)
+	} else if (!extended) {
 		selected = 7;
-	else {
+	} else {
 		for (i = 4; i < maximum; i++)
 			if (rate <= frequency[i])
 				break;

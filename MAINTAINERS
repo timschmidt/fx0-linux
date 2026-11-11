@@ -21127,8 +21127,8 @@ L:	linux-pm@vger.kernel.org
 L:	linux-arm-msm@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/power/avs/qcom,cpr.yaml
-F:	drivers/pmdomain/qcom/cpr.c
 F:	drivers/pmdomain/qcom/cpr*.h
+F:	drivers/pmdomain/qcom/cpr.c
 F:	include/linux/soc/qcom/cpr.h
 
 QUALCOMM CPUCP MAILBOX DRIVER
