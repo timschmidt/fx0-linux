@@ -420,6 +420,10 @@ static int qfprom_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->qfpcorrected))
 		return PTR_ERR(priv->qfpcorrected);
 
+	/* Keep the raw view within the range covered by its keepout table. */
+	if (soc_data && soc_data->raw_read_only && resource_size(res) > 0x1000)
+		return dev_err_probe(dev, -EINVAL, "read-only raw view exceeds 4 KiB\n");
+
 	econfig.size = resource_size(res);
 	econfig.dev = dev;
 	econfig.priv = priv;
