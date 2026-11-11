@@ -213,6 +213,20 @@ struct inv_mpu6050_state {
 	struct iio_mount_matrix magn_orient;
 	unsigned int suspended_sensors;
 	bool level_shifter;
+	bool dmp_active;
+	bool dmp_smd_mode;
+	bool dmp_smd_armed;
+	bool dmp_smd_pm;
+	bool dmp_smd_suspended;
+	bool dmp_smd_irq_wake;
+	u8 dmp_smd_last_status;
+	bool dmp_overflow;
+	bool dmp_saved_valid;
+	u8 dmp_saved[12];
+	u8 dmp_fifo[1040];
+	u8 dmp_tail[16];
+	size_t dmp_tail_len;
+	s64 dmp_last_timestamp;
 	u8 *data;
 	s64 it_timestamp;
 };
@@ -511,6 +525,37 @@ int inv_mpu_acpi_create_mux_client(struct i2c_client *client);
 void inv_mpu_acpi_delete_mux_client(struct i2c_client *client);
 int inv_mpu_core_probe(struct regmap *regmap, int irq, const char *name,
 		int (*inv_mpu_bus_setup)(struct iio_dev *), int chip_type);
+/* Caller holds lock/runtime PM and stops FIFO/DMP before RAM access. */
+int inv_mpu6515_dmp_mem_read(struct inv_mpu6050_state *st,
+			   unsigned int address, u8 *data, size_t len);
+int inv_mpu6515_dmp_mem_write(struct inv_mpu6050_state *st,
+			    unsigned int address, const u8 *data, size_t len);
+#define INV_MPU6515_SCAN_QUATERNION 7
+#define INV_MPU6515_SCAN_TIMESTAMP 8
+int inv_mpu6515_dmp_start(struct inv_mpu6050_state *st);
+int inv_mpu6515_dmp_smd_set(struct inv_mpu6050_state *st, bool enable);
+int inv_mpu6515_dmp_smd_event(struct inv_mpu6050_state *st);
+void inv_mpu6515_dmp_cleanup(void *data);
+int inv_mpu6515_dmp_smd_suspend(struct inv_mpu6050_state *st, bool *event);
+int inv_mpu6515_dmp_smd_resume(struct inv_mpu6050_state *st, bool *event);
+int inv_mpu6515_dmp_stop(struct inv_mpu6050_state *st);
+int inv_mpu6515_dmp_recover(struct inv_mpu6050_state *st);
+int inv_mpu6515_dmp_read_fifo(struct iio_dev *indio_dev, s64 timestamp);
+int inv_mpu6515_dmp_load(struct inv_mpu6050_state *st);
+int inv_mpu6515_dmp_configure(struct inv_mpu6050_state *st);
+
+/* Firmware wire packets: accelerometer XYZ or six-axis quaternion XYZ (Q30). */
+enum inv_mpu6515_dmp_packet_type {
+	INV_MPU6515_DMP_ACCEL,
+	INV_MPU6515_DMP_QUATERNION,
+};
+struct inv_mpu6515_dmp_packet {
+	enum inv_mpu6515_dmp_packet_type type;
+	s32 xyz[3];
+	u8 step_flags;
+};
+int inv_mpu6515_dmp_decode(const u8 *data, size_t len,
+			   struct inv_mpu6515_dmp_packet *packet);
 extern const struct dev_pm_ops inv_mpu_pmops;
 
 #endif

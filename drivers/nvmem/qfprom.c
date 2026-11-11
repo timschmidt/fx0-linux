@@ -62,7 +62,8 @@ struct qfprom_soc_data {
  * @qfpraw:       iomapped memory space for qfprom-efuse raw address space.
  * @qfpconf:      iomapped memory space for qfprom-efuse configuration address
  *                space.
- * @qfpcorrected: iomapped memory space for qfprom corrected address space.
+ * @qfpcorrected: primary read window: corrected normally, raw for the
+ *                standalone read-only view.
  * @qfpsecurity:  iomapped memory space for qfprom security control space.
  * @dev:          qfprom device structure.
  * @secclk:       Clock supply.
@@ -99,10 +100,25 @@ struct qfprom_touched_values {
  *
  * @keepout: Array of keepout regions for this SoC.
  * @nkeepout: Number of elements in the keepout array.
+ * @raw_read_only: Standalone raw view without programming access.
  */
 struct qfprom_soc_compatible_data {
 	const struct nvmem_keepout *keepout;
 	unsigned int nkeepout;
+	bool raw_read_only;
+};
+
+/* Only the documented CPU/PVS and primary/redundant CPR rows are readable. */
+static const struct nvmem_keepout msm8926_raw_keepout[] = {
+	{ .start = 0, .end = 0xb0 },
+	{ .start = 0xb8, .end = 0x450 },
+	{ .start = 0x460, .end = 0x1000 },
+};
+
+static const struct qfprom_soc_compatible_data msm8926_raw_qfprom = {
+	.keepout = msm8926_raw_keepout,
+	.nkeepout = ARRAY_SIZE(msm8926_raw_keepout),
+	.raw_read_only = true,
 };
 
 static const struct nvmem_keepout sc7180_qfprom_keepout[] = {
@@ -384,11 +400,22 @@ static int qfprom_probe(struct platform_device *pdev)
 	struct qfprom_priv *priv;
 	int ret;
 
+	soc_data = device_get_match_data(dev);
+	if (soc_data && soc_data->raw_read_only) {
+		/* A raw reader must never enter the programming-resource path. */
+		if (platform_get_resource(pdev, IORESOURCE_MEM, 1))
+			return dev_err_probe(dev, -EINVAL,
+					     "read-only raw view requires one region\n");
+		econfig.name = "qfprom-raw";
+		econfig.read_only = true;
+		econfig.root_only = true;
+	}
+
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
-	/* The corrected section is always provided */
+	/* Region zero is corrected, except for the standalone read-only raw view. */
 	priv->qfpcorrected = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 	if (IS_ERR(priv->qfpcorrected))
 		return PTR_ERR(priv->qfpcorrected);
@@ -398,7 +425,6 @@ static int qfprom_probe(struct platform_device *pdev)
 	econfig.priv = priv;
 
 	priv->dev = dev;
-	soc_data = device_get_match_data(dev);
 	if (soc_data) {
 		econfig.keepout = soc_data->keepout;
 		econfig.nkeepout = soc_data->nkeepout;
@@ -458,6 +484,7 @@ static int qfprom_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id qfprom_of_match[] = {
+	{ .compatible = "qcom,msm8926-qfprom-raw", .data = &msm8926_raw_qfprom },
 	{ .compatible = "qcom,qfprom",},
 	{ .compatible = "qcom,sc7180-qfprom", .data = &sc7180_qfprom},
 	{ .compatible = "qcom,sc7280-qfprom", .data = &sc7280_qfprom},

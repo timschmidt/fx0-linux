@@ -4,6 +4,7 @@
 */
 
 #include <linux/pm_runtime.h>
+#include <linux/pm_wakeup.h>
 
 #include <linux/iio/common/inv_sensors_timestamp.h>
 #include <linux/iio/events.h>
@@ -167,6 +168,35 @@ static int inv_mpu6050_set_enable(struct iio_dev *indio_dev, bool enable)
 	unsigned int scan;
 	int result;
 
+	if (st->dmp_smd_pm)
+		return -EBUSY;
+
+	if (st->chip_type == INV_MPU6515 && indio_dev->active_scan_mask &&
+	    test_bit(INV_MPU6515_SCAN_QUATERNION, indio_dev->active_scan_mask)) {
+		if (enable) {
+			result = pm_runtime_resume_and_get(pdev);
+			if (result)
+				return result;
+			result = inv_mpu6515_dmp_start(st);
+			if (result)
+				pm_runtime_put_autosuspend(pdev);
+			return result;
+		}
+		result = inv_mpu6515_dmp_stop(st);
+		pm_runtime_put_autosuspend(pdev);
+		return result;
+	}
+	/* A failed DMP restoration must succeed before raw capture resumes. */
+	if (st->dmp_saved_valid) {
+		result = pm_runtime_resume_and_get(pdev);
+		if (result)
+			return result;
+		result = inv_mpu6515_dmp_stop(st);
+		pm_runtime_put_autosuspend(pdev);
+		if (result)
+			return result;
+	}
+
 	if (enable) {
 		scan = inv_scan_query(indio_dev);
 		result = pm_runtime_resume_and_get(pdev);
@@ -273,12 +303,36 @@ static irqreturn_t inv_mpu6050_interrupt_handle(int irq, void *p)
 	}
 
 	scoped_guard(mutex, &st->lock) {
+		if (st->dmp_smd_suspended) {
+			pm_wakeup_event(regmap_get_device(st->map), 0);
+			return IRQ_HANDLED;
+		}
 		/* ack interrupt and check status */
 		result = regmap_read(st->map, st->reg->int_status, &int_status);
 		if (result) {
 			dev_err(regmap_get_device(st->map), "failed to ack interrupt\n");
 			return IRQ_HANDLED;
 		}
+
+		if (st->dmp_smd_mode) {
+			if (int_status & INV_MPU6050_BIT_DMP_INT_EN) {
+				result = inv_mpu6515_dmp_smd_event(st);
+				if (result > 0) {
+					ev_code = IIO_MOD_EVENT_CODE(
+						IIO_ACTIVITY, 0, IIO_MOD_STILL,
+						IIO_EV_TYPE_CHANGE, IIO_EV_DIR_FALLING);
+					iio_push_event(indio_dev, ev_code, st->it_timestamp);
+				} else if (result < 0) {
+					dev_err_ratelimited(
+						regmap_get_device(st->map),
+						"DMP event status read failed: %d\n", result);
+				}
+			}
+			return IRQ_HANDLED;
+		}
+
+		if (st->dmp_active && (int_status & INV_MPU6050_BIT_FIFO_OVERFLOW_INT))
+			st->dmp_overflow = true;
 
 		/* handle WoM event */
 		if (st->chip_config.wom_en && (int_status & wom_bits)) {
@@ -290,7 +344,9 @@ static irqreturn_t inv_mpu6050_interrupt_handle(int irq, void *p)
 
 data_ready_interrupt:
 	/* handle raw data interrupt */
-	if (int_status & INV_MPU6050_BIT_RAW_DATA_RDY_INT) {
+	if (int_status & (READ_ONCE(st->dmp_active) ?
+			  (INV_MPU6050_BIT_DMP_INT_EN | INV_MPU6050_BIT_FIFO_OVERFLOW_INT) :
+			  INV_MPU6050_BIT_RAW_DATA_RDY_INT)) {
 		indio_dev->pollfunc->timestamp = st->it_timestamp;
 		iio_trigger_poll_nested(st->trig);
 	}

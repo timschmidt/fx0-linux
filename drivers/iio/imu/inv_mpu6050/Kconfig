@@ -5,6 +5,8 @@
 
 config INV_MPU6050_IIO
 	tristate
+	select CRC32
+	select FW_LOADER
 	select IIO_BUFFER
 	select IIO_TRIGGERED_BUFFER
 	select IIO_INV_SENSORS_TIMESTAMP

@@ -26,6 +26,8 @@
 #include <linux/clk.h>
 #include <linux/nvmem-consumer.h>
 
+#include "cpr-voltage.h"
+
 /* Register Offsets for RB-CPR and Bit Definitions */
 
 /* RBCPR Version Register */
@@ -232,7 +234,7 @@ struct cpr_drv {
 	struct mutex		lock;
 	void __iomem		*base;
 	struct corner		*corner;
-	struct regulator	*vdd_apc;
+	struct cpr_voltage	rails;
 	struct clk		*cpu_clk;
 	struct regmap		*tcsr;
 	bool			loop_disabled;
@@ -439,12 +441,17 @@ static int cpr_scale_voltage(struct cpr_drv *drv, struct corner *corner,
 	if (ret)
 		return ret;
 
-	ret = regulator_set_voltage(drv->vdd_apc, new_uV, new_uV);
+	ret = cpr_voltage_set(&drv->rails, new_uV, fuse_corner->max_uV);
 	if (ret) {
 		dev_err_ratelimited(drv->dev, "failed to set apc voltage %d\n",
 				    new_uV);
 		return ret;
 	}
+
+	if (drv->rails.mx_lower_error)
+		dev_warn_ratelimited(drv->dev,
+				     "retaining higher MX vote after reduction failed: %d\n",
+				     drv->rails.mx_lower_error);
 
 	ret = cpr_post_voltage(drv, fuse_corner, dir);
 	if (ret)
@@ -468,7 +475,7 @@ static int cpr_scale(struct cpr_drv *drv, enum voltage_change_dir dir)
 	if (dir != UP && dir != DOWN)
 		return 0;
 
-	step_uV = regulator_get_linear_step(drv->vdd_apc);
+	step_uV = regulator_get_linear_step(drv->rails.apc);
 	if (!step_uV)
 		return -EINVAL;
 
@@ -646,7 +653,7 @@ static int cpr_enable(struct cpr_drv *drv)
 {
 	int ret;
 
-	ret = regulator_enable(drv->vdd_apc);
+	ret = regulator_enable(drv->rails.apc);
 	if (ret)
 		return ret;
 
@@ -674,7 +681,7 @@ static int cpr_disable(struct cpr_drv *drv)
 
 	mutex_unlock(&drv->lock);
 
-	return regulator_disable(drv->vdd_apc);
+	return regulator_disable(drv->rails.apc);
 }
 
 static int cpr_config(struct cpr_drv *drv)
@@ -855,7 +862,7 @@ static int cpr_fuse_corner_init(struct cpr_drv *drv)
 
 	accs = acc_desc->settings;
 
-	step_volt = regulator_get_linear_step(drv->vdd_apc);
+	step_volt = regulator_get_linear_step(drv->rails.apc);
 	if (!step_volt)
 		return -EINVAL;
 
@@ -919,7 +926,7 @@ static int cpr_fuse_corner_init(struct cpr_drv *drv)
 		else if (fuse->uV < fuse->min_uV)
 			fuse->uV = fuse->min_uV;
 
-		ret = regulator_is_supported_voltage(drv->vdd_apc,
+		ret = regulator_is_supported_voltage(drv->rails.apc,
 						     fuse->min_uV,
 						     fuse->min_uV);
 		if (!ret) {
@@ -929,7 +936,7 @@ static int cpr_fuse_corner_init(struct cpr_drv *drv)
 			return -EINVAL;
 		}
 
-		ret = regulator_is_supported_voltage(drv->vdd_apc,
+		ret = regulator_is_supported_voltage(drv->rails.apc,
 						     fuse->max_uV,
 						     fuse->max_uV);
 		if (!ret) {
@@ -1076,7 +1083,7 @@ static int cpr_corner_init(struct cpr_drv *drv)
 	bool apply_scaling;
 	unsigned long freq_diff, freq_diff_mhz;
 	unsigned long freq;
-	int step_volt = regulator_get_linear_step(drv->vdd_apc);
+	int step_volt = regulator_get_linear_step(drv->rails.apc);
 	struct dev_pm_opp *opp;
 
 	if (!step_volt)
@@ -1630,9 +1637,9 @@ static int cpr_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return -EINVAL;
 
-	drv->vdd_apc = devm_regulator_get(dev, "vdd-apc");
-	if (IS_ERR(drv->vdd_apc))
-		return PTR_ERR(drv->vdd_apc);
+	drv->rails.apc = devm_regulator_get(dev, "vdd-apc");
+	if (IS_ERR(drv->rails.apc))
+		return PTR_ERR(drv->rails.apc);
 
 	/*
 	 * Initialize fuse corners, since it simply depends

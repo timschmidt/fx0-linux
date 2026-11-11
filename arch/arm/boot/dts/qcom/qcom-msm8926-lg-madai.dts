@@ -706,3 +706,26 @@
 		qcom,drive-strength = <PMIC_GPIO_STRENGTH_HIGH>;
 	};
 };
+
+/* CPU/CPR fuses use the raw view; TSENS retains the corrected provider. */
+&soc {
+	qfprom_raw: efuse@fc4b8000 {
+		compatible = "qcom,msm8926-qfprom-raw";
+		reg = <0xfc4b8000 0x1000>;
+		read-only;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		cpu_speedbin: cpu-bin@b0 {
+			reg = <0xb0 0x4>;
+		};
+
+		cpr_primary: cpr-primary@450 {
+			reg = <0x450 0x8>;
+		};
+
+		cpr_redundant: cpr-redundant@458 {
+			reg = <0x458 0x8>;
+		};
+	};
+};

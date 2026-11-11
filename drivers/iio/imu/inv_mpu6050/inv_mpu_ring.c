@@ -55,6 +55,10 @@ irqreturn_t inv_mpu6050_read_fifo(int irq, void *p)
 	size_t i, nb;
 
 	mutex_lock(&st->lock);
+	if (st->dmp_active) {
+		inv_mpu6515_dmp_read_fifo(indio_dev, pf->timestamp);
+		goto end_session;
+	}
 
 	if (!(st->chip_config.accl_fifo_enable |
 		st->chip_config.gyro_fifo_enable |
