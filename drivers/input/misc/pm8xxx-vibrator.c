@@ -107,7 +107,8 @@ static int pm8xxx_vib_set(struct pm8xxx_vib *vib, bool on)
 		vib->level /= VIB_PER_STEP_mV(vib);
 
 	if (on)
-		val |= (vib->level << regs->drv_shift) & regs->drv_mask;
+		val = (val & ~regs->drv_mask) |
+		      ((vib->level << regs->drv_shift) & regs->drv_mask);
 	else
 		val &= ~regs->drv_mask;
 
