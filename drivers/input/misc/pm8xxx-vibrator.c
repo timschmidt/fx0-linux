@@ -159,6 +159,8 @@ static void pm8xxx_work_handler(struct work_struct *work)
 		vib->level = VIB_MIN_LEVEL_mV(vib);
 	}
 
+	vib->level = min(vib->level, VIB_MAX_LEVEL_mV(vib));
+
 	pm8xxx_vib_set(vib, vib->active);
 }
 
