@@ -294,12 +294,16 @@ static int rmi_i2c_suspend(struct device *dev)
 
 	ret = rmi_driver_suspend(rmi_i2c->xport.rmi_dev, true);
 	if (ret)
-		dev_warn(dev, "Failed to resume device: %d\n", ret);
+		dev_warn(dev, "Failed to suspend device: %d\n", ret);
 
 	regulator_bulk_disable(ARRAY_SIZE(rmi_i2c->supplies),
 			       rmi_i2c->supplies);
 
-	return ret;
+	/*
+	 * The transport is powered down even if the sleep command failed.
+	 * Complete suspend so the PM core will call our resume callback.
+	 */
+	return 0;
 }
 
 static int rmi_i2c_resume(struct device *dev)
