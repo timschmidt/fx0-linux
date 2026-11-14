@@ -541,12 +541,16 @@ static void vfe_isr_sof(struct vfe_device *vfe, enum vfe_line_id line_id)
  * vfe_isr_reg_update - Process reg update interrupt
  * @vfe: VFE Device
  * @line_id: VFE line
+ *
+ * Return: WM indices to discard from the current IRQ snapshot.
  */
-static void vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
+static u32 vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 {
 	struct vfe_output *output;
 	struct vfe_line *line = &vfe->line[line_id];
 	unsigned long flags;
+	u32 stale_wm = 0;
+	unsigned int i;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	vfe->res->hw_ops->reg_update_clear(vfe, line_id);
@@ -557,10 +561,18 @@ static void vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 		output->wait_reg_update = 0;
 		complete(&output->reg_update);
 		spin_unlock_irqrestore(&vfe->output_lock, flags);
-		return;
+		return 0;
 	}
 
 	if (output->state == VFE_OUTPUT_STOPPING) {
+		/*
+		 * A WM completion in this IRQ snapshot still refers to the old
+		 * buffers. Remember its indices before returning the last buffer
+		 * or installing buffers received while stopping.
+		 */
+		for (i = 0; i < output->wm_num; i++)
+			stale_wm |= BIT(output->wm_idx[i]);
+
 		/* Release last buffer when hw is idle */
 		if (output->last_buffer) {
 			vb2_buffer_done(&output->last_buffer->vb.vb2_buf,
@@ -602,6 +614,8 @@ static void vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	return stale_wm;
 }
 
 /*

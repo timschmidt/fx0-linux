@@ -125,7 +125,8 @@ struct vfe_hw_ops {
 struct vfe_isr_ops {
 	void (*reset_ack)(struct vfe_device *vfe);
 	void (*halt_ack)(struct vfe_device *vfe);
-	void (*reg_update)(struct vfe_device *vfe, enum vfe_line_id line_id);
+	/* WM indices whose saved completions belong to a drained output. */
+	u32 (*reg_update)(struct vfe_device *vfe, enum vfe_line_id line_id);
 	void (*sof)(struct vfe_device *vfe, enum vfe_line_id line_id);
 	void (*comp_done)(struct vfe_device *vfe, u8 comp);
 	void (*wm_done)(struct vfe_device *vfe, u8 wm);

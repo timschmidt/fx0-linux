@@ -442,7 +442,7 @@ static void vfe_isr_sof(struct vfe_device *vfe, enum vfe_line_id line_id)
  * @vfe: VFE Device
  * @line_id: VFE line
  */
-static void vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
+static u32 vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 {
 	struct vfe_output *output;
 	unsigned long flags;
@@ -458,6 +458,8 @@ static void vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	return 0;
 }
 
 /*

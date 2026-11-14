@@ -967,6 +967,8 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 {
 	struct vfe_device *vfe = dev;
 	u32 value0, value1;
+	u32 stale_wm = 0;
+	bool stale_pix = false;
 	int i, j;
 
 	vfe->res->hw_ops->isr_read(vfe, &value0, &value1);
@@ -984,8 +986,13 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 		vfe->isr_ops.halt_ack(vfe);
 
 	for (i = VFE_LINE_RDI0; i < vfe->res->line_num; i++)
-		if (value0 & VFE_0_IRQ_STATUS_0_line_n_REG_UPDATE(i))
-			vfe->isr_ops.reg_update(vfe, i);
+		if (value0 & VFE_0_IRQ_STATUS_0_line_n_REG_UPDATE(i)) {
+			u32 stale = vfe->isr_ops.reg_update(vfe, i);
+
+			stale_wm |= stale;
+			if (i == VFE_LINE_PIX && stale)
+				stale_pix = true;
+		}
 
 	if (value0 & VFE_0_IRQ_STATUS_0_CAMIF_SOF)
 		vfe->isr_ops.sof(vfe, VFE_LINE_PIX);
@@ -996,14 +1003,16 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	for (i = 0; i < MSM_VFE_COMPOSITE_IRQ_NUM; i++)
 		if (value0 & VFE_0_IRQ_STATUS_0_IMAGE_COMPOSITE_DONE_n(i)) {
-			vfe->isr_ops.comp_done(vfe, i);
+			if (!stale_pix)
+				vfe->isr_ops.comp_done(vfe, i);
 			for (j = 0; j < ARRAY_SIZE(vfe->wm_output_map); j++)
 				if (vfe->wm_output_map[j] == VFE_LINE_PIX)
 					value0 &= ~VFE_0_IRQ_MASK_0_IMAGE_MASTER_n_PING_PONG(j);
 		}
 
 	for (i = 0; i < MSM_VFE_IMAGE_MASTERS_NUM; i++)
-		if (value0 & VFE_0_IRQ_STATUS_0_IMAGE_MASTER_n_PING_PONG(i))
+		if ((value0 & VFE_0_IRQ_STATUS_0_IMAGE_MASTER_n_PING_PONG(i)) &&
+		    !(stale_wm & BIT(i)))
 			vfe->isr_ops.wm_done(vfe, i);
 
 	return IRQ_HANDLED;
