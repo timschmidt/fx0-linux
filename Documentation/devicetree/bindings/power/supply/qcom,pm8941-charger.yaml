@@ -11,6 +11,14 @@ maintainers:
 
 allOf:
   - $ref: power-supply.yaml#
+  - if:
+      required:
+        - qcom,usb-gadget-current-limit
+    then:
+      properties:
+        compatible:
+          const: qcom,pm8226-charger
+        usb-charge-current-limit: false
 
 properties:
   qcom,software-charge-control:
@@ -19,6 +27,13 @@ properties:
       Experimental firmware-to-native software charging handoff. Charging must
       already be inhibited before native dependencies can defer probe. The
       parent keeps charging off until its policy child validates fresh inputs.
+
+  qcom,usb-gadget-current-limit:
+    type: boolean
+    description: |
+      Let the USB gadget controller manage the PM8226 USB input limit.
+      Initialize the limit to 100000 uA and expose the effective and
+      programmed limits as read-only power supply attributes.
 
   qcom,boot-charge-inhibited:
     type: boolean

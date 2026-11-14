@@ -75,6 +75,13 @@ properties:
     type: boolean
     deprecated: true
 
+  power-supplies:
+    description: Charger supplying the gadget through VBUS. The controller
+      forwards USB current requests to its USB input supply in peripheral
+      mode when using a generic PHY.
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    maxItems: 1
+
   ulpi:
     type: object
     additionalProperties: false
@@ -91,6 +98,17 @@ allOf:
   - $ref: chipidea,usb2-common.yaml#
   - $ref: usb-hcd.yaml#
   - $ref: usb-drd.yaml#
+
+  - if:
+      required:
+        - power-supplies
+    then:
+      properties:
+        dr_mode:
+          const: peripheral
+        usb-role-switch: false
+      required:
+        - dr_mode
 
 unevaluatedProperties: false
 
