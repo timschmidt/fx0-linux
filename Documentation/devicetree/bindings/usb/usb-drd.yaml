@@ -53,6 +53,7 @@ properties:
       Indicates that the device is capable of assigning the USB data role
       (USB host or USB device) for a given USB connector, such as Type-C,
       Type-B(micro). See connector/usb-connector.yaml.
+    type: boolean
 
   role-switch-default-mode:
     description:
