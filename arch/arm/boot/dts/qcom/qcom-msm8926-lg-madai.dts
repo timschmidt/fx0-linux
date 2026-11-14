@@ -401,6 +401,7 @@
 
 &smbb {
 	qcom,software-charge-control;
+	qcom,usb-gadget-current-limit;
 	qcom,fast-charge-safe-current = <1500000>;
 	qcom,fast-charge-current-limit = <1200000>;
 	qcom,fast-charge-safe-voltage = <4380000>;
@@ -420,6 +421,7 @@
 
 &usb {
 	extcon = <&smbb>;
+	power-supplies = <&smbb>;
 	dr_mode = "peripheral";
 	status = "okay";
 };

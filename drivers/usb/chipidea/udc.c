@@ -17,6 +17,8 @@
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/power_supply.h>
+#include <linux/property.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
 #include <linux/usb/otg-fsm.h>
@@ -1030,6 +1032,302 @@ static int _gadget_stop_activity(struct usb_gadget *gadget)
 /******************************************************************************
  * ISR block
  *****************************************************************************/
+enum ci_vbus_draw_event {
+	CI_VBUS_DRAW_VBUS,
+	CI_VBUS_DRAW_PULLUP,
+	CI_VBUS_DRAW_RESET,
+	CI_VBUS_DRAW_BUS_SUSPEND,
+	CI_VBUS_DRAW_REQUEST,
+	CI_VBUS_DRAW_CONFIG_BEGIN,
+	CI_VBUS_DRAW_CONFIG_CANCEL,
+	CI_VBUS_DRAW_CONFIG_COMPLETE,
+};
+
+#if IS_REACHABLE(CONFIG_POWER_SUPPLY)
+#define CI_VBUS_DEFAULT_MA	100
+#define CI_VBUS_CONFIGURED_MAX_MA	500
+
+struct ci_vbus_draw {
+	struct power_supply *psy;
+	struct device *dev;
+	struct work_struct work;
+	spinlock_t lock; /* Protects the link state and requested budget. */
+	unsigned int requested_ma;
+	unsigned int pending_ma;
+	bool configuring;
+	bool pending_configured;
+	bool configured;
+	bool vbus;
+	bool pullup;
+	bool bus_suspended;
+	bool paused;
+};
+
+static void ci_vbus_draw_apply(struct ci_vbus_draw *draw, unsigned int ma)
+{
+	union power_supply_propval limit = { .intval = ma * 1000 };
+	int ret;
+
+	ret = power_supply_set_property(draw->psy, POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT, &limit);
+	if (ret)
+		dev_warn_ratelimited(draw->dev, "failed to apply USB budget of %u mA: %d\n",
+				     ma, ret);
+}
+
+static void ci_vbus_draw_work(struct work_struct *work)
+{
+	struct ci_vbus_draw *draw = container_of(work, struct ci_vbus_draw, work);
+	unsigned int ma = CI_VBUS_DEFAULT_MA;
+	unsigned long flags;
+
+	spin_lock_irqsave(&draw->lock, flags);
+	if (draw->vbus && draw->pullup)
+		ma = draw->bus_suspended ? 0 : draw->requested_ma;
+	spin_unlock_irqrestore(&draw->lock, flags);
+
+	ci_vbus_draw_apply(draw, ma);
+}
+
+static void ci_vbus_draw_event(struct ci_hdrc *ci, enum ci_vbus_draw_event event,
+			       unsigned int value)
+{
+	struct ci_vbus_draw *draw = ci->vbus_draw;
+	unsigned long flags;
+	unsigned int ma;
+
+	if (!draw)
+		return;
+
+	spin_lock_irqsave(&draw->lock, flags);
+	switch (event) {
+	case CI_VBUS_DRAW_VBUS:
+		if (draw->vbus == !!value)
+			goto out;
+		draw->vbus = value;
+		break;
+	case CI_VBUS_DRAW_PULLUP:
+		if (draw->pullup == !!value)
+			goto out;
+		draw->pullup = value;
+		break;
+	case CI_VBUS_DRAW_RESET:
+		break;
+	case CI_VBUS_DRAW_BUS_SUSPEND:
+		draw->bus_suspended = value;
+		goto queue;
+	case CI_VBUS_DRAW_REQUEST:
+		if (!draw->vbus || !draw->pullup || draw->bus_suspended)
+			goto out;
+		ma = value < CI_VBUS_DEFAULT_MA ? 0 : min(value, CI_VBUS_CONFIGURED_MAX_MA);
+		if (draw->configuring) {
+			draw->pending_ma = ma;
+			goto out;
+		}
+		draw->requested_ma = draw->configured ? ma : min(ma, CI_VBUS_DEFAULT_MA);
+		goto queue;
+	case CI_VBUS_DRAW_CONFIG_BEGIN:
+		if (!draw->vbus || !draw->pullup)
+			goto out;
+		draw->configuring = true;
+		draw->pending_configured = value != 0;
+		draw->pending_ma = CI_VBUS_DEFAULT_MA;
+		draw->configured = false;
+		draw->requested_ma = min(draw->requested_ma, CI_VBUS_DEFAULT_MA);
+		goto queue;
+	case CI_VBUS_DRAW_CONFIG_CANCEL:
+		draw->configuring = false;
+		goto out;
+	case CI_VBUS_DRAW_CONFIG_COMPLETE:
+		if (!draw->configuring)
+			goto out;
+		draw->configuring = false;
+		draw->configured = draw->pending_configured;
+		draw->requested_ma = draw->configured ? draw->pending_ma : CI_VBUS_DEFAULT_MA;
+		goto queue;
+	}
+
+	draw->requested_ma = CI_VBUS_DEFAULT_MA;
+	draw->configuring = false;
+	draw->configured = false;
+	draw->bus_suspended = false;
+queue:
+	if (!draw->paused)
+		schedule_work(&draw->work);
+out:
+	spin_unlock_irqrestore(&draw->lock, flags);
+}
+
+static bool ci_vbus_draw_configuring(struct ci_hdrc *ci)
+{
+	struct ci_vbus_draw *draw = ci->vbus_draw;
+	unsigned long flags;
+	bool configuring;
+
+	if (!draw)
+		return false;
+
+	spin_lock_irqsave(&draw->lock, flags);
+	configuring = draw->configuring;
+	spin_unlock_irqrestore(&draw->lock, flags);
+
+	return configuring;
+}
+
+#ifdef CONFIG_PM_SLEEP
+static void ci_vbus_draw_pause(struct ci_hdrc *ci, bool pause)
+{
+	struct ci_vbus_draw *draw = ci->vbus_draw;
+	unsigned long flags;
+
+	if (!draw)
+		return;
+
+	spin_lock_irqsave(&draw->lock, flags);
+	draw->paused = pause;
+	if (!pause)
+		schedule_work(&draw->work);
+	spin_unlock_irqrestore(&draw->lock, flags);
+
+	if (pause)
+		flush_work(&draw->work);
+}
+#endif
+
+static void ci_vbus_draw_release(void *data)
+{
+	struct ci_vbus_draw *draw = data;
+
+	cancel_work_sync(&draw->work);
+	ci_vbus_draw_apply(draw, CI_VBUS_DEFAULT_MA);
+	power_supply_put(draw->psy);
+}
+
+struct ci_usb_supply_match {
+	struct device *supplier;
+	const char *name;
+};
+
+static int ci_vbus_draw_match_supply(struct power_supply *psy, void *data)
+{
+	struct ci_usb_supply_match *match = data;
+
+	if (psy->dev.parent != match->supplier || psy->desc->type != POWER_SUPPLY_TYPE_USB)
+		return 0;
+	if (match->name)
+		return -EINVAL;
+
+	match->name = psy->desc->name;
+	return 0;
+}
+
+static int ci_vbus_draw_init(struct ci_hdrc *ci)
+{
+	struct device *dev = ci->dev;
+	struct ci_usb_supply_match match = {};
+	struct ci_vbus_draw *draw;
+	struct device_link *link;
+	struct fwnode_handle *node;
+	union power_supply_propval limit;
+	int ret;
+
+	if (!device_property_present(dev, "power-supplies"))
+		return 0;
+	if (ci->usb_phy || ci->platdata->dr_mode != USB_DR_MODE_PERIPHERAL ||
+	    device_property_read_bool(dev, "usb-role-switch"))
+		return -EINVAL;
+
+	node = fwnode_find_reference(dev_fwnode(dev), "power-supplies", 0);
+	if (IS_ERR(node))
+		return PTR_ERR(node);
+
+	match.supplier = get_dev_from_fwnode(node);
+	fwnode_handle_put(node);
+	if (!match.supplier)
+		return -EPROBE_DEFER;
+
+	/*
+	 * The managed link keeps the supplier bound until the gadget has
+	 * stopped and its queued work has drained. It also orders system PM.
+	 */
+	link = device_link_add(dev, match.supplier, DL_FLAG_AUTOPROBE_CONSUMER);
+	if (!link || READ_ONCE(link->status) != DL_STATE_CONSUMER_PROBE ||
+	    READ_ONCE(match.supplier->links.status) != DL_DEV_DRIVER_BOUND) {
+		ret = -EPROBE_DEFER;
+		goto put_supplier;
+	}
+
+	ret = power_supply_for_each_psy(&match, ci_vbus_draw_match_supply);
+	if (ret)
+		goto put_supplier;
+	if (!match.name) {
+		ret = -ENODEV;
+		goto put_supplier;
+	}
+
+	draw = devm_kzalloc(dev, sizeof(*draw), GFP_KERNEL);
+	if (!draw) {
+		ret = -ENOMEM;
+		goto put_supplier;
+	}
+	draw->psy = power_supply_get_by_name(match.name);
+	if (!draw->psy) {
+		ret = -ENODEV;
+		goto put_supplier;
+	}
+	ret = power_supply_get_property(draw->psy, POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT, &limit);
+	if (ret) {
+		power_supply_put(draw->psy);
+		goto put_supplier;
+	}
+
+	draw->dev = dev;
+	draw->requested_ma = CI_VBUS_DEFAULT_MA;
+	spin_lock_init(&draw->lock);
+	INIT_WORK(&draw->work, ci_vbus_draw_work);
+
+	ret = devm_add_action_or_reset(dev, ci_vbus_draw_release, draw);
+	if (!ret)
+		ci->vbus_draw = draw;
+put_supplier:
+	put_device(match.supplier);
+	return ret;
+}
+#else
+static void ci_vbus_draw_event(struct ci_hdrc *ci, enum ci_vbus_draw_event event,
+			       unsigned int value)
+{
+}
+
+static bool ci_vbus_draw_configuring(struct ci_hdrc *ci)
+{
+	return false;
+}
+
+#ifdef CONFIG_PM_SLEEP
+static void ci_vbus_draw_pause(struct ci_hdrc *ci, bool pause)
+{
+}
+#endif
+
+static int ci_vbus_draw_init(struct ci_hdrc *ci)
+{
+	return device_property_present(ci->dev, "power-supplies") ? -EOPNOTSUPP : 0;
+}
+#endif
+
+static int ci_vbus_draw_config_begin(struct ci_hdrc *ci, const struct usb_ctrlrequest *req)
+{
+	unsigned int configuration = le16_to_cpu(req->wValue);
+
+	if (!ci->vbus_draw || req->bRequest != USB_REQ_SET_CONFIGURATION || req->bRequestType)
+		return 0;
+	if (req->wLength || req->wIndex || configuration > U8_MAX)
+		return -EINVAL;
+
+	ci_vbus_draw_event(ci, CI_VBUS_DRAW_CONFIG_BEGIN, configuration);
+	return 0;
+}
+
 /**
  * isr_reset_handler: USB reset interrupt handler
  * @ci: UDC device
@@ -1043,6 +1341,7 @@ __acquires(ci->lock)
 	int retval;
 	u32 intr;
 
+	ci_vbus_draw_event(ci, CI_VBUS_DRAW_RESET, 0);
 	spin_unlock(&ci->lock);
 	if (ci->gadget.speed != USB_SPEED_UNKNOWN)
 		usb_gadget_udc_reset(&ci->gadget, ci->driver);
@@ -1285,9 +1584,14 @@ __acquires(hwep->lock)
 	list_for_each_entry_safe(hwreq, hwreqtemp, &hwep->qh.queue,
 			queue) {
 		retval = _hardware_dequeue(hwep, hwreq);
-		if (retval < 0)
+		if (retval < 0) {
+			if (hwep == hwep->ci->ep0in && retval != -EBUSY)
+				ci_vbus_draw_event(hwep->ci, CI_VBUS_DRAW_CONFIG_CANCEL, 0);
 			break;
+		}
 		list_del_init(&hwreq->queue);
+		if (hwep == hwep->ci->ep0in && !hwreq->req.length)
+			ci_vbus_draw_event(hwep->ci, CI_VBUS_DRAW_CONFIG_COMPLETE, 0);
 		if (hwreq->req.complete != NULL) {
 			spin_unlock(hwep->lock);
 			if ((hwep->type == USB_ENDPOINT_XFER_CONTROL) &&
@@ -1325,6 +1629,11 @@ __acquires(ci->lock)
 	struct usb_ctrlrequest req;
 	int type, num, dir, err = -EINVAL;
 	u8 tmode = 0;
+
+	/* Complete an acknowledged configuration before processing the next SETUP. */
+	if (ci_vbus_draw_configuring(ci) && hw_test_and_clear_complete(ci, ci->hw_ep_max / 2))
+		isr_tr_complete_low(ci->ep0in);
+	ci_vbus_draw_event(ci, CI_VBUS_DRAW_CONFIG_CANCEL, 0);
 
 	/*
 	 * Flush data and handshake transactions of previous
@@ -1464,6 +1773,10 @@ __acquires(ci->lock)
 		break;
 	default:
 delegate:
+		err = ci_vbus_draw_config_begin(ci, &req);
+		if (err)
+			break;
+
 		if (req.wLength == 0)   /* no data phase */
 			ci->ep0_dir = TX;
 
@@ -1474,6 +1787,7 @@ delegate:
 	}
 
 	if (err < 0) {
+		ci_vbus_draw_event(ci, CI_VBUS_DRAW_CONFIG_CANCEL, 0);
 		spin_unlock(&ci->lock);
 		if (_ep_set_halt(&hwep->ep, 1, false))
 			dev_err(ci->dev, "error: _ep_set_halt\n");
@@ -1888,6 +2202,7 @@ static int ci_udc_vbus_session(struct usb_gadget *_gadget, int is_active)
 
 	spin_lock_irqsave(&ci->lock, flags);
 	ci->vbus_active = is_active;
+	ci_vbus_draw_event(ci, CI_VBUS_DRAW_VBUS, is_active);
 	spin_unlock_irqrestore(&ci->lock, flags);
 
 	if (ci->usb_phy)
@@ -1942,6 +2257,10 @@ static int ci_udc_vbus_draw(struct usb_gadget *_gadget, unsigned ma)
 
 	if (ci->usb_phy)
 		return usb_phy_set_power(ci->usb_phy, ma);
+	if (ci->vbus_draw) {
+		ci_vbus_draw_event(ci, CI_VBUS_DRAW_REQUEST, ma);
+		return 0;
+	}
 	return -ENOTSUPP;
 }
 
@@ -1973,6 +2292,7 @@ static int ci_udc_pullup(struct usb_gadget *_gadget, int is_on)
 		return 0;
 
 	pm_runtime_get_sync(ci->dev);
+	ci_vbus_draw_event(ci, CI_VBUS_DRAW_PULLUP, is_on);
 	if (is_on)
 		hw_write(ci, OP_USBCMD, USBCMD_RS, USBCMD_RS);
 	else
@@ -2172,6 +2492,7 @@ static int ci_udc_stop(struct usb_gadget *gadget)
 
 	spin_lock_irqsave(&ci->lock, flags);
 	ci->driver = NULL;
+	ci_vbus_draw_event(ci, CI_VBUS_DRAW_PULLUP, 0);
 
 	if (ci->vbus_active) {
 		hw_device_state(ci, 0);
@@ -2230,6 +2551,7 @@ static irqreturn_t udc_irq(struct ci_hdrc *ci)
 				usb_phy_set_event(ci->usb_phy,
 					USB_EVENT_ENUMERATED);
 			if (ci->suspended) {
+				ci_vbus_draw_event(ci, CI_VBUS_DRAW_BUS_SUSPEND, 0);
 				if (ci->driver->resume) {
 					spin_unlock(&ci->lock);
 					ci->driver->resume(&ci->gadget);
@@ -2246,6 +2568,7 @@ static irqreturn_t udc_irq(struct ci_hdrc *ci)
 
 		if ((USBi_SLI & intr) && !(ci->suspended)) {
 			ci->suspended = 1;
+			ci_vbus_draw_event(ci, CI_VBUS_DRAW_BUS_SUSPEND, 1);
 			ci->resume_state = ci->gadget.state;
 			if (ci->gadget.speed != USB_SPEED_UNKNOWN &&
 			    ci->driver->suspend) {
@@ -2390,6 +2713,8 @@ static void udc_suspend(struct ci_hdrc *ci)
 	if (ci->gadget.connected &&
 	    (!ci->suspended || !device_may_wakeup(ci->dev)))
 		usb_gadget_disconnect(&ci->gadget);
+
+	ci_vbus_draw_pause(ci, true);
 }
 
 static void udc_resume(struct ci_hdrc *ci, bool power_lost)
@@ -2408,6 +2733,8 @@ static void udc_resume(struct ci_hdrc *ci, bool power_lost)
 	/* Restore value 0 if it was set for power lost check */
 	if (hw_read(ci, OP_ENDPTLISTADDR, ~0) == 0xFFFFFFFF)
 		hw_write(ci, OP_ENDPTLISTADDR, ~0, 0);
+
+	ci_vbus_draw_pause(ci, false);
 }
 #endif
 
@@ -2437,6 +2764,10 @@ int ci_hdrc_gadget_init(struct ci_hdrc *ci)
 #endif
 	rdrv->irq	= udc_irq;
 	rdrv->name	= "gadget";
+
+	ret = ci_vbus_draw_init(ci);
+	if (ret)
+		return dev_err_probe(ci->dev, ret, "USB input budget setup failed\n");
 
 	ret = udc_start(ci);
 	if (!ret)

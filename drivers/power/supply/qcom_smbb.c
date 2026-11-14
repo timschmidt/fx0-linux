@@ -141,7 +141,7 @@ struct smbb_charger {
 	bool jeita_ext_temp;
 	unsigned long status;
 	struct mutex statlock;
-	/* Serializes charger-enable votes and battery limit changes. */
+	/* Serializes charger-enable votes and battery and USB limits. */
 	struct mutex charge_lock;
 	unsigned int charge_inhibit;
 	bool software_control;
@@ -154,6 +154,7 @@ struct smbb_charger {
 	unsigned int attr[_ATTR_CNT];
 
 	bool usb_input_control;
+	bool usb_budget_managed;
 	struct power_supply_desc usb_desc;
 	struct power_supply *usb_psy;
 	struct power_supply *dc_psy;
@@ -612,7 +613,7 @@ static int smbb_usb_input_set_limit(struct smbb_charger *chg, int limit,
 				   bool control_suspend)
 {
 	const struct smbb_charger_attr *attr = &smbb_charger_attrs[ATTR_USBIN_IMAX];
-	int ret;
+	int ret, suspend_ret = 0;
 
 	if (limit < 0 || (!limit && !control_suspend) ||
 	    (limit && ((unsigned int)limit < attr->min ||
@@ -622,7 +623,12 @@ static int smbb_usb_input_set_limit(struct smbb_charger *chg, int limit,
 	mutex_lock(&chg->charge_lock);
 	if (!limit) {
 		ret = smbb_usb_input_suspend(chg, true);
-		goto out;
+		if (ret != -ENODEV || !chg->usb_budget_managed)
+			goto out;
+
+		/* Preserve USB power when it may be the only source. */
+		suspend_ret = ret;
+		limit = attr->min;
 	}
 
 	/* Verify the new selector before enabling a suspended input path. */
@@ -635,7 +641,7 @@ static int smbb_usb_input_set_limit(struct smbb_charger *chg, int limit,
 	}
 out:
 	mutex_unlock(&chg->charge_lock);
-	return ret;
+	return ret ?: suspend_ret;
 }
 
 static int smbb_usbin_get_property(struct power_supply *psy,
@@ -684,6 +690,8 @@ static int smbb_usbin_set_property(struct power_supply *psy,
 			return -EOPNOTSUPP;
 		return smbb_usb_input_set_limit(chg, val->intval, true);
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
+		if (chg->usb_budget_managed)
+			return -EBUSY;
 		return smbb_usb_input_set_limit(chg, val->intval, false);
 	default:
 		return -EINVAL;
@@ -748,6 +756,9 @@ static int smbb_usbin_writable_property(struct power_supply *psy,
 		enum power_supply_property psp)
 {
 	struct smbb_charger *chg = power_supply_get_drvdata(psy);
+
+	if (chg->usb_budget_managed)
+		return 0;
 
 	if (psp == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT)
 		return chg->usb_input_control;
@@ -1274,8 +1285,17 @@ static int smbb_charger_probe(struct platform_device *pdev)
 
 	chg->dc_disabled = of_property_read_bool(pdev->dev.of_node, "qcom,disable-dc");
 
+	chg->usb_input_control = smbb_usb_input_supported(chg);
+	chg->usb_budget_managed = of_property_read_bool(pdev->dev.of_node,
+						       "qcom,usb-gadget-current-limit");
+	if (chg->usb_budget_managed && !chg->usb_input_control)
+		return dev_err_probe(chg->dev, -ENODEV, "USB input control unavailable\n");
+
 	for (i = 0; i < _ATTR_CNT; ++i) {
-		rc = smbb_charger_attr_parse(chg, i);
+		if (i == ATTR_USBIN_IMAX && chg->usb_budget_managed)
+			rc = smbb_usb_input_set_limit(chg, smbb_charger_attrs[i].min, true);
+		else
+			rc = smbb_charger_attr_parse(chg, i);
 		if (rc) {
 			dev_err(&pdev->dev, "failed to parse/apply settings\n");
 			return rc;
@@ -1297,7 +1317,6 @@ static int smbb_charger_probe(struct platform_device *pdev)
 		return PTR_ERR(chg->bat_psy);
 	}
 
-	chg->usb_input_control = smbb_usb_input_supported(chg);
 	chg->usb_desc = usb_psy_desc;
 	if (chg->usb_input_control) {
 		chg->usb_desc.properties = smbb_usb_input_properties;

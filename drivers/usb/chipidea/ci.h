@@ -196,6 +196,7 @@ struct hw_bank {
  * @suspended: suspended by host
  * @test_mode: the selected test mode
  * @platdata: platform specific information supplied by parent device
+ * @vbus_draw: optional gadget input-current control
  * @vbus_active: is VBUS active
  * @ulpi: pointer to ULPI device, if any
  * @ulpi_ops: ULPI read/write ops for this device
@@ -235,6 +236,7 @@ struct ci_hdrc {
 	struct dma_pool			*td_pool;
 
 	struct usb_gadget		gadget;
+	struct ci_vbus_draw		*vbus_draw;
 	struct usb_gadget_driver	*driver;
 	enum usb_device_state		resume_state;
 	unsigned			hw_ep_max;
