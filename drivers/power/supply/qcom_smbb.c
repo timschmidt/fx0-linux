@@ -76,7 +76,13 @@
 #define BTC_CTRL_COLD_EXT	BIT(1)
 #define BTC_CTRL_HOT_EXT_N	BIT(0)
 
+#define SMBB_USB_TYPE		0x304
+#define SMBB_USB_SUBTYPE	0x305
+#define USB_TYPE_CHGPTH		0x02
+#define USB_SUBTYPE_SMBP	0x34
 #define SMBB_USB_IMAX		0x344
+#define SMBB_USB_SUSPEND	0x347
+#define USB_SUSPEND_EN		BIT(0)
 #define SMBB_USB_OTG_CTL	0x348
 #define OTG_CTL_EN		BIT(0)
 #define SMBB_USB_ENUM_TIMER_STOP 0x34e
@@ -147,6 +153,8 @@ struct smbb_charger {
 
 	unsigned int attr[_ATTR_CNT];
 
+	bool usb_input_control;
+	struct power_supply_desc usb_desc;
 	struct power_supply *usb_psy;
 	struct power_supply *dc_psy;
 	struct power_supply *bat_psy;
@@ -536,6 +544,100 @@ static const struct smbb_irq {
 	{ "dc-valid", smbb_dc_valid_handler },
 };
 
+/* Only the verified PM8226 SMBP USB path exposes the suspend control. */
+static bool smbb_usb_input_supported(struct smbb_charger *chg)
+{
+	unsigned int type, subtype;
+
+	if (!of_device_is_compatible(chg->dev->of_node, "qcom,pm8226-charger"))
+		return false;
+	if (regmap_read(chg->regmap, chg->addr + SMBB_USB_TYPE, &type) ||
+	    regmap_read(chg->regmap, chg->addr + SMBB_USB_SUBTYPE, &subtype))
+		return false;
+
+	return type == USB_TYPE_CHGPTH && subtype == USB_SUBTYPE_SMBP;
+}
+
+/* Caller holds charge_lock. The supply must have a battery before suspension. */
+static int smbb_usb_input_suspend(struct smbb_charger *chg, bool suspend)
+{
+	unsigned int value = suspend ? USB_SUSPEND_EN : 0;
+	unsigned int reg;
+	int ret;
+
+	if (suspend) {
+		ret = regmap_read(chg->regmap, chg->addr + SMBB_BAT_PRES_STATUS, &reg);
+		if (ret)
+			return ret;
+		if (!(reg & PRES_STATUS_BAT_PRES))
+			return -ENODEV;
+	}
+
+	ret = regmap_write_bits(chg->regmap, chg->addr + SMBB_USB_SUSPEND,
+				USB_SUSPEND_EN, value);
+	if (ret)
+		return ret;
+	ret = regmap_read(chg->regmap, chg->addr + SMBB_USB_SUSPEND, &reg);
+	if (ret)
+		return ret;
+	return (reg & USB_SUSPEND_EN) == value ? 0 : -EIO;
+}
+
+static int smbb_usb_input_get_limit(struct smbb_charger *chg, int *limit)
+{
+	unsigned int reg;
+	int ret;
+
+	mutex_lock(&chg->charge_lock);
+	ret = regmap_read(chg->regmap, chg->addr + SMBB_USB_SUSPEND, &reg);
+	if (ret)
+		goto out;
+	if (reg & USB_SUSPEND_EN) {
+		*limit = 0;
+		goto out;
+	}
+	ret = regmap_read(chg->regmap, chg->addr + SMBB_USB_IMAX, &reg);
+	if (ret)
+		goto out;
+	if (reg > smbb_hw_lookup(smbb_charger_attrs[ATTR_USBIN_IMAX].max, smbb_imax_fn))
+		ret = -EIO;
+	else
+		*limit = smbb_imax_fn(reg);
+out:
+	mutex_unlock(&chg->charge_lock);
+	return ret;
+}
+
+static int smbb_usb_input_set_limit(struct smbb_charger *chg, int limit,
+				   bool control_suspend)
+{
+	const struct smbb_charger_attr *attr = &smbb_charger_attrs[ATTR_USBIN_IMAX];
+	int ret;
+
+	if (limit < 0 || (!limit && !control_suspend) ||
+	    (limit && ((unsigned int)limit < attr->min ||
+				   (unsigned int)limit > attr->max)))
+		return -EINVAL;
+
+	mutex_lock(&chg->charge_lock);
+	if (!limit) {
+		ret = smbb_usb_input_suspend(chg, true);
+		goto out;
+	}
+
+	/* Verify the new selector before enabling a suspended input path. */
+	ret = smbb_charger_attr_write(chg, ATTR_USBIN_IMAX, limit);
+	if (control_suspend) {
+		if (!ret)
+			ret = smbb_usb_input_suspend(chg, false);
+		if (ret && smbb_usb_input_suspend(chg, true))
+			dev_err(chg->dev, "USB input state could not be inhibited after error\n");
+	}
+out:
+	mutex_unlock(&chg->charge_lock);
+	return ret;
+}
+
 static int smbb_usbin_get_property(struct power_supply *psy,
 		enum power_supply_property psp,
 		union power_supply_propval *val)
@@ -550,8 +652,14 @@ static int smbb_usbin_get_property(struct power_supply *psy,
 				(chg->status & STATUS_USBIN_VALID);
 		mutex_unlock(&chg->statlock);
 		break;
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+		if (!chg->usb_input_control)
+			return -EOPNOTSUPP;
+		return smbb_usb_input_get_limit(chg, &val->intval);
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
+		mutex_lock(&chg->charge_lock);
 		val->intval = chg->attr[ATTR_USBIN_IMAX];
+		mutex_unlock(&chg->charge_lock);
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX:
 		val->intval = 2500000;
@@ -569,19 +677,17 @@ static int smbb_usbin_set_property(struct power_supply *psy,
 		const union power_supply_propval *val)
 {
 	struct smbb_charger *chg = power_supply_get_drvdata(psy);
-	int rc;
 
 	switch (psp) {
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+		if (!chg->usb_input_control)
+			return -EOPNOTSUPP;
+		return smbb_usb_input_set_limit(chg, val->intval, true);
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
-		rc = smbb_charger_attr_write(chg, ATTR_USBIN_IMAX,
-				val->intval);
-		break;
+		return smbb_usb_input_set_limit(chg, val->intval, false);
 	default:
-		rc = -EINVAL;
-		break;
+		return -EINVAL;
 	}
-
-	return rc;
 }
 
 static int smbb_dcin_get_property(struct power_supply *psy,
@@ -636,6 +742,16 @@ static int smbb_charger_writable_property(struct power_supply *psy,
 		enum power_supply_property psp)
 {
 	return psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT;
+}
+
+static int smbb_usbin_writable_property(struct power_supply *psy,
+		enum power_supply_property psp)
+{
+	struct smbb_charger *chg = power_supply_get_drvdata(psy);
+
+	if (psp == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT)
+		return chg->usb_input_control;
+	return smbb_charger_writable_property(psy, psp);
 }
 
 /* Caller holds charge_lock. Never change forced-battery mode (bit 0). */
@@ -912,6 +1028,13 @@ static enum power_supply_property smbb_charger_properties[] = {
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
 };
 
+static enum power_supply_property smbb_usb_input_properties[] = {
+	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
+};
+
 static enum power_supply_property smbb_battery_properties[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
@@ -988,7 +1111,7 @@ static const struct power_supply_desc usb_psy_desc = {
 	.num_properties = ARRAY_SIZE(smbb_charger_properties),
 	.get_property = smbb_usbin_get_property,
 	.set_property = smbb_usbin_set_property,
-	.property_is_writeable = smbb_charger_writable_property,
+	.property_is_writeable = smbb_usbin_writable_property,
 };
 
 static const struct power_supply_desc dc_psy_desc = {
@@ -1174,11 +1297,17 @@ static int smbb_charger_probe(struct platform_device *pdev)
 		return PTR_ERR(chg->bat_psy);
 	}
 
+	chg->usb_input_control = smbb_usb_input_supported(chg);
+	chg->usb_desc = usb_psy_desc;
+	if (chg->usb_input_control) {
+		chg->usb_desc.properties = smbb_usb_input_properties;
+		chg->usb_desc.num_properties = ARRAY_SIZE(smbb_usb_input_properties);
+	}
 	usb_cfg.drv_data = chg;
 	usb_cfg.supplied_to = smbb_bif;
 	usb_cfg.num_supplicants = ARRAY_SIZE(smbb_bif);
 	chg->usb_psy = devm_power_supply_register(&pdev->dev,
-						  &usb_psy_desc,
+						  &chg->usb_desc,
 						  &usb_cfg);
 	if (IS_ERR(chg->usb_psy)) {
 		dev_err(&pdev->dev, "failed to register USB power supply\n");
