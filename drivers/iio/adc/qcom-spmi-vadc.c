@@ -467,6 +467,14 @@ static int vadc_read_raw(struct iio_dev *indio_dev,
 		if (ret)
 			break;
 
+		/* New battery voltage inputs use the IIO millivolt ABI. */
+		if (prop->calibration == VADC_CALIB_ABSOLUTE &&
+		    (chan->channel == VADC_VBAT_SNS ||
+		     chan->channel == VADC_LR_MUX1_BAT_THERM)) {
+			*val2 = 1000;
+			return IIO_VAL_FRACTIONAL;
+		}
+
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_RAW:
 		prop = &vadc->chan_props[chan->address];
@@ -564,7 +572,7 @@ static const struct vadc_channels vadc_chans[] = {
 	VADC_CHAN_NO_SCALE(SPARE1_03, 1)
 	VADC_CHAN_NO_SCALE(USB_ID_MV, 1)
 	VADC_CHAN_VOLT(VCOIN, 1, SCALE_DEFAULT)
-	VADC_CHAN_NO_SCALE(VBAT_SNS, 1)
+	VADC_CHAN_VOLT(VBAT_SNS, 1, SCALE_DEFAULT)
 	VADC_CHAN_VOLT(VSYS, 1, SCALE_DEFAULT)
 	VADC_CHAN_TEMP(DIE_TEMP, 0, SCALE_PMIC_THERM)
 	VADC_CHAN_VOLT(REF_625MV, 0, SCALE_DEFAULT)
@@ -609,7 +617,7 @@ static const struct vadc_channels vadc_chans[] = {
 	VADC_CHAN_NO_SCALE(P_MUX15_1_3, 1)
 	VADC_CHAN_NO_SCALE(P_MUX16_1_3, 1)
 
-	VADC_CHAN_NO_SCALE(LR_MUX1_BAT_THERM, 0)
+	VADC_CHAN_VOLT(LR_MUX1_BAT_THERM, 0, SCALE_DEFAULT)
 	VADC_CHAN_VOLT(LR_MUX2_BAT_ID, 0, SCALE_DEFAULT)
 	VADC_CHAN_NO_SCALE(LR_MUX3_XO_THERM, 0)
 	VADC_CHAN_NO_SCALE(LR_MUX4_AMUX_THM1, 0)
