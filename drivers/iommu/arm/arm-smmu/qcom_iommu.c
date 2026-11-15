@@ -387,11 +387,13 @@ static int qcom_iommu_reset_ns(struct qcom_iommu_dev *qcom_iommu)
  */
 static void qcom_iommu_halt(struct qcom_iommu_dev *qcom_iommu)
 {
-	void __iomem *reg = qcom_iommu->global_base + QCOM_IOMMU_MICRO_MMU_CTRL;
+	void __iomem *reg;
 	u32 val;
 
 	if (!qcom_iommu->cfg || !qcom_iommu->cfg->halt)
 		return;
+
+	reg = qcom_iommu->global_base + QCOM_IOMMU_MICRO_MMU_CTRL;
 
 	writel_relaxed(readl_relaxed(reg) | MICRO_MMU_CTRL_HALT_REQ, reg);
 
@@ -401,10 +403,12 @@ static void qcom_iommu_halt(struct qcom_iommu_dev *qcom_iommu)
 
 static void qcom_iommu_unhalt(struct qcom_iommu_dev *qcom_iommu)
 {
-	void __iomem *reg = qcom_iommu->global_base + QCOM_IOMMU_MICRO_MMU_CTRL;
+	void __iomem *reg;
 
 	if (!qcom_iommu->cfg || !qcom_iommu->cfg->halt)
 		return;
+
+	reg = qcom_iommu->global_base + QCOM_IOMMU_MICRO_MMU_CTRL;
 
 	writel_relaxed(readl_relaxed(reg) & ~MICRO_MMU_CTRL_HALT_REQ, reg);
 }
