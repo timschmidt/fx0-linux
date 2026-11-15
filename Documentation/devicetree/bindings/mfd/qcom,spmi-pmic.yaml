@@ -175,7 +175,9 @@ patternProperties:
 
   "^led-controller@[0-9a-f]+$":
     type: object
-    $ref: /schemas/leds/qcom,spmi-flash-led.yaml#
+    oneOf:
+      - $ref: /schemas/leds/qcom,pm8941-flash-led.yaml#
+      - $ref: /schemas/leds/qcom,spmi-flash-led.yaml#
 
   "^nvram@[0-9a-f]+$":
     type: object
