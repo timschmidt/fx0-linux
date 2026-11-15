@@ -23108,6 +23108,12 @@ F:	drivers/firmware/qcom/qcom_pas.h
 F:	drivers/firmware/qcom/qcom_pas_tee.c
 F:	include/linux/firmware/qcom/qcom_pas.h
 
+QUALCOMM PM8941 TORCH LED DRIVER
+M:	Timothy Schmidt <timschmidt@gmail.com>
+L:	linux-leds@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/leds/qcom,pm8941-flash-led.yaml
+
 QUALCOMM SMB CHARGER DRIVER
 M:	Casey Connolly <casey.connolly@linaro.org>
 L:	linux-arm-msm@vger.kernel.org
