@@ -152,18 +152,31 @@ static int video_buf_init(struct vb2_buffer *vb)
 	const struct v4l2_pix_format_mplane *format =
 						&video->active_fmt.fmt.pix_mp;
 	struct sg_table *sgt;
-	unsigned int i;
+	struct scatterlist *s;
+	dma_addr_t expected;
+	unsigned long size;
+	unsigned int i, j;
 
 	for (i = 0; i < format->num_planes; i++) {
 		sgt = vb2_dma_sg_plane_desc(vb, i);
 		if (!sgt)
 			return -EFAULT;
 
-		/* The hardware writes each plane linearly from its base. */
-		if (sgt->nents != 1) {
+		/* Adjacent DMA segments may cover one linear image plane. */
+		expected = sg_dma_address(sgt->sgl);
+		size = 0;
+		for_each_sgtable_dma_sg(sgt, s, j) {
+			if (sg_dma_address(s) != expected)
+				break;
+			size += sg_dma_len(s);
+			if (size >= format->plane_fmt[i].sizeimage)
+				break;
+			expected += sg_dma_len(s);
+		}
+		if (size < format->plane_fmt[i].sizeimage) {
 			dev_err_ratelimited(video->camss->dev,
-					    "Buffer plane %u spans %u DMA segments\n",
-					    i, sgt->nents);
+					    "Buffer plane %u is not contiguous\n",
+					    i);
 			return -EFAULT;
 		}
 
