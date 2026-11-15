@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/leds/qcom,pm8941-flash-led.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm PM8226 and PM8941 first-generation torch LED controller
+
+maintainers:
+  - Timothy Schmidt <timschmidt@gmail.com>
+
+description: |
+  These PMICs contain the first-generation flash LED peripheral, with type
+  0x18 and subtype 1 or 2. Its register layout differs from later SPMI flash
+  controllers. Torch mode programs the two output current registers together,
+  in 12.5 mA steps up to 200 mA. A single logical torch is described here.
+
+properties:
+  compatible:
+    oneOf:
+      - const: qcom,pm8941-flash-led
+      - items:
+          - const: qcom,pm8226-flash-led
+          - const: qcom,pm8941-flash-led
+
+  reg:
+    maxItems: 1
+
+  vin-supply:
+    description: Optional supply for the torch outputs.
+
+  led:
+    type: object
+    $ref: common.yaml#
+    unevaluatedProperties: false
+
+    properties:
+      led-max-microamp:
+        minimum: 12500
+        maximum: 200000
+        description: Maximum programmed torch current for each output.
+
+    required:
+      - led-max-microamp
+
+required:
+  - compatible
+  - reg
+  - led
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/leds/common.h>
+
+    pmic {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        led-controller@d300 {
+            compatible = "qcom,pm8226-flash-led", "qcom,pm8941-flash-led";
+            reg = <0xd300>;
+
+            led {
+                function = LED_FUNCTION_TORCH;
+                color = <LED_COLOR_ID_WHITE>;
+                led-max-microamp = <200000>;
+            };
+        };
+    };
