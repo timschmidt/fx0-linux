@@ -21296,6 +21296,7 @@ M:	Timothy Schmidt <timschmidt@gmail.com>
 L:	linux-leds@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/leds/qcom,pm8941-flash-led.yaml
+F:	drivers/leds/flash/leds-qcom-flash-v1.c
 
 QUALCOMM SMB CHARGER DRIVER
 M:	Casey Connolly <casey.connolly@linaro.org>

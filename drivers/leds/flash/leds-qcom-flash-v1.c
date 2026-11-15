@@ -68,30 +68,31 @@ static int qcom_flash_v1_torch_mode(struct qcom_flash_v1 *flash, bool on)
 
 static int qcom_flash_v1_off(struct qcom_flash_v1 *flash)
 {
-	int ret;
+	int ret, err;
 
 	ret = regmap_update_bits(flash->regmap, flash->base + FLASH_STROBE_CTRL,
 				 FLASH_STROBE_TORCH, 0);
-	if (ret)
-		return ret;
-
-	ret = qcom_flash_v1_torch_mode(flash, false);
-	if (ret)
-		return ret;
+	/* Try every off path even if an earlier register access failed. */
+	err = qcom_flash_v1_torch_mode(flash, false);
+	if (!ret)
+		ret = err;
 
 	/* Let the current ramp down before disabling the module. */
 	usleep_range(2200, 2500);
-	ret = regmap_update_bits(flash->regmap, flash->base + FLASH_ENABLE_CTRL,
+	err = regmap_update_bits(flash->regmap, flash->base + FLASH_ENABLE_CTRL,
 				 FLASH_ENABLE_MASK, 0);
-	if (ret)
-		return ret;
+	if (!ret)
+		ret = err;
 
 	if (flash->vin_on) {
-		regulator_disable(flash->vin);
-		flash->vin_on = false;
+		err = regulator_disable(flash->vin);
+		if (!err)
+			flash->vin_on = false;
+		if (!ret)
+			ret = err;
 	}
 
-	return 0;
+	return ret;
 }
 
 static int qcom_flash_v1_on(struct qcom_flash_v1 *flash, unsigned int level)
