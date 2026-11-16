@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/regulator/consumer.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/of_regulator.h>
 #include <linux/soc/qcom/smd-rpm.h>
@@ -26,6 +27,8 @@ struct rpm_reg_pair {
 	/* Serializes the cached votes and their synchronous RPM writes. */
 	struct mutex lock;
 	struct rpm_reg_vote votes[2];
+	int boot_uV;
+	int boot_min_uV;
 	bool sleep_initialized;
 	bool sleep_enable_valid;
 	bool sleep_enabled;
@@ -92,6 +95,7 @@ static int rpm_reg_write_pair(struct qcom_rpm_reg *vreg)
 	struct rpm_reg_vote *active_only = &pair->votes[1];
 	struct rpm_reg_vote previous, active, sleep;
 	bool initialize_sleep;
+	bool boot_handoff;
 	u64 load;
 	int ret = 0;
 
@@ -104,7 +108,8 @@ static int rpm_reg_write_pair(struct qcom_rpm_reg *vreg)
 		.load_valid = previous.load_valid || vreg->load_updated,
 	};
 	/* Keep disabled voltage requests for the next enable, as the vendor does. */
-	if (!normal->enabled && !active_only->enabled && !vreg->enabled_updated) {
+	if (!normal->enabled && !active_only->enabled && !vreg->enabled_updated &&
+	    !pair->boot_uV) {
 		if (!vreg->active_only)
 			pair->sleep_initialized = false;
 		goto unlock;
@@ -125,12 +130,16 @@ static int rpm_reg_write_pair(struct qcom_rpm_reg *vreg)
 	}
 
 	load = (u64)normal->load + active_only->load;
+	boot_handoff = active_only->enabled &&
+		       active_only->uV >= pair->boot_min_uV;
 	active = (struct rpm_reg_vote) {
-		.enabled = normal->enabled || active_only->enabled,
+		.enabled = normal->enabled || active_only->enabled || pair->boot_uV,
 		.uV = max(normal->uV, active_only->uV),
 		.load = min_t(u64, load, U32_MAX),
 		.load_valid = normal->load_valid || active_only->load_valid,
 	};
+	if (!boot_handoff)
+		active.uV = max(active.uV, pair->boot_uV);
 	ret = rpm_reg_send_vote(vreg, QCOM_SMD_RPM_ACTIVE_STATE, &active);
 	if (ret)
 		goto restore;
@@ -144,6 +153,8 @@ static int rpm_reg_write_pair(struct qcom_rpm_reg *vreg)
 	vreg->enabled_updated = 0;
 	vreg->uv_updated = 0;
 	vreg->load_updated = 0;
+	if (boot_handoff)
+		pair->boot_uV = 0;
 	goto unlock;
 
 restore:
@@ -1624,6 +1635,40 @@ static int rpm_regulator_init_vreg(struct qcom_rpm_reg *vreg, struct device *dev
 	return 0;
 }
 
+static int rpm_reg_pair_init_boot(struct device *dev, struct rpm_reg_pair *pair,
+				  struct device_node *ao_node)
+{
+	struct regulator *apc;
+	u32 min_uV, max_uV;
+	int boot_uV;
+
+	if (!of_property_present(dev->of_node, "qcom,boot-apc-supply"))
+		return 0;
+	if (of_property_read_bool(ao_node, "regulator-boot-on") ||
+	    of_property_read_bool(ao_node, "regulator-always-on"))
+		return -EINVAL;
+	if (of_property_read_u32(ao_node, "regulator-min-microvolt", &min_uV) ||
+	    of_property_read_u32(ao_node, "regulator-max-microvolt", &max_uV) ||
+	    min_uV < 750000 || max_uV > 1537500 || min_uV > max_uV ||
+	    (min_uV - 750000) % 12500 || (max_uV - 750000) % 12500)
+		return -EINVAL;
+
+	/* Probe has no regulator callback locks; never nest this in vote writes. */
+	apc = devm_regulator_get(dev, "qcom,boot-apc");
+	if (IS_ERR(apc))
+		return PTR_ERR(apc);
+	boot_uV = regulator_get_voltage(apc);
+	if (boot_uV <= 0)
+		return boot_uV ?: -EINVAL;
+	if (boot_uV > max_uV)
+		return -ERANGE;
+
+	/* Hold the validated ceiling until CPR has a covering, enabled vote. */
+	pair->boot_min_uV = DIV_ROUND_UP(max_t(int, boot_uV, min_uV), 12500) * 12500;
+	pair->boot_uV = max_uV;
+	return 0;
+}
+
 static int rpm_reg_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1632,6 +1677,7 @@ static int rpm_reg_probe(struct platform_device *pdev)
 	struct qcom_smd_rpm *rpm;
 	struct rpm_reg_pair *pair = NULL;
 	struct device_node *pair_node;
+	struct device_node *normal_node;
 	int ret;
 
 	rpm = dev_get_drvdata(pdev->dev.parent);
@@ -1651,17 +1697,28 @@ static int rpm_reg_probe(struct platform_device *pdev)
 
 	pair_node = of_get_available_child_by_name(dev->of_node, "l3-ao");
 	if (pair_node) {
-		of_node_put(pair_node);
-		if (vreg_data != rpm_pm8226_regulators)
+		if (vreg_data != rpm_pm8226_regulators) {
+			of_node_put(pair_node);
 			return dev_err_probe(dev, -EINVAL, "l3-ao requires PM8226\n");
-		pair_node = of_get_available_child_by_name(dev->of_node, "l3");
-		if (!pair_node)
+		}
+		normal_node = of_get_available_child_by_name(dev->of_node, "l3");
+		if (!normal_node) {
+			of_node_put(pair_node);
 			return dev_err_probe(dev, -EINVAL, "l3-ao requires l3\n");
-		of_node_put(pair_node);
+		}
+		of_node_put(normal_node);
 		pair = devm_kzalloc(dev, sizeof(*pair), GFP_KERNEL);
-		if (!pair)
+		if (!pair) {
+			of_node_put(pair_node);
 			return -ENOMEM;
+		}
 		mutex_init(&pair->lock);
+		ret = rpm_reg_pair_init_boot(dev, pair, pair_node);
+		of_node_put(pair_node);
+		if (ret)
+			return dev_err_probe(dev, ret, "L3 boot APC handoff unavailable\n");
+	} else if (of_property_present(dev->of_node, "qcom,boot-apc-supply")) {
+		return dev_err_probe(dev, -EINVAL, "boot APC requires l3-ao\n");
 	}
 
 	for_each_available_child_of_node_scoped(dev->of_node, node) {
