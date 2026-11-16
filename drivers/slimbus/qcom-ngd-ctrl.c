@@ -169,6 +169,7 @@ struct qcom_slim_ngd_ctrl {
 	void *notifier;
 	struct pdr_handle *pdr;
 	enum qcom_slim_ngd_state state;
+	bool registered;
 	dma_addr_t rx_phys_base;
 	dma_addr_t tx_phys_base;
 	void *rx_base;
@@ -1401,12 +1402,15 @@ static int qcom_slim_ngd_runtime_resume(struct device *dev)
 static int qcom_slim_ngd_enable(struct qcom_slim_ngd_ctrl *ctrl, bool enable)
 {
 	if (enable) {
-		int ret = qcom_slim_qmi_init(ctrl, false);
+		int ret;
 
-		if (ret) {
-			dev_err(ctrl->dev, "qmi init fail, ret:%d, state:%d\n",
-				ret, ctrl->state);
-			return ret;
+		if (!ctrl->registered) {
+			ret = qcom_slim_qmi_init(ctrl, false);
+			if (ret) {
+				dev_err(ctrl->dev, "qmi init fail, ret:%d, state:%d\n",
+					ret, ctrl->state);
+				return ret;
+			}
 		}
 		/* controller state should be in sync with framework state */
 		complete(&ctrl->qmi.qmi_comp);
@@ -1416,19 +1420,27 @@ static int qcom_slim_ngd_enable(struct qcom_slim_ngd_ctrl *ctrl, bool enable)
 		else
 			pm_runtime_resume(ctrl->ctrl.dev);
 
-		pm_runtime_mark_last_busy(ctrl->ctrl.dev);
-		pm_runtime_put(ctrl->ctrl.dev);
+		if (ctrl->registered)
+			return 0;
 
 		ret = slim_register_controller(&ctrl->ctrl);
 		if (ret) {
 			dev_err(ctrl->dev, "error adding slim controller\n");
+			qcom_slim_qmi_exit(ctrl);
 			return ret;
 		}
+
+		ctrl->registered = true;
+		pm_runtime_mark_last_busy(ctrl->ctrl.dev);
+		pm_runtime_put(ctrl->ctrl.dev);
 
 		dev_info(ctrl->dev, "SLIM controller Registered\n");
 	} else {
 		qcom_slim_qmi_exit(ctrl);
-		slim_unregister_controller(&ctrl->ctrl);
+		if (ctrl->registered) {
+			slim_unregister_controller(&ctrl->ctrl);
+			ctrl->registered = false;
+		}
 	}
 
 	return 0;
