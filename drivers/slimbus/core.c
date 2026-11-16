@@ -262,11 +262,11 @@ int slim_register_controller(struct slim_controller *ctrl)
 		ctrl->max_cg = SLIM_MAX_CLK_GEAR;
 
 	ida_init(&ctrl->laddr_ida);
-	idr_init(&ctrl->tid_idr);
+	slim_init_transactions(ctrl);
 	mutex_init(&ctrl->lock);
 	mutex_init(&ctrl->sched.m_reconf);
 	init_completion(&ctrl->sched.pause_comp);
-	spin_lock_init(&ctrl->txn_lock);
+	slim_start_transactions(ctrl);
 
 	dev_dbg(ctrl->dev, "Bus [%s] registered:dev:%p\n",
 		ctrl->name, ctrl->dev);
@@ -297,6 +297,9 @@ static int slim_ctrl_remove_device(struct device *dev, void *null)
  */
 int slim_unregister_controller(struct slim_controller *ctrl)
 {
+	/* Stop response delivery before clients release their request buffers. */
+	slim_stop_transactions(ctrl);
+
 	/* Remove all clients */
 	device_for_each_child(ctrl->dev, NULL, slim_ctrl_remove_device);
 	ida_free(&ctrl_ida, ctrl->id);

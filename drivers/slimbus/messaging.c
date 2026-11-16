@@ -7,6 +7,86 @@
 #include <linux/pm_runtime.h>
 #include "slimbus.h"
 
+/* Each IDR slot owns its response storage, never the sender's stack frame. */
+struct slim_pending_msg {
+	struct slim_msg_txn *owner;
+	struct slim_val_inf *msg_key;
+	struct completion *comp;
+	u8 *rbuf;
+	u8 num_bytes;
+	bool prepared;
+	bool asynchronous;
+};
+
+/**
+ * slim_init_transactions() - Initialize transaction state before RX starts
+ * @ctrl: Controller whose transaction state is to be initialized
+ *
+ * Call before publishing a controller to RX or message producers. Registration
+ * also calls this helper for controllers that do not need early messaging.
+ * Initialization and registration must be serialized by the controller driver.
+ */
+void slim_init_transactions(struct slim_controller *ctrl)
+{
+	if (ctrl->transactions_initialized)
+		return;
+
+	idr_init(&ctrl->tid_idr);
+	spin_lock_init(&ctrl->txn_lock);
+	ctrl->transactions_stopped = false;
+	ctrl->transactions_initialized = true;
+}
+EXPORT_SYMBOL_GPL(slim_init_transactions);
+
+/**
+ * slim_start_transactions() - Open transaction admission for registration
+ * @ctrl: Initialized controller
+ *
+ * The driver must serialize registration with controller teardown.
+ */
+void slim_start_transactions(struct slim_controller *ctrl)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ctrl->txn_lock, flags);
+	ctrl->transactions_stopped = false;
+	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
+}
+
+/**
+ * slim_stop_transactions() - Close admission and retire pending responses
+ * @ctrl: Initialized controller being unregistered
+ *
+ * No completion is signalled for cancelled requests. Client remove callbacks
+ * must quiesce their callers and may use slim_cancel_msg() to synchronize with
+ * response delivery before releasing their buffers. Transport/DMA producers
+ * still need their own shutdown and synchronization.
+ */
+void slim_stop_transactions(struct slim_controller *ctrl)
+{
+	struct slim_pending_msg *pending;
+	unsigned long flags;
+	unsigned int refs = 0;
+	int id;
+
+	spin_lock_irqsave(&ctrl->txn_lock, flags);
+	ctrl->transactions_stopped = true;
+	idr_for_each_entry(&ctrl->tid_idr, pending, id) {
+		idr_remove(&ctrl->tid_idr, id);
+		refs += pending->prepared;
+		kfree(pending);
+	}
+	idr_destroy(&ctrl->tid_idr);
+	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
+
+	if (refs)
+		pm_runtime_mark_last_busy(ctrl->dev);
+	while (refs) {
+		refs--;
+		pm_runtime_put_autosuspend(ctrl->dev);
+	}
+}
+
 /**
  * slim_msg_response() - Deliver Message response received from a device to the
  *			framework.
@@ -23,29 +103,27 @@
  */
 void slim_msg_response(struct slim_controller *ctrl, u8 *reply, u8 tid, u8 len)
 {
-	struct slim_msg_txn *txn;
-	struct slim_val_inf *msg;
+	struct slim_pending_msg *pending;
 	unsigned long flags;
 
 	spin_lock_irqsave(&ctrl->txn_lock, flags);
-	txn = idr_find(&ctrl->tid_idr, tid);
-	if (!txn || !txn->prepared)
+	pending = idr_find(&ctrl->tid_idr, tid);
+	if (!pending || !pending->prepared)
 		goto unlock;
 
-	msg = txn->msg;
-	if (!msg || !msg->rbuf || len > msg->num_bytes) {
+	if (!pending->rbuf || len > pending->num_bytes) {
 		dev_err(ctrl->dev, "Got response to invalid TID:%d, len:%d\n",
 				tid, len);
 		goto unlock;
 	}
 
-	memcpy(msg->rbuf, reply, len);
+	memcpy(pending->rbuf, reply, len);
 	idr_remove(&ctrl->tid_idr, tid);
-	if (txn->comp)
-		complete(txn->comp);
+	if (pending->comp)
+		complete(pending->comp);
+	kfree(pending);
 	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
 
-	/* The response owns the PM reference after retiring its TID. */
 	pm_runtime_mark_last_busy(ctrl->dev);
 	pm_runtime_put_autosuspend(ctrl->dev);
 	return;
@@ -65,20 +143,30 @@ EXPORT_SYMBOL_GPL(slim_msg_response);
  */
 int slim_alloc_txn_tid(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 {
+	struct slim_pending_msg *pending;
 	unsigned long flags;
-	int ret = 0;
+	int ret;
 
-	spin_lock_irqsave(&ctrl->txn_lock, flags);
 	txn->prepared = false;
 	txn->tid = 0;
-	ret = idr_alloc_cyclic(&ctrl->tid_idr, txn, 1,
-				SLIM_MAX_TIDS, GFP_ATOMIC);
+	pending = kzalloc(sizeof(*pending), GFP_ATOMIC);
+	if (!pending)
+		return -ENOMEM;
+	pending->owner = txn;
+
+	spin_lock_irqsave(&ctrl->txn_lock, flags);
+	if (ctrl->transactions_stopped)
+		ret = -ESHUTDOWN;
+	else
+		ret = idr_alloc_cyclic(&ctrl->tid_idr, pending, 1,
+				       SLIM_MAX_TIDS, GFP_ATOMIC);
+	if (ret >= 0)
+		txn->tid = ret;
+	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
 	if (ret < 0) {
-		spin_unlock_irqrestore(&ctrl->txn_lock, flags);
+		kfree(pending);
 		return ret;
 	}
-	txn->tid = ret;
-	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(slim_alloc_txn_tid);
@@ -96,18 +184,38 @@ EXPORT_SYMBOL_GPL(slim_alloc_txn_tid);
  */
 int slim_prepare_txn(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 {
+	struct slim_pending_msg *pending, *other;
 	unsigned long flags;
-	int ret = 0;
+	int id, ret = 0;
 
 	spin_lock_irqsave(&ctrl->txn_lock, flags);
-	if (idr_find(&ctrl->tid_idr, txn->tid) != txn) {
+	pending = idr_find(&ctrl->tid_idr, txn->tid);
+	if (!pending || pending->owner != txn) {
 		ret = -EINVAL;
-	} else if (txn->prepared) {
+	} else if (pending->prepared) {
 		ret = -EALREADY;
+	} else if (!txn->msg) {
+		ret = -EINVAL;
 	} else {
+		if (txn->msg->comp) {
+			idr_for_each_entry(&ctrl->tid_idr, other, id) {
+				if (other->asynchronous &&
+				    other->msg_key == txn->msg) {
+					ret = -EBUSY;
+					goto unlock;
+				}
+			}
+		}
+		pending->msg_key = txn->msg;
+		pending->rbuf = txn->msg->rbuf;
+		pending->num_bytes = txn->msg->num_bytes;
+		pending->comp = txn->comp;
+		pending->asynchronous = !!txn->msg->comp;
 		pm_runtime_get_noresume(ctrl->dev);
+		pending->prepared = true;
 		txn->prepared = true;
 	}
+unlock:
 	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
 
 	return ret;
@@ -126,17 +234,21 @@ EXPORT_SYMBOL_GPL(slim_prepare_txn);
  */
 bool slim_free_txn_tid(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 {
+	struct slim_pending_msg *pending;
 	unsigned long flags;
-	bool released = false;
+	bool released = false, prepared = false;
 
 	spin_lock_irqsave(&ctrl->txn_lock, flags);
-	if (idr_find(&ctrl->tid_idr, txn->tid) == txn) {
+	pending = idr_find(&ctrl->tid_idr, txn->tid);
+	if (pending && pending->owner == txn) {
 		idr_remove(&ctrl->tid_idr, txn->tid);
+		prepared = pending->prepared;
+		kfree(pending);
 		released = true;
 	}
 	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
 
-	if (released && txn->prepared) {
+	if (prepared) {
 		pm_runtime_mark_last_busy(ctrl->dev);
 		pm_runtime_put_autosuspend(ctrl->dev);
 	}
@@ -144,6 +256,49 @@ bool slim_free_txn_tid(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 	return released;
 }
 EXPORT_SYMBOL_GPL(slim_free_txn_tid);
+
+/**
+ * slim_cancel_msg() - Retire an asynchronous elemental request
+ * @sbdev: Device used to submit the request
+ * @msg: Original request descriptor passed to slim_xfer_msg()
+ *
+ * Call only after slim_xfer_msg() has returned, and serialize against a new
+ * submission using the same descriptor. Cancellation synchronizes with any
+ * response copy and completion already in progress. It does not signal the
+ * completion. After either return value below, response delivery no longer
+ * accesses this descriptor's buffers or completion.
+ *
+ * Return: 0 if cancelled, -ENOENT if already completed/cancelled, or -EINVAL
+ * for a missing controller or descriptor.
+ */
+int slim_cancel_msg(struct slim_device *sbdev, struct slim_val_inf *msg)
+{
+	struct slim_controller *ctrl = sbdev->ctrl;
+	struct slim_pending_msg *pending;
+	unsigned long flags;
+	int id, ret = -ENOENT;
+
+	if (!ctrl || !msg)
+		return -EINVAL;
+
+	spin_lock_irqsave(&ctrl->txn_lock, flags);
+	idr_for_each_entry(&ctrl->tid_idr, pending, id) {
+		if (!pending->asynchronous || pending->msg_key != msg)
+			continue;
+		idr_remove(&ctrl->tid_idr, id);
+		kfree(pending);
+		ret = 0;
+		break;
+	}
+	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
+	if (!ret) {
+		pm_runtime_mark_last_busy(ctrl->dev);
+		pm_runtime_put_autosuspend(ctrl->dev);
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(slim_cancel_msg);
 
 /**
  * slim_do_transfer() - Process a SLIMbus-messaging transaction

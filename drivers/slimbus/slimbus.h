@@ -360,6 +360,8 @@ struct slim_stream_runtime {
  * @devices: Slim device list
  * @tid_idr: tid id allocator
  * @txn_lock: Lock to protect table of transactions
+ * @transactions_initialized: Transaction state initialized before RX starts.
+ * @transactions_stopped: Admission closed during controller teardown.
  * @sched: scheduler structure used by the controller
  * @xfer_msg: Transfer a message on this controller (this can be a broadcast
  *	control/status message like data channel setup, or a unicast message
@@ -412,6 +414,8 @@ struct slim_controller {
 	struct list_head	devices;
 	struct idr		tid_idr;
 	spinlock_t		txn_lock;
+	bool			transactions_initialized;
+	bool			transactions_stopped;
 	struct slim_sched	sched;
 	int			(*xfer_msg)(struct slim_controller *ctrl,
 					    struct slim_msg_txn *tx);
@@ -427,6 +431,9 @@ struct slim_controller {
 int slim_device_report_present(struct slim_controller *ctrl,
 			       struct slim_eaddr *e_addr, u8 *laddr);
 void slim_report_absent(struct slim_device *sbdev);
+void slim_init_transactions(struct slim_controller *ctrl);
+void slim_start_transactions(struct slim_controller *ctrl);
+void slim_stop_transactions(struct slim_controller *ctrl);
 int slim_register_controller(struct slim_controller *ctrl);
 int slim_unregister_controller(struct slim_controller *ctrl);
 void slim_msg_response(struct slim_controller *ctrl, u8 *reply, u8 tid, u8 l);

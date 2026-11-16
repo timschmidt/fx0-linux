@@ -102,7 +102,11 @@ struct slim_driver {
  *		per SLIMbus spec
  * @comp: completion for asynchronous operations, valid only if TID is
  *	  required for transaction, like REQUEST operations.
- *	  Rest of the transactions are synchronous anyway.
+ *	  Rest of the transactions are synchronous anyway. Keep this descriptor,
+ *	  buffers and completion valid until slim_xfer_msg() returns and the
+ *	  response completes or slim_cancel_msg() returns. Cancel a lost reply
+ *	  explicitly, including from client teardown, before releasing buffers.
+ *	  One asynchronous request may use a descriptor at a time.
  */
 struct slim_val_inf {
 	u16			start_offset;
@@ -191,6 +195,7 @@ int slim_get_logical_addr(struct slim_device *sbdev);
 #define SLIM_MSG_MC_REPLY_VALUE                  0x64
 #define SLIM_MSG_MC_CHANGE_VALUE                 0x68
 
+int slim_cancel_msg(struct slim_device *sbdev, struct slim_val_inf *msg);
 int slim_xfer_msg(struct slim_device *sbdev, struct slim_val_inf *msg,
 		  u8 mc);
 int slim_readb(struct slim_device *sdev, u32 addr);

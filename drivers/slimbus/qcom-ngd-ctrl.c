@@ -1852,6 +1852,7 @@ static int qcom_slim_ngd_ctrl_probe(struct platform_device *pdev)
 	if (!ctrl)
 		return -ENOMEM;
 
+	slim_init_transactions(&ctrl->ctrl);
 	dev_set_drvdata(dev, ctrl);
 
 	ctrl->base = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
