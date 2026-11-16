@@ -13075,6 +13075,7 @@ M:	Jean-Baptiste Maneyrol <jean-baptiste.maneyrol@tdk.com>
 L:	linux-iio@vger.kernel.org
 S:	Maintained
 W:	https://invensense.tdk.com/
+F:	Documentation/ABI/testing/sysfs-bus-iio-mpu6515-dmp
 F:	Documentation/devicetree/bindings/iio/imu/invensense,mpu6050.yaml
 F:	drivers/iio/imu/inv_mpu6050/
 

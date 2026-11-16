@@ -28,7 +28,7 @@
  * cursor. The memory port itself must not increment the register address.
  */
 static int inv_mpu6515_dmp_mem_transfer(struct inv_mpu6050_state *st,
-				      unsigned int address, u8 *data,
+					unsigned int address, u8 *data,
 				      size_t len, bool write)
 {
 	unsigned int ctrl;
@@ -72,14 +72,14 @@ static int inv_mpu6515_dmp_mem_transfer(struct inv_mpu6050_state *st,
 }
 
 int inv_mpu6515_dmp_mem_read(struct inv_mpu6050_state *st,
-			   unsigned int address, u8 *data, size_t len)
+			     unsigned int address, u8 *data, size_t len)
 {
 	return inv_mpu6515_dmp_mem_transfer(st, address, data, len, false);
 }
 
 /* A failed write/verify leaves execution disabled; caller must invalidate FW. */
 int inv_mpu6515_dmp_mem_write(struct inv_mpu6050_state *st,
-			    unsigned int address, const u8 *data, size_t len)
+			      unsigned int address, const u8 *data, size_t len)
 {
 	u8 verify[INV_DMP_CHUNK];
 	size_t chunk, offset = 0;
@@ -92,7 +92,7 @@ int inv_mpu6515_dmp_mem_write(struct inv_mpu6050_state *st,
 	while (offset < len) {
 		chunk = min_t(size_t, len - offset, sizeof(verify));
 		ret = inv_mpu6515_dmp_mem_transfer(st, address + offset,
-						(u8 *)data + offset, chunk, true);
+						   (u8 *)data + offset, chunk, true);
 		if (ret)
 			return ret;
 		ret = inv_mpu6515_dmp_mem_read(st, address + offset, verify, chunk);
@@ -209,7 +209,7 @@ int inv_mpu6515_dmp_configure(struct inv_mpu6050_state *st)
 	lockdep_assert_held(&st->lock);
 	for (i = 0; i < ARRAY_SIZE(patches); i++) {
 		ret = inv_mpu6515_dmp_mem_write(st, patches[i].address,
-					      patches[i].data, patches[i].length);
+						patches[i].data, patches[i].length);
 		if (ret)
 			return ret;
 	}
@@ -283,7 +283,7 @@ static int inv_mpu6515_dmp_configure_smd(struct inv_mpu6050_state *st)
 
 	for (i = 0; i < ARRAY_SIZE(patches); i++) {
 		ret = inv_mpu6515_dmp_mem_write(st, patches[i].address,
-					      patches[i].data, patches[i].length);
+						patches[i].data, patches[i].length);
 		if (ret)
 			return ret;
 	}
@@ -457,8 +457,8 @@ int inv_mpu6515_dmp_read_fifo(struct iio_dev *indio_dev, s64 timestamp)
 {
 	struct inv_mpu6050_state *st = iio_priv(indio_dev);
 	struct inv_mpu6515_dmp_packet packet;
-	/* Repeated quaternion storage aligns the complete timestamped scan to 16. */
-	struct { s32 q[4]; s64 padding; s64 timestamp; } sample __aligned(16) = { };
+	/* The core computes the timestamp offset and the final scan padding. */
+	struct { s32 q[4]; u8 padding[16]; } sample __aligned(16) = { };
 	unsigned int hi, lo, check, tries, count, quats = 0;
 	size_t len, offset;
 	u64 norm;

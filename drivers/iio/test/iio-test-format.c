@@ -181,26 +181,38 @@ static void iio_test_iio_format_value_fractional_log2(struct kunit *test)
 	values[1] = 10;
 	ret = iio_format_value(buf, IIO_VAL_FRACTIONAL_LOG2, ARRAY_SIZE(values), values);
 	IIO_TEST_FORMAT_EXPECT_EQ(test, buf, ret, "0.000000000\n");
+}
 
-	/* Q30 quaternion scale must not be rounded to zero. */
-	values[0] = 1;
-	values[1] = 30;
-	ret = iio_format_value(buf, IIO_VAL_FRACTIONAL_LOG2, ARRAY_SIZE(values), values);
-	IIO_TEST_FORMAT_EXPECT_EQ(test, buf, ret, "0.000000000931322574615478515625\n");
-	values[0] = -1;
-	ret = iio_format_value(buf, IIO_VAL_FRACTIONAL_LOG2, ARRAY_SIZE(values), values);
-	IIO_TEST_FORMAT_EXPECT_EQ(test, buf, ret, "-0.000000000931322574615478515625\n");
+static void iio_test_iio_format_value_tiny_fractional_log2(struct kunit *test)
+{
+	static const struct {
+		int numerator;
+		int shift;
+		const char *expected;
+	} cases[] = {
+		{ 1, 30, "0.000000000931322574615478515625\n" },
+		{ -1, 30, "-0.000000000931322574615478515625\n" },
+		{ 1, 63,
+		  "0.000000000000000000108420217248550443400745280086994171142578125\n" },
+		{ INT_MIN, 63, "-0.00000000023283064365386962890625\n" },
+		{ INT_MAX, 63,
+		  "0.000000000232830643545449411657699556599254719913005828857421875\n" },
+		{ 0, 63, "0.000000000\n" },
+	};
+	char *buf;
+	unsigned int i;
+	int ret;
 
-	/* Maximum supported shift and signed numerator boundary. */
-	values[0] = 1;
-	values[1] = 63;
-	ret = iio_format_value(buf, IIO_VAL_FRACTIONAL_LOG2, ARRAY_SIZE(values), values);
-	IIO_TEST_FORMAT_EXPECT_EQ(test, buf, ret,
-		"0.000000000000000000108420217248550443400745280086994171142578125\n");
-	values[0] = INT_MIN;
-	ret = iio_format_value(buf, IIO_VAL_FRACTIONAL_LOG2, ARRAY_SIZE(values), values);
-	IIO_TEST_FORMAT_EXPECT_EQ(test, buf, ret, "-0.00000000023283064365386962890625\n");
+	buf = kunit_kmalloc(test, PAGE_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, buf);
 
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		int values[] = { cases[i].numerator, cases[i].shift };
+
+		ret = iio_format_value(buf, IIO_VAL_FRACTIONAL_LOG2,
+				       ARRAY_SIZE(values), values);
+		IIO_TEST_FORMAT_EXPECT_EQ(test, buf, ret, cases[i].expected);
+	}
 }
 
 static void iio_test_iio_format_value_multiple(struct kunit *test)
@@ -275,6 +287,7 @@ static struct kunit_case iio_format_test_cases[] = {
 		KUNIT_CASE(iio_test_iio_format_value_fixedpoint),
 		KUNIT_CASE(iio_test_iio_format_value_fractional),
 		KUNIT_CASE(iio_test_iio_format_value_fractional_log2),
+		KUNIT_CASE(iio_test_iio_format_value_tiny_fractional_log2),
 		KUNIT_CASE(iio_test_iio_format_value_multiple),
 		KUNIT_CASE(iio_test_iio_format_value_integer_64),
 		{ }
