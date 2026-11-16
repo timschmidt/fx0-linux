@@ -672,6 +672,8 @@ static int qcom_slim_ngd_post_rx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
 		desc->desc->callback = qcom_slim_ngd_rx_msgq_cb;
 		desc->desc->callback_param = desc;
 		desc->desc->cookie = dmaengine_submit(desc->desc);
+		if (dma_submit_error(desc->desc->cookie))
+			return desc->desc->cookie;
 	}
 	dma_async_issue_pending(ctrl->dma_rx_channel);
 
@@ -692,8 +694,9 @@ static int qcom_slim_ngd_init_rx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
 	}
 
 	size = QCOM_SLIM_NGD_DESC_NUM * SLIM_MSGQ_BUF_LEN;
-	ctrl->rx_base = dma_alloc_coherent(dev, size, &ctrl->rx_phys_base,
-					   GFP_KERNEL);
+	if (!ctrl->rx_base)
+		ctrl->rx_base = dmam_alloc_coherent(dev, size, &ctrl->rx_phys_base,
+						    GFP_KERNEL);
 	if (!ctrl->rx_base) {
 		ret = -ENOMEM;
 		goto rel_rx;
@@ -708,9 +711,10 @@ static int qcom_slim_ngd_init_rx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
 	return 0;
 
 rx_post_err:
-	dma_free_coherent(dev, size, ctrl->rx_base, ctrl->rx_phys_base);
+	dmaengine_terminate_sync(ctrl->dma_rx_channel);
 rel_rx:
 	dma_release_channel(ctrl->dma_rx_channel);
+	ctrl->dma_rx_channel = NULL;
 	return ret;
 }
 
@@ -730,10 +734,11 @@ static int qcom_slim_ngd_init_tx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
 	}
 
 	size = ((QCOM_SLIM_NGD_DESC_NUM + 1) * SLIM_MSGQ_BUF_LEN);
-	ctrl->tx_base = dma_alloc_coherent(dev, size, &ctrl->tx_phys_base,
-					   GFP_KERNEL);
+	if (!ctrl->tx_base)
+		ctrl->tx_base = dmam_alloc_coherent(dev, size, &ctrl->tx_phys_base,
+						    GFP_KERNEL);
 	if (!ctrl->tx_base) {
-		ret = -EINVAL;
+		ret = -ENOMEM;
 		goto rel_tx;
 	}
 
@@ -745,22 +750,31 @@ static int qcom_slim_ngd_init_tx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
 	return 0;
 rel_tx:
 	dma_release_channel(ctrl->dma_tx_channel);
+	ctrl->dma_tx_channel = NULL;
 	return ret;
 }
+
+static int qcom_slim_ngd_exit_dma(struct qcom_slim_ngd_ctrl *ctrl);
 
 static int qcom_slim_ngd_init_dma(struct qcom_slim_ngd_ctrl *ctrl)
 {
 	int ret = 0;
 
-	ret = qcom_slim_ngd_init_rx_msgq(ctrl);
+	if (ctrl->dma_rx_channel && ctrl->dma_tx_channel)
+		return 0;
+
+	/* RX callbacks can queue master work that immediately needs TX. */
+	ret = qcom_slim_ngd_init_tx_msgq(ctrl);
 	if (ret) {
-		dev_err(ctrl->dev, "rx dma init failed\n");
+		dev_err(ctrl->dev, "tx dma init failed\n");
 		return ret;
 	}
 
-	ret = qcom_slim_ngd_init_tx_msgq(ctrl);
-	if (ret)
-		dev_err(ctrl->dev, "tx dma init failed\n");
+	ret = qcom_slim_ngd_init_rx_msgq(ctrl);
+	if (ret) {
+		dev_err(ctrl->dev, "rx dma init failed\n");
+		qcom_slim_ngd_exit_dma(ctrl);
+	}
 
 	return ret;
 }
@@ -1225,13 +1239,17 @@ static int qcom_slim_ngd_exit_dma(struct qcom_slim_ngd_ctrl *ctrl)
 	return 0;
 }
 
-static void qcom_slim_ngd_setup(struct qcom_slim_ngd_ctrl *ctrl)
+static int qcom_slim_ngd_setup(struct qcom_slim_ngd_ctrl *ctrl)
 {
 	u32 cfg = readl_relaxed(ctrl->ngd->base);
+	int ret;
 
 	if (ctrl->state == QCOM_SLIM_NGD_CTRL_DOWN ||
-		ctrl->state == QCOM_SLIM_NGD_CTRL_ASLEEP)
-		qcom_slim_ngd_init_dma(ctrl);
+		ctrl->state == QCOM_SLIM_NGD_CTRL_ASLEEP) {
+		ret = qcom_slim_ngd_init_dma(ctrl);
+		if (ret)
+			return ret;
+	}
 
 	/* By default enable message queues */
 	cfg |= NGD_CFG_RX_MSGQ_EN;
@@ -1242,6 +1260,8 @@ static void qcom_slim_ngd_setup(struct qcom_slim_ngd_ctrl *ctrl)
 		cfg |= NGD_CFG_ENABLE;
 
 	writel_relaxed(cfg, ctrl->ngd->base);
+
+	return 0;
 }
 
 static int qcom_slim_ngd_power_up(struct qcom_slim_ngd_ctrl *ctrl)
@@ -1282,8 +1302,7 @@ static int qcom_slim_ngd_power_up(struct qcom_slim_ngd_ctrl *ctrl)
 			dev_info(ctrl->dev, "Subsys restart: ADSP active framer\n");
 			return 0;
 		}
-		qcom_slim_ngd_setup(ctrl);
-		return 0;
+		return qcom_slim_ngd_setup(ctrl);
 	}
 
 	/*
@@ -1297,7 +1316,9 @@ static int qcom_slim_ngd_power_up(struct qcom_slim_ngd_ctrl *ctrl)
 
 	writel_relaxed(rx_msgq|SLIM_RX_MSGQ_TIMEOUT_VAL,
 				ngd->base + NGD_RX_MSGQ_CFG);
-	qcom_slim_ngd_setup(ctrl);
+	ret = qcom_slim_ngd_setup(ctrl);
+	if (ret)
+		return ret;
 
 	time_left = wait_for_completion_timeout(&ctrl->reconf, HZ);
 	if (!time_left) {
