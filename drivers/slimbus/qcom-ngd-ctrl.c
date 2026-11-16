@@ -1593,6 +1593,12 @@ static void slim_pd_status(int state, char *svc_path, void *priv)
 
 	qcom_slim_ngd_ssr_pdr_notify(ctrl, state);
 }
+
+static void qcom_slim_ngd_put_device(void *data)
+{
+	put_device(data);
+}
+
 static int of_qcom_slim_ngd_register(struct device *parent,
 				     struct qcom_slim_ngd_ctrl *ctrl)
 {
@@ -1609,7 +1615,7 @@ static int of_qcom_slim_ngd_register(struct device *parent,
 		if (of_property_read_u32(node, "reg", &id))
 			continue;
 
-		ngd = kzalloc(sizeof(*ngd), GFP_KERNEL);
+		ngd = devm_kzalloc(parent, sizeof(*ngd), GFP_KERNEL);
 		if (!ngd) {
 			of_node_put(node);
 			return -ENOMEM;
@@ -1617,9 +1623,16 @@ static int of_qcom_slim_ngd_register(struct device *parent,
 
 		ngd->pdev = platform_device_alloc(QCOM_SLIM_NGD_DRV_NAME, id);
 		if (!ngd->pdev) {
-			kfree(ngd);
 			of_node_put(node);
 			return -ENOMEM;
+		}
+		/* Keep the device alive until the controller workers are drained. */
+		ret = devm_add_action_or_reset(parent, qcom_slim_ngd_put_device,
+					       get_device(&ngd->pdev->dev));
+		if (ret) {
+			platform_device_put(ngd->pdev);
+			of_node_put(node);
+			return ret;
 		}
 		ngd->id = id;
 		ngd->pdev->dev.parent = parent;
@@ -1628,7 +1641,6 @@ static int of_qcom_slim_ngd_register(struct device *parent,
 						 QCOM_SLIM_NGD_DRV_NAME);
 		if (ret) {
 			platform_device_put(ngd->pdev);
-			kfree(ngd);
 			of_node_put(node);
 			return ret;
 		}
@@ -1638,13 +1650,13 @@ static int of_qcom_slim_ngd_register(struct device *parent,
 		ret = platform_device_add(ngd->pdev);
 		if (ret) {
 			platform_device_put(ngd->pdev);
-			kfree(ngd);
 			of_node_put(node);
 			return ret;
 		}
 		ngd->base = ctrl->base + ngd->id * data->offset +
 					(ngd->id - 1) * data->size;
 
+		of_node_put(node);
 		return 0;
 	}
 
@@ -1655,7 +1667,7 @@ static void qcom_slim_ngd_unregister(struct qcom_slim_ngd_ctrl *ctrl)
 {
 	struct qcom_slim_ngd *ngd = ctrl->ngd;
 
-	platform_device_del(ngd->pdev);
+	platform_device_unregister(ngd->pdev);
 }
 
 static int qcom_slim_ngd_probe(struct platform_device *pdev)
@@ -1809,9 +1821,6 @@ static void qcom_slim_ngd_remove(struct platform_device *pdev)
 	qcom_slim_ngd_enable(ctrl, false);
 	qcom_slim_ngd_exit_dma(ctrl);
 	qcom_slim_ngd_qmi_svc_event_deinit(&ctrl->qmi);
-
-	kfree(ctrl->ngd);
-	ctrl->ngd = NULL;
 }
 
 static int __maybe_unused qcom_slim_ngd_runtime_idle(struct device *dev)
