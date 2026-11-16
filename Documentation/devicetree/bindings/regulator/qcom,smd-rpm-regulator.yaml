@@ -39,6 +39,13 @@ description:
   l11, l12, l13, l14, l15, l16, l17, l18, l19, l20, l21, l22, l23, l24, l25,
   l26, l27, l28, lvs1
 
+  PM8226 also supports l3-ao as an active-only voter for the same physical
+  regulator as l3. When present, l3 and l3-ao have independent consumer
+  constraints. Their enable and voltage requests are combined using a maximum
+  for the active set. Only l3 contributes to the sleep set; explicit suspend
+  settings on l3 override its normal sleep vote. These nodes describe two
+  voters, not two independent physical supplies.
+
   For pm8841, s1, s2, s3, s4, s5, s6, s7, s8
 
   For pm8909, s1, s2, l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, l11, l12, l13,
@@ -107,6 +114,15 @@ properties:
       - qcom,rpm-pmr735a-regulators
       - qcom,rpm-pms405-regulators
 
+  l3-ao:
+    $ref: regulator.yaml#
+    description: PM8226 L3 active-only voter, paired with l3
+    properties:
+      regulator-state-mem: false
+      regulator-state-disk: false
+      regulator-state-standby: false
+    unevaluatedProperties: false
+
 patternProperties:
   ".*-supply$":
     description: Input supply phandle(s) for this node
@@ -117,6 +133,18 @@ patternProperties:
     unevaluatedProperties: false
 
 additionalProperties: false
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: qcom,rpm-pm8226-regulators
+    then:
+      dependentRequired:
+        l3-ao: [l3]
+    else:
+      properties:
+        l3-ao: false
 
 required:
   - compatible
