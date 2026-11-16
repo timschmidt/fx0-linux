@@ -1787,6 +1787,7 @@ static void qcom_slim_ngd_ctrl_remove(struct platform_device *pdev)
 
 	pdr_handle_release(ctrl->pdr);
 	qcom_unregister_ssr_notifier(ctrl->notifier, &ctrl->nb);
+	cancel_work_sync(&ctrl->ngd_up_work);
 
 	qcom_slim_ngd_unregister(ctrl);
 
