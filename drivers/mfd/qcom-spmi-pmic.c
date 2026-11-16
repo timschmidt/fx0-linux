@@ -248,6 +248,7 @@ static const struct regmap_config spmi_regmap_config = {
 	.val_bits	= 8,
 	.max_register	= 0xffff,
 	.fast_io	= true,
+	.use_raw_spinlock = true,
 };
 
 static int pmic_spmi_probe(struct spmi_device *sdev)
