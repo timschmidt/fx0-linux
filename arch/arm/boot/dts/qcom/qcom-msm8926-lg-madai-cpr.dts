@@ -224,6 +224,8 @@
 
 &rpm_requests {
 	regulators {
+		qcom,boot-apc-supply = <&pm8226_apc>;
+
 		pm8226_l3_ao: l3-ao {
 			regulator-min-microvolt = <750000>;
 			regulator-max-microvolt = <1337500>;
