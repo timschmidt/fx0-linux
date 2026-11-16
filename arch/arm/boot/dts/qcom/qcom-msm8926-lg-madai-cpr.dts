@@ -215,6 +215,7 @@
 		qcom,apcs-syscon = <&apcs>;
 		vdd-apc-supply = <&pm8226_apc>;
 		vdd-mx-supply = <&pm8226_l3_ao>;
+		vdd-mx-sleep-supply = <&pm8226_l3_so>;
 		#power-domain-cells = <0>;
 		operating-points-v2 = <&cpr_opp_table>;
 		nvmem-cells = <&cpu_speedbin>, <&cpr_primary>, <&cpr_redundant>;
@@ -227,6 +228,11 @@
 		qcom,boot-apc-supply = <&pm8226_apc>;
 
 		pm8226_l3_ao: l3-ao {
+			regulator-min-microvolt = <750000>;
+			regulator-max-microvolt = <1337500>;
+		};
+
+		pm8226_l3_so: l3-so {
 			regulator-min-microvolt = <750000>;
 			regulator-max-microvolt = <1337500>;
 		};
