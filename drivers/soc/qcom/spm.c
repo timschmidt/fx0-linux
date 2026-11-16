@@ -554,6 +554,7 @@ static const struct regmap_config spm_8226_l2_regmap_config = {
 	.reg_stride = 4,
 	.max_register = 0xffc,
 	.fast_io = true,
+	.use_raw_spinlock = true,
 	.rd_table = &spm_8226_l2_read_table,
 	.wr_table = &spm_8226_l2_write_table,
 };
