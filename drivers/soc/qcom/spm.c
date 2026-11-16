@@ -7,10 +7,12 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/cpu.h>
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/irqflags.h>
 #include <linux/kernel.h>
 #include <linux/linear_range.h>
 #include <linux/mfd/syscon.h>
@@ -86,6 +88,7 @@ struct spm_reg_data {
 
 struct spm_driver_data {
 	void __iomem *reg_base;
+	struct regmap *l2_map;
 	const struct spm_reg_data *reg_data;
 	struct device *dev;
 	unsigned int volt_sel;
@@ -294,6 +297,20 @@ static inline u32 spm_register_read(struct spm_driver_data *drv,
 				    enum spm_reg reg)
 {
 	return readl_relaxed(drv->reg_base + drv->reg_data->reg_offset[reg]);
+}
+
+int spm_set_l2_low_power_mode(struct spm_driver_data *drv,
+			      enum spm_l2_sleep_mode mode)
+{
+	if (!drv || !drv->reg_data->pmic_arbiter_master || !drv->l2_map)
+		return -ENODEV;
+	/* APC commands also run on CPU0 in IRQ-disabled synchronous IPI context. */
+	if (raw_smp_processor_id() || !irqs_disabled())
+		return -EPERM;
+	if (mode != SPM_L2_MODE_DISABLED && num_online_cpus() != 1)
+		return -EBUSY;
+
+	return spm_8226_l2_set_mode(drv->l2_map, mode);
 }
 
 void spm_set_low_power_mode(struct spm_driver_data *drv,
@@ -527,14 +544,16 @@ static const struct regmap_range spm_8226_l2_read_ranges[] = {
 	regmap_reg_range(0x1c, 0x20),
 	regmap_reg_range(0x30, 0x34),
 	regmap_reg_range(0x40, 0x44),
+	regmap_reg_range(0x80, 0xd0),
 	regmap_reg_range(0xfd0, 0xfd0),
 };
 
 static const struct regmap_range spm_8226_l2_write_ranges[] = {
 	regmap_reg_range(0x08, 0x08),
 	regmap_reg_range(0x18, 0x1c),
-	regmap_reg_range(0x34, 0x34),
+	regmap_reg_range(0x30, 0x34),
 	regmap_reg_range(0x40, 0x44),
+	regmap_reg_range(0x80, 0xd0),
 };
 
 static const struct regmap_access_table spm_8226_l2_read_table = {
@@ -589,8 +608,15 @@ static int spm_8226_l2_register(struct platform_device *pdev,
 	ret = spm_8226_l2_master_init(map);
 	if (ret)
 		return dev_err_probe(dev, ret, "could not initialize L2 master\n");
+	ret = spm_8226_l2_sequence_init(map);
+	if (ret)
+		return dev_err_probe(dev, ret, "could not initialize L2 sequences\n");
 	/* Nothing fallible may follow publication of this permanent mapping. */
-	return of_syscon_register_regmap(dev->of_node, map);
+	ret = of_syscon_register_regmap(dev->of_node, map);
+	if (ret)
+		return ret;
+	drv->l2_map = map;
+	return 0;
 }
 
 static int spm_dev_probe(struct platform_device *pdev)

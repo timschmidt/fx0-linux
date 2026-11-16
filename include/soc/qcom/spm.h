@@ -19,4 +19,17 @@ struct spm_driver_data;
 void spm_set_low_power_mode(struct spm_driver_data *drv,
 			    enum pm_sleep_mode mode);
 
+enum spm_l2_sleep_mode {
+	SPM_L2_MODE_DISABLED,
+	SPM_L2_MODE_RETENTION,
+	SPM_L2_MODE_GDHS,
+	SPM_L2_MODE_COLLAPSE,
+	SPM_L2_MODE_COLLAPSE_RPM,
+	SPM_L2_MODE_NR,
+};
+
+/* CPU0 with local IRQs off; arming also requires all secondary CPUs offline. */
+int spm_set_l2_low_power_mode(struct spm_driver_data *drv,
+			      enum spm_l2_sleep_mode mode);
+
 #endif /* __SPM_H__ */
