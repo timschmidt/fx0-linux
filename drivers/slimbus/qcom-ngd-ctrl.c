@@ -1422,7 +1422,7 @@ static int qcom_slim_ngd_runtime_resume(struct device *dev)
 		ctrl->state = QCOM_SLIM_NGD_CTRL_AWAKE;
 	}
 
-	return 0;
+	return ret;
 }
 
 static int qcom_slim_ngd_enable(struct qcom_slim_ngd_ctrl *ctrl, bool enable)
@@ -1442,9 +1442,14 @@ static int qcom_slim_ngd_enable(struct qcom_slim_ngd_ctrl *ctrl, bool enable)
 		complete(&ctrl->qmi.qmi_comp);
 		if (!pm_runtime_enabled(ctrl->ctrl.dev) ||
 			 !pm_runtime_suspended(ctrl->ctrl.dev))
-			qcom_slim_ngd_runtime_resume(ctrl->ctrl.dev);
+			ret = qcom_slim_ngd_runtime_resume(ctrl->ctrl.dev);
 		else
-			pm_runtime_resume(ctrl->ctrl.dev);
+			ret = pm_runtime_resume(ctrl->ctrl.dev);
+		if (ret < 0) {
+			if (!ctrl->registered)
+				qcom_slim_qmi_exit(ctrl);
+			return ret;
+		}
 
 		if (ctrl->registered)
 			return 0;
