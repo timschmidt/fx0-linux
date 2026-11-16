@@ -1523,13 +1523,15 @@ static void qcom_slim_ngd_down(struct qcom_slim_ngd_ctrl *ctrl)
 static void qcom_slim_ngd_up_worker(struct work_struct *work)
 {
 	struct qcom_slim_ngd_ctrl *ctrl;
+	long ret;
 
 	ctrl = container_of(work, struct qcom_slim_ngd_ctrl, ngd_up_work);
 
 	/* Make sure qmi service is up before continuing */
-	if (!wait_for_completion_interruptible_timeout(&ctrl->qmi_up,
-						       msecs_to_jiffies(MSEC_PER_SEC))) {
-		dev_err(ctrl->dev, "QMI wait timeout\n");
+	ret = wait_for_completion_interruptible_timeout(&ctrl->qmi_up,
+							msecs_to_jiffies(MSEC_PER_SEC));
+	if (ret <= 0) {
+		dev_err(ctrl->dev, "QMI wait failed: %ld\n", ret);
 		return;
 	}
 
