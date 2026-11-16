@@ -46,6 +46,14 @@ properties:
   vdd-mx-supply:
     description: Memory rail dependency of the MSM8926 APC supply.
 
+  vdd-mx-sleep-supply:
+    description:
+      Optional independent MSM8926 memory-rail sleep-only voter. CPR retains
+      an enabled request at its supported maximum while APC can remain live.
+      A complete system entry coordinator must quiesce CPR and establish the
+      CPU/L2/RPM power-collapse ordering before lowering this sleep request.
+      This voter must not contribute to the active set.
+
   '#power-domain-cells':
     const: 0
 
@@ -115,6 +123,7 @@ allOf:
           items:
             - const: ref
         vdd-mx-supply: false
+        vdd-mx-sleep-supply: false
         qcom,apcs-syscon: false
         nvmem-cells:
           items:
