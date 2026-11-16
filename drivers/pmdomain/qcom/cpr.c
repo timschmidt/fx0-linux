@@ -31,6 +31,7 @@
 #include <linux/soc/qcom/cpr.h>
 
 #include "cpr-voltage.h"
+#include "cpr-sleep.h"
 #include "cpr-msm8926-corner.h"
 #include "cpr-msm8926-fuses.h"
 
@@ -242,6 +243,7 @@ struct cpr_msm8926_data {
 	struct regmap *apcs;
 	struct clk *aux_clk;
 	struct clk *pll_clk;
+	struct regulator *mx_sleep;
 };
 
 static struct platform_driver cpr_driver;
@@ -1300,6 +1302,10 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 			data->calibration.ring_osc[i] : 0;
 		fuse->step_quot = 30;
 	}
+	ret = cpr_sleep_vote_init(drv->dev, 1337500, &data->mx_sleep);
+	if (ret)
+		return dev_err_probe(drv->dev, ret, "MX sleep guard unavailable\n");
+
 	drv->cpu_clk = cpu_clk;
 	drv->rails.mx = mx;
 	drv->rails.mx_max_uV = 1337500;
