@@ -46,6 +46,12 @@ description:
   settings on l3 override its normal sleep vote. These nodes describe two
   voters, not two independent physical supplies.
 
+  PM8226 l3-so is a sleep-only voter. Its cached requests are combined with
+  the normal l3 sleep policy using maximum voltage and enable requests.
+  It never contributes to the active set. With a boot APC supply, a separate
+  temporary sleep hold protects APC until a covering l3-so request is enabled
+  and acknowledged. Releasing that sleep voter rearms the protective hold.
+
   For pm8841, s1, s2, s3, s4, s5, s6, s7, s8
 
   For pm8909, s1, s2, l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, l11, l12, l13,
@@ -123,6 +129,15 @@ properties:
       regulator-state-standby: false
     unevaluatedProperties: false
 
+  l3-so:
+    $ref: regulator.yaml#
+    description: PM8226 L3 sleep-only voter, paired with l3
+    properties:
+      regulator-state-mem: false
+      regulator-state-disk: false
+      regulator-state-standby: false
+    unevaluatedProperties: false
+
   qcom,boot-apc-supply:
     description:
       Live CPU APC supply whose boot voltage must be covered before the paired
@@ -153,9 +168,11 @@ allOf:
     then:
       dependentRequired:
         l3-ao: [l3]
+        l3-so: [l3]
     else:
       properties:
         l3-ao: false
+        l3-so: false
   - if:
       required:
         - qcom,boot-apc-supply
@@ -167,6 +184,13 @@ allOf:
         compatible:
           const: qcom,rpm-pm8226-regulators
         l3-ao:
+          required:
+            - regulator-min-microvolt
+            - regulator-max-microvolt
+          properties:
+            regulator-boot-on: false
+            regulator-always-on: false
+        l3-so:
           required:
             - regulator-min-microvolt
             - regulator-max-microvolt
