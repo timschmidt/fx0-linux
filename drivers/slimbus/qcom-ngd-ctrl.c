@@ -21,6 +21,7 @@
 #include <linux/soc/qcom/qmi.h>
 #include <linux/soc/qcom/pdr.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 #include <net/sock.h>
 #include "slimbus.h"
 
@@ -161,11 +162,16 @@ struct qcom_slim_ngd_ctrl {
 	struct qcom_slim_ngd_dma_desc txdesc[QCOM_SLIM_NGD_DESC_NUM];
 	struct completion reconf;
 	struct work_struct m_work;
+	struct work_struct slave_work;
 	struct work_struct ngd_up_work;
 	struct workqueue_struct *mwq;
 	wait_queue_head_t qmi_wait;
 	spinlock_t tx_buf_lock;
 	struct mutex tx_lock;
+	/* Serialize setup and the resource-release phases of DMA shutdown. */
+	struct mutex dma_lock;
+	/* RX rearm/master admission, protected by tx_buf_lock. */
+	bool dma_ready;
 	struct mutex ssr_lock;
 	struct notifier_block nb;
 	void *notifier;
@@ -632,6 +638,7 @@ static int qcom_slim_ngd_tx_msg_post(struct qcom_slim_ngd_ctrl *ctrl,
 
 static void qcom_slim_ngd_rx(struct qcom_slim_ngd_ctrl *ctrl, u8 *buf)
 {
+	unsigned long flags;
 	u8 mc, mt, len;
 
 	mt = SLIM_HEADER_GET_MT(buf[0]);
@@ -639,8 +646,12 @@ static void qcom_slim_ngd_rx(struct qcom_slim_ngd_ctrl *ctrl, u8 *buf)
 	mc = SLIM_HEADER_GET_MC(buf[1]);
 
 	if (mc == SLIM_USR_MC_MASTER_CAPABILITY &&
-		mt == SLIM_MSG_MT_SRC_REFERRED_USER)
-		queue_work(ctrl->mwq, &ctrl->m_work);
+	    mt == SLIM_MSG_MT_SRC_REFERRED_USER) {
+		spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
+		if (ctrl->dma_ready)
+			queue_work(ctrl->mwq, &ctrl->m_work);
+		spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
+	}
 
 	if (mc == SLIM_MSG_MC_REPLY_INFORMATION ||
 	    mc == SLIM_MSG_MC_REPLY_VALUE || (mc == SLIM_USR_MC_ADDR_REPLY &&
@@ -656,27 +667,40 @@ static void qcom_slim_ngd_rx_msgq_cb(void *args)
 {
 	struct qcom_slim_ngd_dma_desc *desc = args;
 	struct qcom_slim_ngd_ctrl *ctrl = desc->ctrl;
+	unsigned long flags;
 
 	qcom_slim_ngd_rx(ctrl, (u8 *)desc->base);
-	/* Add descriptor back to the queue */
+	/* Close and rearm serialize through the entire submit/issue sequence. */
+	spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
+	if (!ctrl->dma_ready)
+		goto unlock;
+
 	desc->desc = dmaengine_prep_slave_single(ctrl->dma_rx_channel,
 					desc->phys, SLIM_MSGQ_BUF_LEN,
 					DMA_DEV_TO_MEM,
 					DMA_PREP_INTERRUPT);
 	if (!desc->desc) {
 		dev_err(ctrl->dev, "Unable to prepare rx channel\n");
-		return;
+		goto unlock;
 	}
 
 	desc->desc->callback = qcom_slim_ngd_rx_msgq_cb;
 	desc->desc->callback_param = desc;
-	desc->desc->cookie = dmaengine_submit(desc->desc);
+	desc->cookie = dmaengine_submit(desc->desc);
+	if (dma_submit_error(desc->cookie)) {
+		dev_err(ctrl->dev, "Unable to submit rx descriptor: %d\n",
+			desc->cookie);
+		goto unlock;
+	}
 	dma_async_issue_pending(ctrl->dma_rx_channel);
+unlock:
+	spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
 }
 
 static int qcom_slim_ngd_post_rx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
 {
 	struct qcom_slim_ngd_dma_desc *desc;
+	unsigned long flags;
 	int i;
 
 	for (i = 0; i < QCOM_SLIM_NGD_DESC_NUM; i++) {
@@ -695,11 +719,14 @@ static int qcom_slim_ngd_post_rx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
 
 		desc->desc->callback = qcom_slim_ngd_rx_msgq_cb;
 		desc->desc->callback_param = desc;
-		desc->desc->cookie = dmaengine_submit(desc->desc);
-		if (dma_submit_error(desc->desc->cookie))
-			return desc->desc->cookie;
+		desc->cookie = dmaengine_submit(desc->desc);
+		if (dma_submit_error(desc->cookie))
+			return desc->cookie;
 	}
+	spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
+	WRITE_ONCE(ctrl->dma_ready, true);
 	dma_async_issue_pending(ctrl->dma_rx_channel);
+	spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
 
 	return 0;
 }
@@ -784,8 +811,11 @@ static int qcom_slim_ngd_init_dma(struct qcom_slim_ngd_ctrl *ctrl)
 {
 	int ret = 0;
 
-	if (ctrl->dma_rx_channel && ctrl->dma_tx_channel)
-		return 0;
+	lockdep_assert_held(&ctrl->dma_lock);
+
+	if (ctrl->dma_rx_channel || ctrl->dma_tx_channel)
+		return ctrl->dma_rx_channel && ctrl->dma_tx_channel &&
+		       READ_ONCE(ctrl->dma_ready) ? 0 : -EBUSY;
 
 	/* RX callbacks can queue master work that immediately needs TX. */
 	ret = qcom_slim_ngd_init_tx_msgq(ctrl);
@@ -797,7 +827,9 @@ static int qcom_slim_ngd_init_dma(struct qcom_slim_ngd_ctrl *ctrl)
 	ret = qcom_slim_ngd_init_rx_msgq(ctrl);
 	if (ret) {
 		dev_err(ctrl->dev, "rx dma init failed\n");
-		qcom_slim_ngd_exit_dma(ctrl);
+		/* RX never issued on this path, so no master work was admitted. */
+		dma_release_channel(ctrl->dma_tx_channel);
+		ctrl->dma_tx_channel = NULL;
 	}
 
 	return ret;
@@ -857,6 +889,10 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 	}
 
 	mutex_lock(&ctrl->tx_lock);
+	if (!READ_ONCE(ctrl->dma_ready)) {
+		ret = -ESHUTDOWN;
+		goto unlock;
+	}
 	pbuf = qcom_slim_ngd_tx_msg_get(ctrl, txn->rl, &tx_sent);
 	if (!pbuf) {
 		dev_err(ctrl->dev, "Message buffer unavailable\n");
@@ -1264,6 +1300,17 @@ static int qcom_slim_ngd_get_laddr(struct slim_controller *ctrl,
 
 static int qcom_slim_ngd_exit_dma(struct qcom_slim_ngd_ctrl *ctrl)
 {
+	unsigned long flags;
+
+	mutex_lock(&ctrl->dma_lock);
+	spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
+	WRITE_ONCE(ctrl->dma_ready, false);
+	spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
+
+	/* The handshake worker has no PM dependency; notifications run separately. */
+	cancel_work_sync(&ctrl->m_work);
+	/* Admitted senders may still complete, but new senders see a closed gate. */
+	mutex_lock(&ctrl->tx_lock);
 	if (ctrl->dma_rx_channel) {
 		dmaengine_terminate_sync(ctrl->dma_rx_channel);
 		dma_release_channel(ctrl->dma_rx_channel);
@@ -1275,33 +1322,36 @@ static int qcom_slim_ngd_exit_dma(struct qcom_slim_ngd_ctrl *ctrl)
 	}
 
 	ctrl->dma_tx_channel = ctrl->dma_rx_channel = NULL;
+	mutex_unlock(&ctrl->tx_lock);
+	mutex_unlock(&ctrl->dma_lock);
 
 	return 0;
 }
 
 static int qcom_slim_ngd_setup(struct qcom_slim_ngd_ctrl *ctrl)
 {
-	u32 cfg = readl_relaxed(ctrl->ngd->base);
-	int ret;
+	u32 cfg;
+	int ret = 0;
 
-	if (ctrl->state == QCOM_SLIM_NGD_CTRL_DOWN ||
-		ctrl->state == QCOM_SLIM_NGD_CTRL_ASLEEP) {
+	mutex_lock(&ctrl->dma_lock);
+	if (!READ_ONCE(ctrl->parent_ready) ||
+	    !READ_ONCE(ctrl->child_ready) || !READ_ONCE(ctrl->up_requested) ||
+	    !READ_ONCE(ctrl->qmi_ready)) {
+		ret = -ESHUTDOWN;
+		goto unlock;
+	}
+	cfg = readl_relaxed(ctrl->ngd->base);
+	if (!READ_ONCE(ctrl->dma_ready)) {
 		ret = qcom_slim_ngd_init_dma(ctrl);
 		if (ret)
-			return ret;
+			goto unlock;
 	}
 
-	/* By default enable message queues */
-	cfg |= NGD_CFG_RX_MSGQ_EN;
-	cfg |= NGD_CFG_TX_MSGQ_EN;
-
-	/* Enable NGD if it's not already enabled*/
-	if (!(cfg & NGD_CFG_ENABLE))
-		cfg |= NGD_CFG_ENABLE;
-
+	cfg |= NGD_CFG_RX_MSGQ_EN | NGD_CFG_TX_MSGQ_EN | NGD_CFG_ENABLE;
 	writel_relaxed(cfg, ctrl->ngd->base);
-
-	return 0;
+unlock:
+	mutex_unlock(&ctrl->dma_lock);
+	return ret;
 }
 
 static int qcom_slim_ngd_power_up(struct qcom_slim_ngd_ctrl *ctrl)
@@ -1385,11 +1435,22 @@ static void qcom_slim_ngd_notify_slaves(struct qcom_slim_ngd_ctrl *ctrl)
 	}
 }
 
+/* PM-dependent notifications must not block the master's handshake queue. */
+static void qcom_slim_ngd_slave_worker(struct work_struct *work)
+{
+	struct qcom_slim_ngd_ctrl *ctrl;
+
+	ctrl = container_of(work, struct qcom_slim_ngd_ctrl, slave_work);
+	if (READ_ONCE(ctrl->dma_ready))
+		qcom_slim_ngd_notify_slaves(ctrl);
+}
+
 static void qcom_slim_ngd_master_worker(struct work_struct *work)
 {
 	struct qcom_slim_ngd_ctrl *ctrl;
 	struct slim_msg_txn txn;
 	struct slim_val_inf msg = {0};
+	unsigned long flags;
 	int retries = 0;
 	u8 wbuf[8];
 	int ret = 0;
@@ -1420,8 +1481,12 @@ capability_retry:
 			dev_err(ctrl->dev, "unexpected state:%d\n",
 						ctrl->state);
 
-		if (ctrl->state == QCOM_SLIM_NGD_CTRL_DOWN)
-			qcom_slim_ngd_notify_slaves(ctrl);
+		if (ctrl->state == QCOM_SLIM_NGD_CTRL_DOWN) {
+			spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
+			if (ctrl->dma_ready)
+				schedule_work(&ctrl->slave_work);
+			spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
+		}
 
 	} else if (ret == -EIO) {
 		dev_err(ctrl->dev, "capability message NACKed, retrying\n");
@@ -1446,6 +1511,10 @@ static int qcom_slim_ngd_runtime_resume(struct device *dev)
 {
 	struct qcom_slim_ngd_ctrl *ctrl = dev_get_drvdata(dev);
 	int ret = 0;
+
+	if (!READ_ONCE(ctrl->parent_ready) || !READ_ONCE(ctrl->child_ready) ||
+	    !READ_ONCE(ctrl->up_requested) || !READ_ONCE(ctrl->qmi_ready))
+		return -ESHUTDOWN;
 
 	if (!ctrl->qmi.handle)
 		return 0;
@@ -1609,6 +1678,9 @@ MODULE_DEVICE_TABLE(of, qcom_slim_ngd_dt_match);
 static void qcom_slim_ngd_down(struct qcom_slim_ngd_ctrl *ctrl)
 {
 	lockdep_assert_held(&ctrl->ssr_lock);
+	qcom_slim_ngd_exit_dma(ctrl);
+	cancel_work_sync(&ctrl->slave_work);
+	pm_runtime_barrier(ctrl->ctrl.dev);
 	device_for_each_child(ctrl->ctrl.dev, NULL,
 			      qcom_slim_ngd_update_device_status);
 	qcom_slim_ngd_enable(ctrl, false);
@@ -1683,7 +1755,6 @@ static int qcom_slim_ngd_ssr_pdr_notify(struct qcom_slim_ngd_ctrl *ctrl,
 			}
 			ctrl->state = QCOM_SLIM_NGD_CTRL_DOWN;
 			qcom_slim_ngd_down(ctrl);
-			qcom_slim_ngd_exit_dma(ctrl);
 		}
 		break;
 	case QCOM_SSR_AFTER_POWERUP:
@@ -1885,6 +1956,7 @@ static int qcom_slim_ngd_ctrl_probe(struct platform_device *pdev)
 	ctrl->state = QCOM_SLIM_NGD_CTRL_DOWN;
 
 	mutex_init(&ctrl->tx_lock);
+	mutex_init(&ctrl->dma_lock);
 	mutex_init(&ctrl->ssr_lock);
 	spin_lock_init(&ctrl->tx_buf_lock);
 	init_completion(&ctrl->reconf);
@@ -1892,6 +1964,7 @@ static int qcom_slim_ngd_ctrl_probe(struct platform_device *pdev)
 	init_waitqueue_head(&ctrl->qmi_wait);
 
 	INIT_WORK(&ctrl->m_work, qcom_slim_ngd_master_worker);
+	INIT_WORK(&ctrl->slave_work, qcom_slim_ngd_slave_worker);
 	INIT_WORK(&ctrl->ngd_up_work, qcom_slim_ngd_up_worker);
 
 	ctrl->mwq = create_singlethread_workqueue("ngd_master");
@@ -1967,8 +2040,10 @@ static void qcom_slim_ngd_remove(struct platform_device *pdev)
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 	mutex_lock(&ctrl->ssr_lock);
-	qcom_slim_ngd_enable(ctrl, false);
 	qcom_slim_ngd_exit_dma(ctrl);
+	cancel_work_sync(&ctrl->slave_work);
+	pm_runtime_barrier(&pdev->dev);
+	qcom_slim_ngd_enable(ctrl, false);
 	ctrl->state = QCOM_SLIM_NGD_CTRL_DOWN;
 	if (ctrl->pm_ref_held) {
 		pm_runtime_put_noidle(&pdev->dev);
