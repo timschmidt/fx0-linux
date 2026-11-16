@@ -123,6 +123,17 @@ properties:
       regulator-state-standby: false
     unevaluatedProperties: false
 
+  qcom,boot-apc-supply:
+    description:
+      Live CPU APC supply whose boot voltage must be covered before the paired
+      PM8226 L3 voters can change the active MX request. Before registering
+      either voter, read and validate APC against l3-ao's voltage range. Hold
+      the l3-ao maximum as a temporary active enable and voltage request until
+      an enabled l3-ao request covers the rounded-up boot APC voltage. The CPU
+      consumer must establish and retain that covering request before changing
+      APC. This boot hold does not contribute to the sleep set. l3-ao must not
+      be enabled by boot-on or always-on constraints before consumer handoff.
+
 patternProperties:
   ".*-supply$":
     description: Input supply phandle(s) for this node
@@ -145,6 +156,23 @@ allOf:
     else:
       properties:
         l3-ao: false
+  - if:
+      required:
+        - qcom,boot-apc-supply
+    then:
+      required:
+        - l3
+        - l3-ao
+      properties:
+        compatible:
+          const: qcom,rpm-pm8226-regulators
+        l3-ao:
+          required:
+            - regulator-min-microvolt
+            - regulator-max-microvolt
+          properties:
+            regulator-boot-on: false
+            regulator-always-on: false
 
 required:
   - compatible
