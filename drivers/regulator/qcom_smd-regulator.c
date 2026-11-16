@@ -159,6 +159,34 @@ static int rpm_reg_set_load(struct regulator_dev *rdev, int load_uA)
 	return ret;
 }
 
+static int rpm_reg_write_suspend(struct regulator_dev *rdev, u32 key, u32 value)
+{
+	struct qcom_rpm_reg *vreg = rdev_get_drvdata(rdev);
+	struct rpm_regulator_req req = {
+		.key = cpu_to_le32(key),
+		.nbytes = cpu_to_le32(sizeof(u32)),
+		.value = cpu_to_le32(value),
+	};
+
+	return qcom_rpm_smd_write(smd_vreg_rpm, QCOM_SMD_RPM_SLEEP_STATE,
+				 vreg->type, vreg->id, &req, sizeof(req));
+}
+
+static int rpm_reg_set_suspend_voltage(struct regulator_dev *rdev, int uV)
+{
+	return rpm_reg_write_suspend(rdev, RPM_KEY_UV, uV);
+}
+
+static int rpm_reg_set_suspend_enable(struct regulator_dev *rdev)
+{
+	return rpm_reg_write_suspend(rdev, RPM_KEY_SWEN, 1);
+}
+
+static int rpm_reg_set_suspend_disable(struct regulator_dev *rdev)
+{
+	return rpm_reg_write_suspend(rdev, RPM_KEY_SWEN, 0);
+}
+
 static const struct regulator_ops rpm_smps_ldo_ops = {
 	.enable = rpm_reg_enable,
 	.disable = rpm_reg_disable,
@@ -169,6 +197,9 @@ static const struct regulator_ops rpm_smps_ldo_ops = {
 	.set_voltage = rpm_reg_set_voltage,
 
 	.set_load = rpm_reg_set_load,
+	.set_suspend_voltage = rpm_reg_set_suspend_voltage,
+	.set_suspend_enable = rpm_reg_set_suspend_enable,
+	.set_suspend_disable = rpm_reg_set_suspend_disable,
 };
 
 static const struct regulator_ops rpm_smps_ldo_ops_fixed = {
@@ -180,12 +211,17 @@ static const struct regulator_ops rpm_smps_ldo_ops_fixed = {
 	.set_voltage = rpm_reg_set_voltage,
 
 	.set_load = rpm_reg_set_load,
+	.set_suspend_voltage = rpm_reg_set_suspend_voltage,
+	.set_suspend_enable = rpm_reg_set_suspend_enable,
+	.set_suspend_disable = rpm_reg_set_suspend_disable,
 };
 
 static const struct regulator_ops rpm_switch_ops = {
 	.enable = rpm_reg_enable,
 	.disable = rpm_reg_disable,
 	.is_enabled = rpm_reg_is_enabled,
+	.set_suspend_enable = rpm_reg_set_suspend_enable,
+	.set_suspend_disable = rpm_reg_set_suspend_disable,
 };
 
 static const struct regulator_ops rpm_bob_ops = {
@@ -195,6 +231,9 @@ static const struct regulator_ops rpm_bob_ops = {
 
 	.get_voltage = rpm_reg_get_voltage,
 	.set_voltage = rpm_reg_set_voltage,
+	.set_suspend_voltage = rpm_reg_set_suspend_voltage,
+	.set_suspend_enable = rpm_reg_set_suspend_enable,
+	.set_suspend_disable = rpm_reg_set_suspend_disable,
 };
 
 static const struct regulator_ops rpm_mp5496_ops = {
@@ -205,6 +244,9 @@ static const struct regulator_ops rpm_mp5496_ops = {
 
 	.get_voltage = rpm_reg_get_voltage,
 	.set_voltage = rpm_reg_set_voltage,
+	.set_suspend_voltage = rpm_reg_set_suspend_voltage,
+	.set_suspend_enable = rpm_reg_set_suspend_enable,
+	.set_suspend_disable = rpm_reg_set_suspend_disable,
 };
 
 static const struct regulator_desc pma8084_hfsmps = {
