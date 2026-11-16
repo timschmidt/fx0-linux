@@ -12,6 +12,7 @@
 #include <linux/bitops.h>
 #include <linux/slab.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/ktime.h>
@@ -1347,6 +1348,14 @@ struct spmi_saw_request {
 	int result;
 };
 
+static const struct regmap_config saw_regmap_config = {
+	.name = "saw",
+	.reg_bits = 32,
+	.val_bits = 32,
+	.reg_stride = 4,
+	.use_raw_spinlock = true,
+};
+
 static void spmi_saw_set_vdd(void *data)
 {
 	u32 vctl, data3, avs_ctl, pmic_sts;
@@ -2580,6 +2589,33 @@ static const struct of_device_id qcom_spmi_regulator_match[] = {
 };
 MODULE_DEVICE_TABLE(of, qcom_spmi_regulator_match);
 
+static struct regmap *spmi_regulator_get_saw_regmap(struct device *dev)
+{
+	struct device_node *saw;
+	struct regmap *map;
+	void __iomem *base;
+
+	saw = of_parse_phandle(dev->of_node, "qcom,saw-reg", 0);
+	if (!saw)
+		return NULL;
+
+	if (of_device_is_compatible(saw, "qcom,msm8226-saw2-v2.1-l2") &&
+	    of_property_read_bool(saw, "qcom,pmic-arbiter-master")) {
+		/* The permanent SPM owner publishes this map after L2 setup. */
+		map = syscon_node_to_regmap(saw);
+		of_node_put(saw);
+		return PTR_ERR_OR_ZERO(map) == -EINVAL ? ERR_PTR(-EPROBE_DEFER) : map;
+	}
+
+	/* Legacy SAWs retain the private raw-spinlock map required by the IPI. */
+	base = devm_of_iomap(dev, saw, 0, NULL);
+	of_node_put(saw);
+	if (IS_ERR(base))
+		return ERR_CAST(base);
+
+	return devm_regmap_init_mmio(dev, base, &saw_regmap_config);
+}
+
 static int qcom_spmi_regulator_probe(struct platform_device *pdev)
 {
 	const struct spmi_regulator_data *reg;
@@ -2591,7 +2627,7 @@ static int qcom_spmi_regulator_probe(struct platform_device *pdev)
 	const char *name;
 	struct device *dev = &pdev->dev;
 	struct device_node *node = pdev->dev.of_node;
-	struct device_node *syscon, *reg_node;
+	struct device_node *reg_node;
 	struct property *reg_prop;
 	int ret, lenp;
 	struct list_head *vreg_list;
@@ -2610,18 +2646,10 @@ static int qcom_spmi_regulator_probe(struct platform_device *pdev)
 	if (!reg)
 		return -ENODEV;
 
-	syscon = of_parse_phandle(node, "qcom,saw-reg", 0);
-	if (syscon) {
-		saw_regmap = syscon_node_to_regmap(syscon);
-		ret = PTR_ERR_OR_ZERO(saw_regmap);
-		if (ret == -EINVAL &&
-		    of_device_is_compatible(syscon, "qcom,msm8226-saw2-v2.1-l2") &&
-		    of_property_read_bool(syscon, "qcom,pmic-arbiter-master"))
-			ret = -EPROBE_DEFER;
-		of_node_put(syscon);
-		if (ret)
-			return dev_err_probe(dev, ret, "could not get SAW regmap\n");
-	}
+	saw_regmap = spmi_regulator_get_saw_regmap(dev);
+	if (IS_ERR(saw_regmap))
+		return dev_err_probe(dev, PTR_ERR(saw_regmap),
+				     "could not get SAW regmap\n");
 
 	for (; reg->name; reg++) {
 
