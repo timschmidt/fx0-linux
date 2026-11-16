@@ -5,6 +5,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/driver.h>
@@ -13,10 +14,31 @@
 
 static struct qcom_smd_rpm *smd_vreg_rpm;
 
+struct rpm_reg_vote {
+	bool enabled;
+	int uV;
+	u32 load;
+	bool load_valid;
+};
+
+/* Owned before either regulator is registered; no peer rdev is dereferenced. */
+struct rpm_reg_pair {
+	/* Serializes the cached votes and their synchronous RPM writes. */
+	struct mutex lock;
+	struct rpm_reg_vote votes[2];
+	bool sleep_initialized;
+	bool sleep_enable_valid;
+	bool sleep_enabled;
+	bool sleep_voltage_valid;
+	u32 sleep_uV;
+};
+
 struct qcom_rpm_reg {
 	struct device *dev;
 	u32 type;
 	u32 id;
+	struct rpm_reg_pair *pair;
+	bool active_only;
 
 	struct regulator_desc desc;
 
@@ -39,11 +61,109 @@ struct rpm_regulator_req {
 #define RPM_KEY_UV	0x00007675 /* "uv" */
 #define RPM_KEY_MA	0x0000616d /* "ma" */
 
+static int rpm_reg_send_vote(struct qcom_rpm_reg *vreg, int state,
+			     const struct rpm_reg_vote *vote)
+{
+	struct rpm_regulator_req req[3];
+	int count = 1;
+
+	req[0].key = cpu_to_le32(RPM_KEY_SWEN);
+	req[0].nbytes = cpu_to_le32(sizeof(u32));
+	req[0].value = cpu_to_le32(vote->enabled);
+	if (vote->uV > 0) {
+		req[count].key = cpu_to_le32(RPM_KEY_UV);
+		req[count].nbytes = cpu_to_le32(sizeof(u32));
+		req[count++].value = cpu_to_le32(vote->uV);
+	}
+	if (vote->load_valid) {
+		req[count].key = cpu_to_le32(RPM_KEY_MA);
+		req[count].nbytes = cpu_to_le32(sizeof(u32));
+		req[count++].value = cpu_to_le32(vote->load / 1000);
+	}
+
+	return qcom_rpm_smd_write(smd_vreg_rpm, state, vreg->type, vreg->id,
+				 req, sizeof(req[0]) * count);
+}
+
+static int rpm_reg_write_pair(struct qcom_rpm_reg *vreg)
+{
+	struct rpm_reg_pair *pair = vreg->pair;
+	struct rpm_reg_vote *normal = &pair->votes[0];
+	struct rpm_reg_vote *active_only = &pair->votes[1];
+	struct rpm_reg_vote previous, active, sleep;
+	bool initialize_sleep;
+	u64 load;
+	int ret = 0;
+
+	mutex_lock(&pair->lock);
+	previous = pair->votes[vreg->active_only];
+	pair->votes[vreg->active_only] = (struct rpm_reg_vote) {
+		.enabled = vreg->is_enabled,
+		.uV = vreg->uV,
+		.load = vreg->load,
+		.load_valid = previous.load_valid || vreg->load_updated,
+	};
+	/* Keep disabled voltage requests for the next enable, as the vendor does. */
+	if (!normal->enabled && !active_only->enabled && !vreg->enabled_updated) {
+		if (!vreg->active_only)
+			pair->sleep_initialized = false;
+		goto unlock;
+	}
+
+	sleep = *normal;
+	if (pair->sleep_enable_valid)
+		sleep.enabled = pair->sleep_enabled;
+	if (pair->sleep_voltage_valid)
+		sleep.uV = pair->sleep_uV;
+	initialize_sleep = !pair->sleep_initialized;
+	if (initialize_sleep) {
+		/* RPM otherwise inherits ACTIVE, including the active-only vote. */
+		ret = rpm_reg_send_vote(vreg, QCOM_SMD_RPM_SLEEP_STATE, &sleep);
+		if (ret)
+			goto restore;
+		pair->sleep_initialized = true;
+	}
+
+	load = (u64)normal->load + active_only->load;
+	active = (struct rpm_reg_vote) {
+		.enabled = normal->enabled || active_only->enabled,
+		.uV = max(normal->uV, active_only->uV),
+		.load = min_t(u64, load, U32_MAX),
+		.load_valid = normal->load_valid || active_only->load_valid,
+	};
+	ret = rpm_reg_send_vote(vreg, QCOM_SMD_RPM_ACTIVE_STATE, &active);
+	if (ret)
+		goto restore;
+
+	/* Active-only requests never change the normal voter's sleep policy. */
+	if (!vreg->active_only && !initialize_sleep) {
+		ret = rpm_reg_send_vote(vreg, QCOM_SMD_RPM_SLEEP_STATE, &sleep);
+		if (ret)
+			goto restore;
+	}
+	vreg->enabled_updated = 0;
+	vreg->uv_updated = 0;
+	vreg->load_updated = 0;
+	goto unlock;
+
+restore:
+	/* Callers restore their cache and can force a fresh acknowledged vote. */
+	pair->votes[vreg->active_only] = previous;
+	/* A partial or timed-out write may have changed the firmware sleep set. */
+	pair->sleep_initialized = false;
+unlock:
+	mutex_unlock(&pair->lock);
+	return ret;
+}
+
 static int rpm_reg_write_active(struct qcom_rpm_reg *vreg)
 {
 	struct rpm_regulator_req req[3];
 	int reqlen = 0;
 	int ret;
+
+	if (vreg->pair)
+		return rpm_reg_write_pair(vreg);
 
 	if (vreg->enabled_updated) {
 		req[reqlen].key = cpu_to_le32(RPM_KEY_SWEN);
@@ -84,6 +204,7 @@ static int rpm_reg_write_active(struct qcom_rpm_reg *vreg)
 static int rpm_reg_enable(struct regulator_dev *rdev)
 {
 	struct qcom_rpm_reg *vreg = rdev_get_drvdata(rdev);
+	int old_enabled = vreg->is_enabled;
 	int ret;
 
 	vreg->is_enabled = 1;
@@ -91,7 +212,7 @@ static int rpm_reg_enable(struct regulator_dev *rdev)
 
 	ret = rpm_reg_write_active(vreg);
 	if (ret)
-		vreg->is_enabled = 0;
+		vreg->is_enabled = old_enabled;
 
 	return ret;
 }
@@ -106,6 +227,7 @@ static int rpm_reg_is_enabled(struct regulator_dev *rdev)
 static int rpm_reg_disable(struct regulator_dev *rdev)
 {
 	struct qcom_rpm_reg *vreg = rdev_get_drvdata(rdev);
+	int old_enabled = vreg->is_enabled;
 	int ret;
 
 	vreg->is_enabled = 0;
@@ -113,7 +235,7 @@ static int rpm_reg_disable(struct regulator_dev *rdev)
 
 	ret = rpm_reg_write_active(vreg);
 	if (ret)
-		vreg->is_enabled = 1;
+		vreg->is_enabled = old_enabled;
 
 	return ret;
 }
@@ -168,8 +290,28 @@ static int rpm_reg_write_suspend(struct regulator_dev *rdev, u32 key, u32 value)
 		.value = cpu_to_le32(value),
 	};
 
-	return qcom_rpm_smd_write(smd_vreg_rpm, QCOM_SMD_RPM_SLEEP_STATE,
+	int ret;
+
+	if (!vreg->pair)
+		return qcom_rpm_smd_write(smd_vreg_rpm, QCOM_SMD_RPM_SLEEP_STATE,
+					 vreg->type, vreg->id, &req, sizeof(req));
+	if (vreg->active_only)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&vreg->pair->lock);
+	ret = qcom_rpm_smd_write(smd_vreg_rpm, QCOM_SMD_RPM_SLEEP_STATE,
 				 vreg->type, vreg->id, &req, sizeof(req));
+	if (!ret && key == RPM_KEY_SWEN) {
+		vreg->pair->sleep_enable_valid = true;
+		vreg->pair->sleep_enabled = value;
+	} else if (!ret && key == RPM_KEY_UV) {
+		vreg->pair->sleep_voltage_valid = true;
+		vreg->pair->sleep_uV = value;
+	}
+	if (ret)
+		vreg->pair->sleep_initialized = false;
+	mutex_unlock(&vreg->pair->lock);
+	return ret;
 }
 
 static int rpm_reg_set_suspend_voltage(struct regulator_dev *rdev, int uV)
@@ -831,6 +973,7 @@ struct rpm_regulator_data {
 	u32 id;
 	const struct regulator_desc *desc;
 	const char *supply;
+	bool active_only;
 };
 
 static const struct rpm_regulator_data rpm_mp5496_regulators[] = {
@@ -964,6 +1107,7 @@ static const struct rpm_regulator_data rpm_pm8226_regulators[] = {
 	{ "l1", QCOM_SMD_RPM_LDOA, 1, &pm8226_nldo, "vdd_l1_l2_l4_l5" },
 	{ "l2", QCOM_SMD_RPM_LDOA, 2, &pm8226_nldo, "vdd_l1_l2_l4_l5" },
 	{ "l3", QCOM_SMD_RPM_LDOA, 3, &pm8226_nldo, "vdd_l3_l24_l26" },
+	{ "l3-ao", QCOM_SMD_RPM_LDOA, 3, &pm8226_nldo, "vdd_l3_l24_l26", true },
 	{ "l4", QCOM_SMD_RPM_LDOA, 4, &pm8226_nldo, "vdd_l1_l2_l4_l5" },
 	{ "l5", QCOM_SMD_RPM_LDOA, 5, &pm8226_nldo, "vdd_l1_l2_l4_l5" },
 	{ "l6", QCOM_SMD_RPM_LDOA, 6, &pm8226_pldo, "vdd_l6_l7_l8_l9_l27" },
@@ -1427,12 +1571,14 @@ MODULE_DEVICE_TABLE(of, rpm_of_match);
  *			device node
  * @pmic_rpm_data:	Pointer to a null-terminated array of qcom_smd-regulator
  *			resources defined for the top level PMIC device
+ * @pair:		Optional parent-owned PM8226 L3 voter pair
  *
  * Return: 0 on success, or a negative error number on failure
  */
 static int rpm_regulator_init_vreg(struct qcom_rpm_reg *vreg, struct device *dev,
 				   struct device_node *node,
-				   const struct rpm_regulator_data *pmic_rpm_data)
+				   const struct rpm_regulator_data *pmic_rpm_data,
+				   struct rpm_reg_pair *pair)
 {
 	struct regulator_config config = {};
 	const struct rpm_regulator_data *rpm_data;
@@ -1451,6 +1597,11 @@ static int rpm_regulator_init_vreg(struct qcom_rpm_reg *vreg, struct device *dev
 	vreg->dev	= dev;
 	vreg->type	= rpm_data->type;
 	vreg->id	= rpm_data->id;
+	vreg->active_only = rpm_data->active_only;
+	if (pair && vreg->type == QCOM_SMD_RPM_LDOA && vreg->id == 3)
+		vreg->pair = pair;
+	if (vreg->active_only && !vreg->pair)
+		return -EINVAL;
 
 	memcpy(&vreg->desc, rpm_data->desc, sizeof(vreg->desc));
 	vreg->desc.name = rpm_data->name;
@@ -1479,6 +1630,8 @@ static int rpm_reg_probe(struct platform_device *pdev)
 	const struct rpm_regulator_data *vreg_data;
 	struct qcom_rpm_reg *vreg;
 	struct qcom_smd_rpm *rpm;
+	struct rpm_reg_pair *pair = NULL;
+	struct device_node *pair_node;
 	int ret;
 
 	rpm = dev_get_drvdata(pdev->dev.parent);
@@ -1496,12 +1649,27 @@ static int rpm_reg_probe(struct platform_device *pdev)
 	if (!vreg_data)
 		return -ENODEV;
 
+	pair_node = of_get_available_child_by_name(dev->of_node, "l3-ao");
+	if (pair_node) {
+		of_node_put(pair_node);
+		if (vreg_data != rpm_pm8226_regulators)
+			return dev_err_probe(dev, -EINVAL, "l3-ao requires PM8226\n");
+		pair_node = of_get_available_child_by_name(dev->of_node, "l3");
+		if (!pair_node)
+			return dev_err_probe(dev, -EINVAL, "l3-ao requires l3\n");
+		of_node_put(pair_node);
+		pair = devm_kzalloc(dev, sizeof(*pair), GFP_KERNEL);
+		if (!pair)
+			return -ENOMEM;
+		mutex_init(&pair->lock);
+	}
+
 	for_each_available_child_of_node_scoped(dev->of_node, node) {
 		vreg = devm_kzalloc(&pdev->dev, sizeof(*vreg), GFP_KERNEL);
 		if (!vreg)
 			return -ENOMEM;
 
-		ret = rpm_regulator_init_vreg(vreg, dev, node, vreg_data);
+		ret = rpm_regulator_init_vreg(vreg, dev, node, vreg_data, pair);
 		if (ret < 0)
 			return ret;
 	}
