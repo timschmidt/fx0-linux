@@ -66,6 +66,11 @@ int mdp5_pipe_assign(struct drm_atomic_state *s, struct drm_plane *plane,
 					struct mdp5_hw_pipe *r_cur =
 							mdp5_kms->hwpipes[j];
 
+					/* Both halves must be free in both states. */
+					if (new_state->hwpipe_to_plane[r_cur->idx] ||
+					    old_state->hwpipe_to_plane[r_cur->idx])
+						continue;
+
 					/* reject different types of hwpipes */
 					if (r_cur->caps != cur->caps)
 						continue;
