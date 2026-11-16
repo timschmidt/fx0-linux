@@ -540,6 +540,7 @@ static u32 *qcom_slim_ngd_tx_msg_get(struct qcom_slim_ngd_ctrl *ctrl, int len,
 	struct qcom_slim_ngd_dma_desc *desc;
 	unsigned long flags;
 
+	lockdep_assert_held(&ctrl->tx_lock);
 	spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
 
 	if ((ctrl->tx_tail + 1) % QCOM_SLIM_NGD_DESC_NUM == ctrl->tx_head) {
@@ -554,6 +555,21 @@ static u32 *qcom_slim_ngd_tx_msg_get(struct qcom_slim_ngd_ctrl *ctrl, int len,
 	spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
 
 	return desc->base;
+}
+
+static void qcom_slim_ngd_tx_msg_put(struct qcom_slim_ngd_ctrl *ctrl,
+				     void *buf, bool submitted)
+{
+	unsigned long flags;
+	int index = (buf - ctrl->tx_base) / SLIM_MSGQ_BUF_LEN;
+
+	lockdep_assert_held(&ctrl->tx_lock);
+	spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
+	ctrl->txdesc[index].comp = NULL;
+	/* A submitted buffer stays reserved until its DMA callback retires it. */
+	if (!submitted)
+		ctrl->tx_tail = index;
+	spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
 }
 
 static void qcom_slim_ngd_tx_msg_dma_cb(void *args)
@@ -602,7 +618,7 @@ static int qcom_slim_ngd_tx_msg_post(struct qcom_slim_ngd_ctrl *ctrl,
 
 	desc->desc->callback = qcom_slim_ngd_tx_msg_dma_cb;
 	desc->desc->callback_param = desc;
-	desc->desc->cookie = dmaengine_submit(desc->desc);
+	desc->cookie = dmaengine_submit(desc->desc);
 	dma_async_issue_pending(ctrl->dma_tx_channel);
 	spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
 
@@ -819,7 +835,7 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 	u32 *pbuf;
 	u8 *puc;
 	u8 la = txn->la;
-	bool usr_msg = false;
+	bool usr_msg = false, submitted = false;
 
 	if (txn->mt == SLIM_MSG_MT_CORE &&
 		(txn->mc >= SLIM_MSG_MC_BEGIN_RECONFIGURATION &&
@@ -835,10 +851,12 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 		return -EINVAL;
 	}
 
+	mutex_lock(&ctrl->tx_lock);
 	pbuf = qcom_slim_ngd_tx_msg_get(ctrl, txn->rl, &tx_sent);
 	if (!pbuf) {
 		dev_err(ctrl->dev, "Message buffer unavailable\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto unlock;
 	}
 
 	if (txn->mt == SLIM_MSG_MT_CORE &&
@@ -857,7 +875,8 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 			txn->mc = SLIM_USR_MC_DISCONNECT_PORT;
 			break;
 		default:
-			return -EINVAL;
+			ret = -EINVAL;
+			goto put;
 		}
 
 		usr_msg = true;
@@ -872,7 +891,7 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 		ret = slim_alloc_txn_tid(sctrl, txn);
 		if (ret) {
 			dev_err(ctrl->dev, "Unable to allocate TID\n");
-			return ret;
+			goto put;
 		}
 
 		wbuf[i++] = txn->tid;
@@ -908,19 +927,17 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 	if (txn->msg && txn->msg->wbuf)
 		memcpy(puc, txn->msg->wbuf, txn->msg->num_bytes);
 
-	mutex_lock(&ctrl->tx_lock);
 	ret = qcom_slim_ngd_tx_msg_post(ctrl, pbuf, txn->rl);
-	if (ret) {
-		mutex_unlock(&ctrl->tx_lock);
-		return ret;
-	}
+	if (ret)
+		goto put;
+	submitted = true;
 
 	time_left = wait_for_completion_timeout(&tx_sent, HZ);
 	if (!time_left) {
 		dev_err(sctrl->dev, "TX timed out:MC:0x%x,mt:0x%x", txn->mc,
 					txn->mt);
-		mutex_unlock(&ctrl->tx_lock);
-		return -ETIMEDOUT;
+		ret = -ETIMEDOUT;
+		goto put;
 	}
 
 	if (usr_msg) {
@@ -928,13 +945,17 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 		if (!time_left) {
 			dev_err(sctrl->dev, "TX timed out:MC:0x%x,mt:0x%x",
 				txn->mc, txn->mt);
-			mutex_unlock(&ctrl->tx_lock);
-			return -ETIMEDOUT;
+			ret = -ETIMEDOUT;
+			goto put;
 		}
 	}
 
+	ret = 0;
+put:
+	qcom_slim_ngd_tx_msg_put(ctrl, pbuf, submitted);
+unlock:
 	mutex_unlock(&ctrl->tx_lock);
-	return 0;
+	return ret;
 }
 
 static int qcom_slim_ngd_xfer_msg_sync(struct slim_controller *ctrl,
