@@ -171,6 +171,10 @@ struct qcom_slim_ngd_ctrl {
 	struct pdr_handle *pdr;
 	enum qcom_slim_ngd_state state;
 	bool registered;
+	/* Child admission and bootstrap PM ownership, protected by ssr_lock. */
+	bool child_ready;
+	bool up_requested;
+	bool pm_ref_held;
 	dma_addr_t rx_phys_base;
 	dma_addr_t tx_phys_base;
 	void *rx_base;
@@ -1432,6 +1436,7 @@ static int qcom_slim_ngd_enable(struct qcom_slim_ngd_ctrl *ctrl, bool enable)
 		}
 
 		ctrl->registered = true;
+		ctrl->pm_ref_held = false;
 		pm_runtime_mark_last_busy(ctrl->ctrl.dev);
 		pm_runtime_put(ctrl->ctrl.dev);
 
@@ -1526,11 +1531,10 @@ MODULE_DEVICE_TABLE(of, qcom_slim_ngd_dt_match);
 
 static void qcom_slim_ngd_down(struct qcom_slim_ngd_ctrl *ctrl)
 {
-	mutex_lock(&ctrl->ssr_lock);
+	lockdep_assert_held(&ctrl->ssr_lock);
 	device_for_each_child(ctrl->ctrl.dev, NULL,
 			      qcom_slim_ngd_update_device_status);
 	qcom_slim_ngd_enable(ctrl, false);
-	mutex_unlock(&ctrl->ssr_lock);
 }
 
 static void qcom_slim_ngd_up_worker(struct work_struct *work)
@@ -1539,6 +1543,13 @@ static void qcom_slim_ngd_up_worker(struct work_struct *work)
 	long ret;
 
 	ctrl = container_of(work, struct qcom_slim_ngd_ctrl, ngd_up_work);
+
+	mutex_lock(&ctrl->ssr_lock);
+	if (!ctrl->child_ready || !ctrl->up_requested) {
+		mutex_unlock(&ctrl->ssr_lock);
+		return;
+	}
+	mutex_unlock(&ctrl->ssr_lock);
 
 	/* Make sure qmi service is up before continuing */
 	ret = wait_for_completion_interruptible_timeout(&ctrl->qmi_up,
@@ -1549,18 +1560,26 @@ static void qcom_slim_ngd_up_worker(struct work_struct *work)
 	}
 
 	mutex_lock(&ctrl->ssr_lock);
-	qcom_slim_ngd_enable(ctrl, true);
+	if (ctrl->child_ready && ctrl->up_requested)
+		qcom_slim_ngd_enable(ctrl, true);
 	mutex_unlock(&ctrl->ssr_lock);
 }
 
 static int qcom_slim_ngd_ssr_pdr_notify(struct qcom_slim_ngd_ctrl *ctrl,
 					unsigned long action)
 {
+	mutex_lock(&ctrl->ssr_lock);
 	switch (action) {
 	case QCOM_SSR_BEFORE_SHUTDOWN:
 	case SERVREG_SERVICE_STATE_DOWN:
-		if (ctrl->state != QCOM_SLIM_NGD_CTRL_DOWN) {
-			pm_runtime_get_noresume(ctrl->ctrl.dev);
+		ctrl->up_requested = false;
+		if (!ctrl->child_ready)
+			break;
+		if (ctrl->state != QCOM_SLIM_NGD_CTRL_DOWN || ctrl->registered) {
+			if (!ctrl->pm_ref_held) {
+				pm_runtime_get_noresume(ctrl->ctrl.dev);
+				ctrl->pm_ref_held = true;
+			}
 			ctrl->state = QCOM_SLIM_NGD_CTRL_DOWN;
 			qcom_slim_ngd_down(ctrl);
 			qcom_slim_ngd_exit_dma(ctrl);
@@ -1568,11 +1587,14 @@ static int qcom_slim_ngd_ssr_pdr_notify(struct qcom_slim_ngd_ctrl *ctrl,
 		break;
 	case QCOM_SSR_AFTER_POWERUP:
 	case SERVREG_SERVICE_STATE_UP:
-		schedule_work(&ctrl->ngd_up_work);
+		ctrl->up_requested = true;
+		if (ctrl->child_ready)
+			schedule_work(&ctrl->ngd_up_work);
 		break;
 	default:
 		break;
 	}
+	mutex_unlock(&ctrl->ssr_lock);
 
 	return NOTIFY_OK;
 }
@@ -1676,7 +1698,13 @@ static int qcom_slim_ngd_probe(struct platform_device *pdev)
 	struct qcom_slim_ngd_ctrl *ctrl = dev_get_drvdata(dev->parent);
 	int ret;
 
+	mutex_lock(&ctrl->ssr_lock);
+	ctrl->child_ready = false;
 	ctrl->ctrl.dev = dev;
+	ctrl->state = QCOM_SLIM_NGD_CTRL_DOWN;
+	reinit_completion(&ctrl->qmi_up);
+	reinit_completion(&ctrl->qmi.qmi_comp);
+	mutex_unlock(&ctrl->ssr_lock);
 
 	platform_set_drvdata(pdev, ctrl);
 	pm_runtime_use_autosuspend(dev);
@@ -1684,14 +1712,28 @@ static int qcom_slim_ngd_probe(struct platform_device *pdev)
 	pm_runtime_set_suspended(dev);
 	pm_runtime_enable(dev);
 	pm_runtime_get_noresume(dev);
+	mutex_lock(&ctrl->ssr_lock);
+	ctrl->pm_ref_held = true;
+	mutex_unlock(&ctrl->ssr_lock);
 	ret = qcom_slim_ngd_qmi_svc_event_init(ctrl);
 	if (ret) {
 		dev_err(&pdev->dev, "QMI service registration failed:%d", ret);
+		mutex_lock(&ctrl->ssr_lock);
+		pm_runtime_put_noidle(dev);
+		ctrl->pm_ref_held = false;
+		mutex_unlock(&ctrl->ssr_lock);
 		pm_runtime_dont_use_autosuspend(dev);
 		pm_runtime_disable(dev);
+		return ret;
 	}
 
-	return ret;
+	mutex_lock(&ctrl->ssr_lock);
+	ctrl->child_ready = true;
+	if (ctrl->up_requested)
+		schedule_work(&ctrl->ngd_up_work);
+	mutex_unlock(&ctrl->ssr_lock);
+
+	return 0;
 }
 
 static int qcom_slim_ngd_ctrl_probe(struct platform_device *pdev)
@@ -1816,10 +1858,22 @@ static void qcom_slim_ngd_remove(struct platform_device *pdev)
 {
 	struct qcom_slim_ngd_ctrl *ctrl = platform_get_drvdata(pdev);
 
+	mutex_lock(&ctrl->ssr_lock);
+	ctrl->child_ready = false;
+	mutex_unlock(&ctrl->ssr_lock);
+	cancel_work_sync(&ctrl->ngd_up_work);
+
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
+	mutex_lock(&ctrl->ssr_lock);
 	qcom_slim_ngd_enable(ctrl, false);
 	qcom_slim_ngd_exit_dma(ctrl);
+	ctrl->state = QCOM_SLIM_NGD_CTRL_DOWN;
+	if (ctrl->pm_ref_held) {
+		pm_runtime_put_noidle(&pdev->dev);
+		ctrl->pm_ref_held = false;
+	}
+	mutex_unlock(&ctrl->ssr_lock);
 	qcom_slim_ngd_qmi_svc_event_deinit(&ctrl->qmi);
 }
 
