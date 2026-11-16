@@ -172,7 +172,8 @@ struct qcom_slim_ngd_ctrl {
 	struct pdr_handle *pdr;
 	enum qcom_slim_ngd_state state;
 	bool registered;
-	/* Child admission and bootstrap PM ownership, protected by ssr_lock. */
+	/* Startup admission and bootstrap PM ownership, protected by ssr_lock. */
+	bool parent_ready;
 	bool child_ready;
 	bool up_requested;
 	bool pm_ref_held;
@@ -1495,7 +1496,7 @@ static int qcom_slim_ngd_qmi_new_server(struct qmi_handle *hdl,
 
 	WRITE_ONCE(ctrl->qmi_ready, true);
 	wake_up_all(&ctrl->qmi_wait);
-	if (ctrl->child_ready && ctrl->up_requested)
+	if (ctrl->parent_ready && ctrl->child_ready && ctrl->up_requested)
 		schedule_work(&ctrl->ngd_up_work);
 	mutex_unlock(&ctrl->ssr_lock);
 
@@ -1584,7 +1585,7 @@ static void qcom_slim_ngd_up_worker(struct work_struct *work)
 	ctrl = container_of(work, struct qcom_slim_ngd_ctrl, ngd_up_work);
 
 	mutex_lock(&ctrl->ssr_lock);
-	if (!ctrl->child_ready || !ctrl->up_requested) {
+	if (!ctrl->parent_ready || !ctrl->child_ready || !ctrl->up_requested) {
 		mutex_unlock(&ctrl->ssr_lock);
 		return;
 	}
@@ -1593,6 +1594,7 @@ static void qcom_slim_ngd_up_worker(struct work_struct *work)
 	/* Make sure qmi service is up before continuing */
 	ret = wait_event_interruptible_timeout(ctrl->qmi_wait,
 					       READ_ONCE(ctrl->qmi_ready) ||
+					       !READ_ONCE(ctrl->parent_ready) ||
 					       !READ_ONCE(ctrl->child_ready) ||
 					       !READ_ONCE(ctrl->up_requested),
 					       msecs_to_jiffies(MSEC_PER_SEC));
@@ -1602,7 +1604,8 @@ static void qcom_slim_ngd_up_worker(struct work_struct *work)
 	}
 
 	mutex_lock(&ctrl->ssr_lock);
-	if (ctrl->child_ready && ctrl->up_requested && ctrl->qmi_ready)
+	if (ctrl->parent_ready && ctrl->child_ready &&
+	    ctrl->up_requested && ctrl->qmi_ready)
 		qcom_slim_ngd_enable(ctrl, true);
 	mutex_unlock(&ctrl->ssr_lock);
 }
@@ -1611,6 +1614,15 @@ static void qcom_slim_ngd_stop_up(struct qcom_slim_ngd_ctrl *ctrl)
 {
 	mutex_lock(&ctrl->ssr_lock);
 	WRITE_ONCE(ctrl->child_ready, false);
+	wake_up_all(&ctrl->qmi_wait);
+	mutex_unlock(&ctrl->ssr_lock);
+	cancel_work_sync(&ctrl->ngd_up_work);
+}
+
+static void qcom_slim_ngd_stop_parent_up(struct qcom_slim_ngd_ctrl *ctrl)
+{
+	mutex_lock(&ctrl->ssr_lock);
+	WRITE_ONCE(ctrl->parent_ready, false);
 	wake_up_all(&ctrl->qmi_wait);
 	mutex_unlock(&ctrl->ssr_lock);
 	cancel_work_sync(&ctrl->ngd_up_work);
@@ -1625,7 +1637,7 @@ static int qcom_slim_ngd_ssr_pdr_notify(struct qcom_slim_ngd_ctrl *ctrl,
 	case SERVREG_SERVICE_STATE_DOWN:
 		WRITE_ONCE(ctrl->up_requested, false);
 		wake_up_all(&ctrl->qmi_wait);
-		if (!ctrl->child_ready)
+		if (!ctrl->parent_ready || !ctrl->child_ready)
 			break;
 		if (ctrl->state != QCOM_SLIM_NGD_CTRL_DOWN || ctrl->registered) {
 			if (!ctrl->pm_ref_held) {
@@ -1640,7 +1652,7 @@ static int qcom_slim_ngd_ssr_pdr_notify(struct qcom_slim_ngd_ctrl *ctrl,
 	case QCOM_SSR_AFTER_POWERUP:
 	case SERVREG_SERVICE_STATE_UP:
 		WRITE_ONCE(ctrl->up_requested, true);
-		if (ctrl->child_ready)
+		if (ctrl->parent_ready && ctrl->child_ready)
 			schedule_work(&ctrl->ngd_up_work);
 		break;
 	default:
@@ -1784,7 +1796,7 @@ static int qcom_slim_ngd_probe(struct platform_device *pdev)
 
 	mutex_lock(&ctrl->ssr_lock);
 	WRITE_ONCE(ctrl->child_ready, true);
-	if (ctrl->up_requested)
+	if (ctrl->parent_ready && ctrl->up_requested)
 		schedule_work(&ctrl->ngd_up_work);
 	mutex_unlock(&ctrl->ssr_lock);
 
@@ -1873,18 +1885,17 @@ static int qcom_slim_ngd_ctrl_probe(struct platform_device *pdev)
 
 	enable_irq(irq);
 
-	/*
-	 * The DSP may already be running, as when it boots before this driver
-	 * loads, and then no power-up notification follows. Bring the NGD up
-	 * now; the worker waits for the QMI service.
-	 */
-	schedule_work(&ctrl->ngd_up_work);
+	mutex_lock(&ctrl->ssr_lock);
+	WRITE_ONCE(ctrl->parent_ready, true);
+	if (ctrl->child_ready && ctrl->up_requested)
+		schedule_work(&ctrl->ngd_up_work);
+	mutex_unlock(&ctrl->ssr_lock);
 
 	return 0;
 
 err_unregister_ngd:
+	qcom_slim_ngd_stop_parent_up(ctrl);
 	pdr_handle_release(ctrl->pdr);
-	qcom_slim_ngd_stop_up(ctrl);
 	qcom_slim_ngd_unregister(ctrl);
 	goto err_destroy_mwq;
 err_pdr_release:
@@ -1899,9 +1910,9 @@ static void qcom_slim_ngd_ctrl_remove(struct platform_device *pdev)
 {
 	struct qcom_slim_ngd_ctrl *ctrl = platform_get_drvdata(pdev);
 
+	qcom_slim_ngd_stop_parent_up(ctrl);
 	pdr_handle_release(ctrl->pdr);
 	qcom_unregister_ssr_notifier(ctrl->notifier, &ctrl->nb);
-	qcom_slim_ngd_stop_up(ctrl);
 	disable_irq(ctrl->irq);
 
 	qcom_slim_ngd_unregister(ctrl);
