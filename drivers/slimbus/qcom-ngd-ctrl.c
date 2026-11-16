@@ -152,6 +152,7 @@ struct qcom_slim_ngd_ctrl {
 	struct qcom_slim_ngd_qmi qmi;
 	struct qcom_slim_ngd *ngd;
 	struct device *dev;
+	int irq;
 	void __iomem *base;
 	struct dma_chan *dma_rx_channel;
 	struct dma_chan	*dma_tx_channel;
@@ -1702,6 +1703,7 @@ static int qcom_slim_ngd_ctrl_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
+	ctrl->irq = irq;
 
 	ret = devm_request_irq(dev, irq, qcom_slim_ngd_interrupt,
 			       IRQF_TRIGGER_HIGH | IRQF_NO_AUTOEN,
@@ -1791,6 +1793,7 @@ static void qcom_slim_ngd_ctrl_remove(struct platform_device *pdev)
 	pdr_handle_release(ctrl->pdr);
 	qcom_unregister_ssr_notifier(ctrl->notifier, &ctrl->nb);
 	cancel_work_sync(&ctrl->ngd_up_work);
+	disable_irq(ctrl->irq);
 
 	qcom_slim_ngd_unregister(ctrl);
 
