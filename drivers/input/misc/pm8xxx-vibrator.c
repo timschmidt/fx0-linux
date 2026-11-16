@@ -119,7 +119,7 @@ static int pm8xxx_vib_set(struct pm8xxx_vib *vib, bool on)
 	vib->reg_vib_drv = val;
 
 	if (regs->drv2_mask) {
-		val = vib->level << regs->drv2_shift;
+		val = vib->level >> regs->drv2_shift;
 		rc = regmap_write_bits(vib->regmap, vib->drv2_addr,
 				regs->drv2_mask, on ? val : 0);
 		if (rc < 0)
