@@ -1772,7 +1772,10 @@ static int qcom_slim_ngd_ctrl_probe(struct platform_device *pdev)
 	return 0;
 
 err_unregister_ngd:
+	pdr_handle_release(ctrl->pdr);
+	cancel_work_sync(&ctrl->ngd_up_work);
 	qcom_slim_ngd_unregister(ctrl);
+	goto err_destroy_mwq;
 err_pdr_release:
 	pdr_handle_release(ctrl->pdr);
 err_destroy_mwq:
