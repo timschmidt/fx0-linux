@@ -422,6 +422,8 @@ static int qcom_slim_qmi_send_power_request(struct qcom_slim_ngd_ctrl *ctrl,
 
 	rc = qmi_txn_init(ctrl->qmi.handle, &txn,
 				slimbus_power_resp_msg_v01_ei, &resp);
+	if (rc < 0)
+		return rc;
 
 	rc = qmi_send_request(ctrl->qmi.handle, NULL, &txn,
 				SLIMBUS_QMI_POWER_REQ_V01,
