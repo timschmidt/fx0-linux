@@ -123,6 +123,7 @@ struct slim_framer {
  * @msg: Elemental access message to be read/written
  * @comp: completion if read/write is synchronous, used internally
  *	for tid based transactions.
+ * @prepared: response pointers and PM ownership published under txn_lock.
  */
 struct slim_msg_txn {
 	u8			rl;
@@ -134,6 +135,7 @@ struct slim_msg_txn {
 	u8			la;
 	struct slim_val_inf	*msg;
 	struct	completion	*comp;
+	bool			prepared;
 };
 
 /* Frequently used message transaction structures */
@@ -431,7 +433,8 @@ void slim_msg_response(struct slim_controller *ctrl, u8 *reply, u8 tid, u8 l);
 int slim_do_transfer(struct slim_controller *ctrl, struct slim_msg_txn *txn);
 int slim_ctrl_clk_pause(struct slim_controller *ctrl, bool wakeup, u8 restart);
 int slim_alloc_txn_tid(struct slim_controller *ctrl, struct slim_msg_txn *txn);
-void slim_free_txn_tid(struct slim_controller *ctrl, struct slim_msg_txn *txn);
+int slim_prepare_txn(struct slim_controller *ctrl, struct slim_msg_txn *txn);
+bool slim_free_txn_tid(struct slim_controller *ctrl, struct slim_msg_txn *txn);
 
 static inline bool slim_tid_txn(u8 mt, u8 mc)
 {

@@ -594,7 +594,7 @@ static int qcom_slim_ngd_tx_msg_post(struct qcom_slim_ngd_ctrl *ctrl,
 {
 	struct qcom_slim_ngd_dma_desc *desc;
 	unsigned long flags;
-	int index, offset;
+	int index, offset, ret;
 
 	spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
 	offset = buf - ctrl->tx_base;
@@ -619,6 +619,11 @@ static int qcom_slim_ngd_tx_msg_post(struct qcom_slim_ngd_ctrl *ctrl,
 	desc->desc->callback = qcom_slim_ngd_tx_msg_dma_cb;
 	desc->desc->callback_param = desc;
 	desc->cookie = dmaengine_submit(desc->desc);
+	ret = dma_submit_error(desc->cookie);
+	if (ret) {
+		spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
+		return ret;
+	}
 	dma_async_issue_pending(ctrl->dma_tx_channel);
 	spin_unlock_irqrestore(&ctrl->tx_buf_lock, flags);
 
@@ -835,7 +840,7 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 	u32 *pbuf;
 	u8 *puc;
 	u8 la = txn->la;
-	bool usr_msg = false, submitted = false;
+	bool usr_msg = false, submitted = false, tid_allocated = false;
 
 	if (txn->mt == SLIM_MSG_MT_CORE &&
 		(txn->mc >= SLIM_MSG_MC_BEGIN_RECONFIGURATION &&
@@ -894,12 +899,16 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 			goto put;
 		}
 
+		tid_allocated = true;
 		wbuf[i++] = txn->tid;
 
 		txn->msg->num_bytes = i;
 		txn->msg->wbuf = wbuf;
 		txn->msg->rbuf = rbuf;
 		txn->rl = txn->msg->num_bytes + 4;
+		ret = slim_prepare_txn(sctrl, txn);
+		if (ret)
+			goto put;
 	}
 
 	/* HW expects length field to be excluded */
@@ -953,6 +962,8 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
 	ret = 0;
 put:
 	qcom_slim_ngd_tx_msg_put(ctrl, pbuf, submitted);
+	if (usr_msg && tid_allocated && ret)
+		slim_free_txn_tid(sctrl, txn);
 unlock:
 	mutex_unlock(&ctrl->tx_lock);
 	return ret;
@@ -967,26 +978,31 @@ static int qcom_slim_ngd_xfer_msg_sync(struct slim_controller *ctrl,
 
 	ret = pm_runtime_get_sync(ctrl->dev);
 	if (ret < 0)
-		goto pm_put;
+		goto cancel_response;
 
 	txn->comp = &done;
+	ret = slim_prepare_txn(ctrl, txn);
+	if (ret)
+		goto cancel_response;
 
 	ret = qcom_slim_ngd_xfer_msg(ctrl, txn);
 	if (ret)
-		goto pm_put;
+		goto cancel_response;
 
 	time_left = wait_for_completion_timeout(&done, HZ);
 	if (!time_left) {
-		dev_err(ctrl->dev, "TX timed out:MC:0x%x,mt:0x%x", txn->mc,
-				txn->mt);
+		dev_err(ctrl->dev, "TX timed out:MC:0x%x,mt:0x%x",
+			txn->mc, txn->mt);
 		ret = -ETIMEDOUT;
-		goto pm_put;
+		goto cancel_response;
 	}
-	return 0;
+	goto pm_put;
 
+cancel_response:
+	slim_free_txn_tid(ctrl, txn);
 pm_put:
-	pm_runtime_put(ctrl->dev);
-
+	pm_runtime_mark_last_busy(ctrl->dev);
+	pm_runtime_put_autosuspend(ctrl->dev);
 	return ret;
 }
 

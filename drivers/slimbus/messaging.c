@@ -29,26 +29,29 @@ void slim_msg_response(struct slim_controller *ctrl, u8 *reply, u8 tid, u8 len)
 
 	spin_lock_irqsave(&ctrl->txn_lock, flags);
 	txn = idr_find(&ctrl->tid_idr, tid);
-	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
-
-	if (txn == NULL)
-		return;
+	if (!txn || !txn->prepared)
+		goto unlock;
 
 	msg = txn->msg;
-	if (msg == NULL || msg->rbuf == NULL) {
+	if (!msg || !msg->rbuf || len > msg->num_bytes) {
 		dev_err(ctrl->dev, "Got response to invalid TID:%d, len:%d\n",
 				tid, len);
-		return;
+		goto unlock;
 	}
 
-	slim_free_txn_tid(ctrl, txn);
 	memcpy(msg->rbuf, reply, len);
+	idr_remove(&ctrl->tid_idr, tid);
 	if (txn->comp)
 		complete(txn->comp);
+	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
 
-	/* Remove runtime-pm vote now that response was received for TID txn */
+	/* The response owns the PM reference after retiring its TID. */
 	pm_runtime_mark_last_busy(ctrl->dev);
 	pm_runtime_put_autosuspend(ctrl->dev);
+	return;
+
+unlock:
+	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
 }
 EXPORT_SYMBOL_GPL(slim_msg_response);
 
@@ -66,6 +69,8 @@ int slim_alloc_txn_tid(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 	int ret = 0;
 
 	spin_lock_irqsave(&ctrl->txn_lock, flags);
+	txn->prepared = false;
+	txn->tid = 0;
 	ret = idr_alloc_cyclic(&ctrl->tid_idr, txn, 1,
 				SLIM_MAX_TIDS, GFP_ATOMIC);
 	if (ret < 0) {
@@ -79,18 +84,64 @@ int slim_alloc_txn_tid(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 EXPORT_SYMBOL_GPL(slim_alloc_txn_tid);
 
 /**
+ * slim_prepare_txn() - Publish initialized response pointers for a transaction
+ * @ctrl: Controller handle
+ * @txn: Transaction with an allocated TID and initialized response pointers
+ *
+ * The sender must hold a runtime-PM reference. A prepared transaction acquires
+ * a separate response reference, released by its response or cancellation.
+ *
+ * Return: zero on success, -EINVAL if the TID is no longer owned, or
+ * -EALREADY if response ownership was already published.
+ */
+int slim_prepare_txn(struct slim_controller *ctrl, struct slim_msg_txn *txn)
+{
+	unsigned long flags;
+	int ret = 0;
+
+	spin_lock_irqsave(&ctrl->txn_lock, flags);
+	if (idr_find(&ctrl->tid_idr, txn->tid) != txn) {
+		ret = -EINVAL;
+	} else if (txn->prepared) {
+		ret = -EALREADY;
+	} else {
+		pm_runtime_get_noresume(ctrl->dev);
+		txn->prepared = true;
+	}
+	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(slim_prepare_txn);
+
+/**
  * slim_free_txn_tid() - Free tid of txn
  *
  * @ctrl: Controller handle
  * @txn: transaction whose tid should be freed
+ *
+ * Return: true if this call retired the transaction, false if it no longer
+ * owns its TID. Retirement synchronizes with response copy and completion
+ * and releases the response PM reference of a prepared transaction.
  */
-void slim_free_txn_tid(struct slim_controller *ctrl, struct slim_msg_txn *txn)
+bool slim_free_txn_tid(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 {
 	unsigned long flags;
+	bool released = false;
 
 	spin_lock_irqsave(&ctrl->txn_lock, flags);
-	idr_remove(&ctrl->tid_idr, txn->tid);
+	if (idr_find(&ctrl->tid_idr, txn->tid) == txn) {
+		idr_remove(&ctrl->tid_idr, txn->tid);
+		released = true;
+	}
 	spin_unlock_irqrestore(&ctrl->txn_lock, flags);
+
+	if (released && txn->prepared) {
+		pm_runtime_mark_last_busy(ctrl->dev);
+		pm_runtime_put_autosuspend(ctrl->dev);
+	}
+
+	return released;
 }
 EXPORT_SYMBOL_GPL(slim_free_txn_tid);
 
@@ -114,10 +165,8 @@ int slim_do_transfer(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 	int ret;
 	unsigned long time_left;
 
-	/*
-	 * do not vote for runtime-PM if the transactions are part of clock
-	 * pause sequence
-	 */
+	txn->tid = 0;
+	/* Clock-pause messages do not acquire a runtime-PM reference. */
 	if (ctrl->sched.clk_state == SLIM_CLK_ENTERING_PAUSE &&
 		(txn->mt == SLIM_MSG_MT_CORE &&
 		 txn->mc >= SLIM_MSG_MC_BEGIN_RECONFIGURATION &&
@@ -126,29 +175,32 @@ int slim_do_transfer(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 
 	if (!clk_pause_msg) {
 		ret = pm_runtime_get_sync(ctrl->dev);
-		if (ctrl->sched.clk_state != SLIM_CLK_ACTIVE) {
+		if (ret < 0 || ctrl->sched.clk_state != SLIM_CLK_ACTIVE) {
 			dev_err(ctrl->dev, "ctrl wrong state:%d, ret:%d\n",
 				ctrl->sched.clk_state, ret);
+			if (ret >= 0)
+				ret = -EREMOTEIO;
 			goto slim_xfer_err;
 		}
 	}
-	/* Initialize tid to invalid value */
-	txn->tid = 0;
-	need_tid = slim_tid_txn(txn->mt, txn->mc);
 
+	need_tid = slim_tid_txn(txn->mt, txn->mc);
 	if (need_tid) {
+		txn->comp = txn->msg->comp ?: &done;
 		ret = slim_alloc_txn_tid(ctrl, txn);
 		if (ret)
 			goto slim_xfer_err;
-
-		if (!txn->msg->comp)
-			txn->comp = &done;
+		ret = slim_prepare_txn(ctrl, txn);
+		if (ret) {
+			slim_free_txn_tid(ctrl, txn);
+			goto slim_xfer_err;
+		}
 	}
 
 	ret = ctrl->xfer_msg(ctrl, txn);
-	if (ret == -ETIMEDOUT) {
+	if (ret) {
 		slim_free_txn_tid(ctrl, txn);
-	} else if (!ret && need_tid && !txn->msg->comp) {
+	} else if (need_tid && !txn->msg->comp) {
 		unsigned long ms = txn->rl + HZ;
 
 		time_left = wait_for_completion_timeout(txn->comp,
@@ -164,11 +216,7 @@ int slim_do_transfer(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 			txn->mt, txn->mc, txn->la, ret);
 
 slim_xfer_err:
-	if (!clk_pause_msg && (txn->tid == 0  || ret == -ETIMEDOUT)) {
-		/*
-		 * remove runtime-pm vote if this was TX only, or
-		 * if there was error during this transaction
-		 */
+	if (!clk_pause_msg) {
 		pm_runtime_mark_last_busy(ctrl->dev);
 		pm_runtime_put_autosuspend(ctrl->dev);
 	}
