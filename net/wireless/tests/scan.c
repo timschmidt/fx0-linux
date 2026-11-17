@@ -840,6 +840,176 @@ static void test_cfg80211_parse_colocated_ap(struct kunit *test)
 	cfg80211_free_coloc_ap_list(&coloc_ap_list);
 }
 
+/* Synthetic input on an unregistered test wiphy; no scan or radio operation. */
+static const struct mbssid_profile_case {
+	const char *desc;
+	size_t length;
+} mbssid_profile_cases[] = {
+	{ "length_20", 20 },
+	{ "length_252", 252 },
+	{ "length_253", 253 },
+	{ "length_254", 254 },
+	{ "length_255", 255 },
+	{ "length_256", 256 },
+	{ "length_257", 257 },
+	{ "length_258", 258 },
+	{ "length_299", 299 },
+	{ "length_300", 300 },
+	{ "length_301", 301 },
+	{ "length_508", 508 },
+	{ "length_511", 511 },
+	{ "length_512", 512 },
+	{ "length_513", 513 },
+	{ "length_768", 768 },
+	{ "length_1024", 1024 },
+	{ "length_1536", 1536 },
+};
+
+KUNIT_ARRAY_PARAM_DESC(mbssid_profile, mbssid_profile_cases, desc)
+
+static void test_inform_bss_mbssid_profile(struct kunit *test)
+{
+	const struct mbssid_profile_case *params = test->param_value;
+	int unused_ctx = 0;
+	struct wiphy *wiphy = T_WIPHY(test, unused_ctx);
+	struct cfg80211_inform_bss inform = { .signal = 50 };
+	struct sk_buff *input = kunit_zalloc_skb(test, 2048, GFP_KERNEL);
+	struct sk_buff *profile = kunit_zalloc_skb(test, 2048, GFP_KERNEL);
+	const u8 bssid[ETH_ALEN] = { 0x02, 0, 0, 0, 0, 0x10 };
+	const u8 child[ETH_ALEN] = { 0x02, 0, 0, 0, 0, 0x11 };
+	const struct cfg80211_bss_ies *ies;
+	struct cfg80211_bss *parent, *nontrans;
+	const u8 *rates;
+	size_t remaining, offset;
+
+	KUNIT_ASSERT_NOT_NULL(test, input);
+	KUNIT_ASSERT_NOT_NULL(test, profile);
+	wiphy->support_mbssid = true;
+	inform.chan = ieee80211_get_channel_khz(wiphy, MHZ_TO_KHZ(2412));
+	KUNIT_ASSERT_NOT_NULL(test, inform.chan);
+
+	skb_put_u8(profile, WLAN_EID_NON_TX_BSSID_CAP);
+	skb_put_u8(profile, 2);
+	skb_put_u8(profile, WLAN_CAPABILITY_ESS);
+	skb_put_u8(profile, 0);
+	skb_put_u8(profile, WLAN_EID_SSID);
+	skb_put_u8(profile, 4);
+	skb_put_data(profile, "CHLD", 4);
+	remaining = params->length - profile->len - 6;
+	while (remaining) {
+		size_t payload = min_t(size_t, remaining - 2, 200);
+
+		if (remaining - payload - 2 == 1)
+			payload--;
+		skb_put_u8(profile, WLAN_EID_VENDOR_SPECIFIC);
+		skb_put_u8(profile, payload);
+		memset(skb_put(profile, payload), 0x5a, payload);
+		remaining -= payload + 2;
+	}
+	/* Keep the index and final marker at the end of long profiles. */
+	skb_put_u8(profile, WLAN_EID_MULTI_BSSID_IDX);
+	skb_put_u8(profile, 1);
+	skb_put_u8(profile, 1);
+	skb_put_u8(profile, WLAN_EID_SUPP_RATES);
+	skb_put_u8(profile, 1);
+	skb_put_u8(profile, 0x82);
+	KUNIT_ASSERT_EQ(test, profile->len, params->length);
+
+	skb_put_u8(input, WLAN_EID_SSID);
+	skb_put_u8(input, 4);
+	skb_put_data(input, "ROOT", 4);
+	for (offset = 0; offset < profile->len;) {
+		size_t length = min_t(size_t, profile->len - offset, 252);
+
+		/* A continuation must contain at least two bytes. */
+		if (profile->len - offset - length == 1)
+			length--;
+
+		skb_put_u8(input, WLAN_EID_MULTIPLE_BSSID);
+		skb_put_u8(input, length + 3);
+		skb_put_u8(input, 1);
+		skb_put_u8(input, 0);
+		skb_put_u8(input, length);
+		skb_put_data(input, profile->data + offset, length);
+		offset += length;
+	}
+	parent = cfg80211_inform_bss_data(wiphy, &inform,
+					  CFG80211_BSS_FTYPE_PRESP, bssid, 1,
+					  WLAN_CAPABILITY_ESS, 100,
+					  input->data, input->len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, parent);
+	/* Release the caller reference before any assertion can abort the test. */
+	cfg80211_put_bss(wiphy, parent);
+	nontrans = cfg80211_get_bss(wiphy, inform.chan, child, "CHLD", 4,
+				    IEEE80211_BSS_TYPE_ANY, IEEE80211_PRIVACY_ANY);
+	KUNIT_ASSERT_NOT_NULL(test, nontrans);
+	rcu_read_lock();
+	ies = rcu_dereference(nontrans->ies);
+	KUNIT_EXPECT_EQ(test, ies->len, params->length - 4);
+	rates = cfg80211_find_ie(WLAN_EID_SUPP_RATES, ies->data, ies->len);
+	KUNIT_EXPECT_NOT_NULL(test, rates);
+	if (rates)
+		KUNIT_EXPECT_EQ(test, rates[2], 0x82);
+	rcu_read_unlock();
+	cfg80211_put_bss(wiphy, nontrans);
+}
+
+struct mbssid_reject_context {
+	struct cfg80211_bss *child;
+};
+
+static void mbssid_reject_capture(struct wiphy *wiphy, struct cfg80211_bss *bss,
+				  const struct cfg80211_bss_ies *ies, void *drv_data)
+{
+	struct mbssid_reject_context *ctx = t_wiphy_ctx(wiphy);
+
+	if (bss->transmitted_bss)
+		ctx->child = bss;
+}
+
+static void test_inform_bss_mbssid_rejected_refs(struct kunit *test)
+{
+	struct mbssid_reject_context ctx = {};
+	struct wiphy *wiphy = T_WIPHY(test, ctx);
+	struct t_wiphy_priv *priv = wiphy_priv(wiphy);
+	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wiphy);
+	struct cfg80211_inform_bss inform = { .signal = 50 };
+	const u8 bssid[ETH_ALEN] = { 0x02, 0, 0, 0, 0, 0x20 };
+	/* No SSID in either profile: the child is rejected after cache insertion. */
+	const u8 input[] = {
+		WLAN_EID_MULTIPLE_BSSID, 13, 1, 0, 10,
+		WLAN_EID_NON_TX_BSSID_CAP, 2, WLAN_CAPABILITY_ESS, 0,
+		WLAN_EID_MULTI_BSSID_IDX, 1, 1,
+		WLAN_EID_SUPP_RATES, 1, 0x82,
+	};
+	struct cfg80211_bss *parent;
+	unsigned int refs;
+	int i;
+
+	wiphy->support_mbssid = true;
+	priv->ops->inform_bss = mbssid_reject_capture;
+	inform.chan = ieee80211_get_channel_khz(wiphy, MHZ_TO_KHZ(2412));
+	KUNIT_ASSERT_NOT_NULL(test, inform.chan);
+	for (i = 0; i < 16; i++) {
+		ctx.child = NULL;
+		parent = cfg80211_inform_bss_data(wiphy, &inform,
+						  CFG80211_BSS_FTYPE_PRESP, bssid, i,
+						  WLAN_CAPABILITY_ESS, 100,
+						  input, sizeof(input), GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, parent);
+		KUNIT_EXPECT_EQ(test, rdev->bss_entries, 1);
+		KUNIT_EXPECT_TRUE(test, list_empty(&parent->nontrans_list));
+		spin_lock_bh(&rdev->bss_lock);
+		refs = bss_from_pub(parent)->refcount;
+		spin_unlock_bh(&rdev->bss_lock);
+		KUNIT_EXPECT_EQ(test, refs, 2);
+		/* Retire the lost caller reference only in a failing baseline run. */
+		if (refs > 2 && ctx.child)
+			cfg80211_put_bss(wiphy, ctx.child);
+		cfg80211_put_bss(wiphy, parent);
+	}
+}
+
 static struct kunit_case gen_new_ie_test_cases[] = {
 	KUNIT_CASE_PARAM(test_gen_new_ie, gen_new_ie_gen_params),
 	KUNIT_CASE(test_gen_new_ie_malformed),
@@ -854,6 +1024,8 @@ static struct kunit_suite gen_new_ie = {
 kunit_test_suite(gen_new_ie);
 
 static struct kunit_case inform_bss_test_cases[] = {
+	KUNIT_CASE_PARAM(test_inform_bss_mbssid_profile, mbssid_profile_gen_params),
+	KUNIT_CASE(test_inform_bss_mbssid_rejected_refs),
 	KUNIT_CASE(test_inform_bss_ssid_only),
 	KUNIT_CASE_PARAM(test_inform_bss_ml_sta, inform_bss_ml_sta_gen_params),
 	{}
