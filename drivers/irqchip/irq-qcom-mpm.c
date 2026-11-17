@@ -11,14 +11,20 @@
 #include <linux/io.h>
 #include <linux/irqchip.h>
 #include <linux/irqdomain.h>
+#include <linux/irqdesc.h>
+#include <linux/rcupdate.h>
 #include <linux/mailbox_client.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
+#include <linux/of_irq.h>
+#include <linux/cpu.h>
+#include <linux/smp.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/slab.h>
+#include <linux/soc/qcom/mpm.h>
 #include <linux/soc/qcom/irq.h>
 #include <linux/spinlock.h>
 
@@ -75,6 +81,11 @@ struct mpm_gic_map {
 	irq_hw_number_t hwirq;
 };
 
+struct qcom_mpm_wake_domain {
+	struct device_node *node;
+	unsigned int pin;
+};
+
 struct qcom_mpm_priv {
 	void __iomem *base;
 	raw_spinlock_t lock;
@@ -85,6 +96,13 @@ struct qcom_mpm_priv {
 	unsigned int reg_stride;
 	struct irq_domain *domain;
 	struct generic_pm_domain genpd;
+	struct device *sleep_owner;
+	u32 *sleep_image;
+	unsigned int pin_count;
+	bool sleep_prepared;
+	int irq;
+	struct qcom_mpm_wake_domain *wake_domains;
+	unsigned int wake_domain_count;
 };
 
 static u32 qcom_mpm_read(struct qcom_mpm_priv *priv, unsigned int reg,
@@ -275,12 +293,19 @@ static irqreturn_t qcom_mpm_handler(int irq, void *dev_id)
 		enable = qcom_mpm_read(priv, MPM_REG_ENABLE, i);
 		pending = qcom_mpm_read(priv, MPM_REG_STATUS, i);
 		pending &= enable;
+		if (priv->sleep_owner)
+			qcom_mpm_write(priv, MPM_REG_STATUS, i, 0);
 		raw_spin_unlock_irqrestore(&priv->lock, flags);
 
 		for_each_set_bit(j, &pending, 32) {
 			unsigned int pin = 32 * i + j;
 			struct irq_desc *desc = irq_resolve_mapping(priv->domain, pin);
-			struct irq_data *d = &desc->irq_data;
+			struct irq_data *d;
+
+			ret = IRQ_HANDLED;
+			if (!desc)
+				continue;
+			d = &desc->irq_data;
 
 			if (!irqd_is_level_type(d))
 				irq_set_irqchip_state(d->irq,
@@ -292,12 +317,242 @@ static irqreturn_t qcom_mpm_handler(int irq, void *dev_id)
 	return ret;
 }
 
+/* The coordinator retains a supplier link and serializes with system sleep. */
+int qcom_mpm_register_sleep(struct device *dev, struct device *owner)
+{
+	struct qcom_mpm_priv *priv = dev_get_drvdata(dev);
+
+	if (!priv || !owner)
+		return -EPROBE_DEFER;
+	if (!priv->sleep_image)
+		return -EOPNOTSUPP;
+	if (cmpxchg(&priv->sleep_owner, NULL, owner))
+		return -EBUSY;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_mpm_register_sleep);
+
+int qcom_mpm_unregister_sleep(struct device *dev, struct device *owner)
+{
+	struct qcom_mpm_priv *priv = dev_get_drvdata(dev);
+
+	if (priv->sleep_prepared)
+		return -EBUSY;
+	return cmpxchg(&priv->sleep_owner, owner, NULL) == owner ? 0 : -ESTALE;
+}
+EXPORT_SYMBOL_GPL(qcom_mpm_unregister_sleep);
+
+int qcom_mpm_prepare_sleep(struct device *dev, struct device *owner)
+{
+	struct qcom_mpm_priv *priv = dev_get_drvdata(dev);
+	unsigned long flags, enabled;
+	bool any = false;
+	int i, j, reg, ret = 0;
+
+	if (priv->sleep_owner != owner || priv->sleep_prepared)
+		return -EINVAL;
+	if (irqs_disabled())
+		return -EPERM;
+	raw_spin_lock_irqsave(&priv->lock, flags);
+	for (reg = 0; reg < MPM_REG_STATUS; reg++)
+		for (i = 0; i < priv->reg_stride; i++)
+			priv->sleep_image[reg * priv->reg_stride + i] =
+				qcom_mpm_read(priv, reg, i);
+	for (i = 0; i < priv->reg_stride; i++) {
+		enabled = priv->sleep_image[i];
+		for_each_set_bit(j, &enabled, 32) {
+			unsigned int pin = i * 32 + j;
+
+			if (pin >= priv->pin_count || !irq_resolve_mapping(priv->domain, pin)) {
+				ret = -EINVAL;
+				goto unlock;
+			}
+			any = true;
+		}
+	}
+	if (!any) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+	/* System RAM sleep uses device/RTC wake, not a running Linux tick. */
+	writel_relaxed(U32_MAX, priv->base);
+	writel_relaxed(U32_MAX, priv->base + 4);
+	for (i = 0; i < priv->reg_stride; i++)
+		qcom_mpm_write(priv, MPM_REG_STATUS, i, 0);
+	/* Publish timer and wake-mask state before notifying RPM. */
+	wmb();
+unlock:
+	raw_spin_unlock_irqrestore(&priv->lock, flags);
+	if (ret)
+		return ret;
+
+	/* Mailbox and regmap may use ordinary locks on RT: local IRQs stay on. */
+	ret = mbox_send_message(priv->mbox_chan, NULL);
+	if (ret < 0)
+		return ret;
+	mbox_client_txdone(priv->mbox_chan, 0);
+	WRITE_ONCE(priv->sleep_prepared, true);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_mpm_prepare_sleep);
+
+static void qcom_mpm_put_node(void *node)
+{
+	of_node_put(node);
+}
+
+/* Non-hierarchical interrupt controllers need their physical parent recorded. */
+static int qcom_mpm_init_wake_domains(struct device *dev, struct qcom_mpm_priv *priv)
+{
+	struct of_phandle_args parent;
+	struct device_node *node;
+	unsigned int count = 0;
+	int ret;
+
+	for_each_node_with_property(node, "interrupt-controller") {
+		if (!of_device_is_available(node) || of_irq_count(node) != 1 ||
+		    of_irq_parse_one(node, 0, &parent))
+			continue;
+		if (parent.np == dev->of_node && parent.args_count == 2 &&
+		    parent.args[0] < priv->pin_count &&
+		    get_mpm_gic_map(priv, parent.args[0]))
+			count++;
+		of_node_put(parent.np);
+	}
+	if (!count)
+		return 0;
+	priv->wake_domains = devm_kcalloc(dev, count, sizeof(*priv->wake_domains), GFP_KERNEL);
+	if (!priv->wake_domains)
+		return -ENOMEM;
+	for_each_node_with_property(node, "interrupt-controller") {
+		if (!of_device_is_available(node) || of_irq_count(node) != 1 ||
+		    of_irq_parse_one(node, 0, &parent))
+			continue;
+		if (parent.np == dev->of_node && parent.args_count == 2 &&
+		    parent.args[0] < priv->pin_count &&
+		    get_mpm_gic_map(priv, parent.args[0])) {
+			/* The target has a fixed DT; tolerate concurrent additions safely. */
+			if (priv->wake_domain_count == count) {
+				of_node_put(parent.np);
+				of_node_put(node);
+				return -EAGAIN;
+			}
+			of_node_get(node);
+			ret = devm_add_action_or_reset(dev, qcom_mpm_put_node, node);
+			if (ret) {
+				of_node_put(parent.np);
+				of_node_put(node);
+				return ret;
+			}
+			priv->wake_domains[priv->wake_domain_count].node = node;
+			priv->wake_domains[priv->wake_domain_count++].pin = parent.args[0];
+		}
+		of_node_put(parent.np);
+	}
+	return 0;
+}
+
+static bool qcom_mpm_pin_enabled(struct qcom_mpm_priv *priv, irq_hw_number_t pin)
+{
+	return pin < priv->pin_count && priv->sleep_image[pin / 32] & BIT(pin % 32);
+}
+
+static bool qcom_mpm_irq_covered(struct qcom_mpm_priv *priv, struct irq_data *data)
+{
+	struct irq_data *parent;
+	unsigned int i;
+
+	for (parent = data; parent; parent = parent->parent_data)
+		if (parent->domain == priv->domain)
+			return qcom_mpm_pin_enabled(priv, parent->hwirq) &&
+			       (parent != data || get_mpm_gic_map(priv, parent->hwirq));
+	if (!data->domain)
+		return false;
+	for (i = 0; i < priv->wake_domain_count; i++)
+		if (data->domain->fwnode == of_fwnode_handle(priv->wake_domains[i].node))
+			return qcom_mpm_pin_enabled(priv, priv->wake_domains[i].pin);
+	return false;
+}
+
+static bool qcom_mpm_wake_covered(struct qcom_mpm_priv *priv)
+{
+	struct irq_desc *desc;
+	struct irq_data *data;
+	struct irqaction *action;
+	unsigned int irq;
+	bool covered = true, required;
+
+	/* No other CPU or interrupt can change action/domain ownership at entry. */
+	rcu_read_lock();
+	for_each_irq_desc(irq, desc) {
+		data = irq_desc_get_irq_data(desc);
+		if (irq == priv->irq)
+			continue;
+		required = irqd_is_wakeup_armed(data);
+		if (!required && !irqd_irq_disabled(data)) {
+			/* CPU-local timers/IPIs are saved and stopped by CPU PM/syscore. */
+			if (data->domain == priv->domain->parent && data->hwirq < 32)
+				continue;
+			for (action = desc->action; action; action = action->next)
+				if (action->flags & IRQF_NO_SUSPEND)
+					required = true;
+		}
+		if (required && !qcom_mpm_irq_covered(priv, data)) {
+			covered = false;
+			break;
+		}
+	}
+	rcu_read_unlock();
+	return covered;
+}
+
+bool qcom_mpm_sleep_ready(struct device *dev, struct device *owner)
+{
+	struct qcom_mpm_priv *priv = dev_get_drvdata(dev);
+	unsigned long flags;
+	bool ready = true;
+	int reg, i;
+
+	if (!irqs_disabled() || raw_smp_processor_id() || num_online_cpus() != 1 ||
+	    READ_ONCE(priv->sleep_owner) != owner || !READ_ONCE(priv->sleep_prepared) ||
+	    !qcom_mpm_wake_covered(priv))
+		return false;
+	raw_spin_lock_irqsave(&priv->lock, flags);
+	for (reg = 0; reg < MPM_REG_STATUS; reg++)
+		for (i = 0; i < priv->reg_stride; i++)
+			if (qcom_mpm_read(priv, reg, i) !=
+			    priv->sleep_image[reg * priv->reg_stride + i])
+				ready = false;
+	if (readl_relaxed(priv->base) != U32_MAX || readl_relaxed(priv->base + 4) != U32_MAX)
+		ready = false;
+	raw_spin_unlock_irqrestore(&priv->lock, flags);
+	return ready;
+}
+EXPORT_SYMBOL_GPL(qcom_mpm_sleep_ready);
+
+int qcom_mpm_finish_sleep(struct device *dev, struct device *owner)
+{
+	struct qcom_mpm_priv *priv = dev_get_drvdata(dev);
+
+	if (priv->sleep_owner != owner)
+		return -ESTALE;
+	if (!priv->sleep_prepared)
+		return 0;
+	/* GIC/CPU context is restored; device IRQs have not resumed yet. */
+	qcom_mpm_handler(0, priv);
+	WRITE_ONCE(priv->sleep_prepared, false);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_mpm_finish_sleep);
+
 static int mpm_pd_power_off(struct generic_pm_domain *genpd)
 {
 	struct qcom_mpm_priv *priv = container_of(genpd, struct qcom_mpm_priv,
 						  genpd);
 	int i, ret;
 
+	if (READ_ONCE(priv->sleep_owner))
+		return -EBUSY;
 	for (i = 0; i < priv->reg_stride; i++)
 		qcom_mpm_write(priv, MPM_REG_STATUS, i, 0);
 
@@ -345,7 +600,17 @@ static int qcom_mpm_probe(struct platform_device *pdev, struct device_node *pare
 		return ret;
 	}
 
+	if (!pin_cnt || pin_cnt > 1024)
+		return -EINVAL;
+	priv->pin_count = pin_cnt;
 	priv->reg_stride = DIV_ROUND_UP(pin_cnt, 32);
+	if (IS_ENABLED(CONFIG_QCOM_MSM8226_PM) && dev->parent &&
+	    of_device_is_compatible(dev->parent->of_node, "qcom,msm8226-rpm-proc")) {
+		priv->sleep_image = devm_kcalloc(dev, MPM_REG_STATUS * priv->reg_stride,
+						 sizeof(*priv->sleep_image), GFP_KERNEL);
+		if (!priv->sleep_image)
+			return -ENOMEM;
+	}
 
 	ret = of_property_count_u32_elems(np, "qcom,mpm-pin-map");
 	if (ret < 0) {
@@ -381,6 +646,11 @@ static int qcom_mpm_probe(struct platform_device *pdev, struct device_node *pare
 	}
 
 	raw_spin_lock_init(&priv->lock);
+	if (priv->sleep_image) {
+		ret = qcom_mpm_init_wake_domains(dev, priv);
+		if (ret)
+			return ret;
+	}
 
 	/* If we have a handle to an RPM message ram partition, use it. */
 	msgram_np = of_parse_phandle(np, "qcom,rpm-msg-ram", 0);
@@ -414,6 +684,7 @@ static int qcom_mpm_probe(struct platform_device *pdev, struct device_node *pare
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
+	priv->irq = irq;
 
 	genpd = &priv->genpd;
 	genpd->flags = GENPD_FLAG_IRQ_SAFE;
@@ -469,6 +740,7 @@ static int qcom_mpm_probe(struct platform_device *pdev, struct device_node *pare
 		goto remove_domain;
 	}
 
+	dev_set_drvdata(dev, priv);
 	return 0;
 
 remove_domain:
