@@ -6,6 +6,11 @@
 
 struct qcom_smd_rpm;
 
+/* Initialize to zero and keep alive, at the same address, until thaw. */
+struct qcom_rpm_smd_sleep_token {
+	u64 cookie;
+};
+
 #define QCOM_SMD_RPM_ACTIVE_STATE	0
 #define QCOM_SMD_RPM_SLEEP_STATE	1
 #define QCOM_SMD_RPM_STATE_NUM		2
@@ -64,5 +69,10 @@ int qcom_rpm_smd_write(struct qcom_smd_rpm *rpm,
 		       int state,
 		       u32 resource_type, u32 resource_id,
 		       void *buf, size_t count);
+
+int qcom_rpm_smd_freeze(struct qcom_smd_rpm *rpm,
+			struct qcom_rpm_smd_sleep_token *token);
+int qcom_rpm_smd_thaw(struct qcom_smd_rpm *rpm,
+		      struct qcom_rpm_smd_sleep_token *token);
 
 #endif

@@ -9,6 +9,7 @@
 #include <linux/of_platform.h>
 #include <linux/io.h>
 #include <linux/interrupt.h>
+#include <linux/irqflags.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/unaligned.h>
@@ -29,6 +30,11 @@
  * @msg_id:		last request identifier allocated on this channel
  * @pending_id:		identifier expected by the current waiter
  * @waiting:		whether the current request can still accept a response
+ * @sleep_owner:	address of the token holding request admission closed
+ * @sleep_sequence:	last sleep token identifier, never reused on this channel
+ * @uncertain:		a request failed after submission was attempted
+ *
+ * The request mutex also protects sleep admission and uncertainty state.
  */
 struct qcom_smd_rpm {
 	struct rpmsg_endpoint *rpm_channel;
@@ -41,6 +47,9 @@ struct qcom_smd_rpm {
 	u32 msg_id;
 	u32 pending_id;
 	bool waiting;
+	const struct qcom_rpm_smd_sleep_token *sleep_owner;
+	u64 sleep_sequence;
+	bool uncertain;
 };
 
 /**
@@ -93,6 +102,87 @@ struct qcom_rpm_message {
 #define RPM_MSG_TYPE_MSG_ID		0x2367736d /* "msg#" */
 
 /**
+ * qcom_rpm_smd_freeze - drain requests and close admission for system sleep
+ * @rpm: RPM channel, kept bound by the caller throughout the transaction
+ * @token: zero-initialized, exclusively owned token retained until thaw
+ *
+ * Call with IRQs enabled, after all synchronous sleep votes, before the SMD
+ * receive IRQ is suspended. Taking the request mutex drains the current
+ * send/ACK pair. Later writers fail with -EBUSY instead of waiting across
+ * suspend. No mutex remains held on return.
+ *
+ * A failed request may already have changed firmware state. Such a channel
+ * cannot authorize deep sleep again until reprobed, even if later requests
+ * succeed. This gate establishes transport quiescence, not voltage readiness,
+ * MPM wake routing, receive-IRQ masking or permission to collapse the system.
+ *
+ * Return: 0 on success, or a negative error code.
+ */
+int qcom_rpm_smd_freeze(struct qcom_smd_rpm *rpm,
+			struct qcom_rpm_smd_sleep_token *token)
+{
+	int ret = 0;
+
+	if (!rpm || !token || token->cookie)
+		return -EINVAL;
+	if (irqs_disabled())
+		return -EPERM;
+
+	mutex_lock(&rpm->lock);
+	if (rpm->sleep_owner) {
+		ret = -EBUSY;
+	} else if (rpm->uncertain) {
+		ret = -EIO;
+	} else if (rpm->sleep_sequence == U64_MAX) {
+		ret = -EOVERFLOW;
+	} else {
+		token->cookie = ++rpm->sleep_sequence;
+		rpm->sleep_owner = token;
+	}
+	mutex_unlock(&rpm->lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(qcom_rpm_smd_freeze);
+
+/**
+ * qcom_rpm_smd_thaw - reopen request admission after system sleep or abort
+ * @rpm: RPM channel used by freeze
+ * @token: original token at its original address
+ *
+ * Call with IRQs enabled and the receive IRQ restored, before any synchronous
+ * voltage/clock recovery requests. Also call inline on failure after a
+ * successful freeze if the failing preparation callback will not be resumed.
+ * The caller must serialize use of its token and keep the supplier bound.
+ * A copied, stale or other-channel token cannot release admission.
+ *
+ * Return: 0 on success, or a negative error code with admission unchanged.
+ */
+int qcom_rpm_smd_thaw(struct qcom_smd_rpm *rpm,
+		      struct qcom_rpm_smd_sleep_token *token)
+{
+	int ret = 0;
+
+	if (!rpm || !token)
+		return -EINVAL;
+	if (irqs_disabled())
+		return -EPERM;
+
+	mutex_lock(&rpm->lock);
+	if (rpm->sleep_owner != token || !token->cookie ||
+	    token->cookie != rpm->sleep_sequence) {
+		ret = -ESTALE;
+	} else {
+		rpm->sleep_owner = NULL;
+		token->cookie = 0;
+	}
+	mutex_unlock(&rpm->lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(qcom_rpm_smd_thaw);
+
+/**
  * qcom_rpm_smd_write - write @buf to @type:@id
  * @rpm:	rpm handle
  * @state:	active/sleep state flags
@@ -127,6 +217,10 @@ int qcom_rpm_smd_write(struct qcom_smd_rpm *rpm,
 		return -ENOMEM;
 
 	mutex_lock(&rpm->lock);
+	if (rpm->sleep_owner) {
+		ret = -EBUSY;
+		goto unlock;
+	}
 
 	pkt->hdr.service_type = cpu_to_le32(RPM_SERVICE_TYPE_REQUEST);
 	pkt->hdr.length = cpu_to_le32(sizeof(struct qcom_rpm_request) + count);
@@ -165,6 +259,9 @@ out:
 	spin_lock_irqsave(&rpm->ack_lock, flags);
 	rpm->waiting = false;
 	spin_unlock_irqrestore(&rpm->ack_lock, flags);
+	if (ret)
+		rpm->uncertain = true;
+unlock:
 	kfree(pkt);
 	mutex_unlock(&rpm->lock);
 	return ret;
