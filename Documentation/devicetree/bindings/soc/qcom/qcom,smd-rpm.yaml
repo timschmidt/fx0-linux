@@ -62,6 +62,9 @@ properties:
               - qcom,rpm-sm6375
           - const: qcom,glink-smd-rpm
 
+  system-sleep:
+    $ref: /schemas/power/qcom,msm8226-system-pm.yaml#
+
   clock-controller:
     $ref: /schemas/clock/qcom,rpmcc.yaml#
     unevaluatedProperties: false
@@ -80,6 +83,19 @@ properties:
     description: Channel name used for the RPM communication
     items:
       - const: rpm_requests
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,rpm-msm8226
+    then:
+      properties:
+        system-sleep: true
+    else:
+      properties:
+        system-sleep: false
 
 patternProperties:
   "^regulators(-[01])?$":
