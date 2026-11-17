@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/* Experimental full-system suspend target; physical acceptance is separate. */
+#include "qcom-msm8926-lg-madai-cpr.dts"
+
+&rpm {
+	mpm: interrupt-controller {
+		compatible = "qcom,mpm";
+		qcom,rpm-msg-ram = <&apss_mpm>;
+		interrupt-parent = <&intc>;
+		interrupts = <GIC_SPI 171 IRQ_TYPE_EDGE_RISING>;
+		mboxes = <&apcs 1>;
+		interrupt-controller;
+		#address-cells = <0>;
+		#interrupt-cells = <2>;
+		#power-domain-cells = <0>;
+		qcom,mpm-pin-count = <64>;
+		/* Vendor GIC hwirqs include 32; the current binding takes SPIs. */
+		qcom,mpm-pin-map = <2 184>,
+				   <47 140>,
+				   <53 72>,
+				   <62 190>;
+	};
+};
+
+&rpm_msg_ram {
+	apss_mpm: sram@1d0 {
+		reg = <0x1d0 0x30>;
+	};
+};
+
+&rpm_requests {
+	system-sleep {
+		compatible = "qcom,msm8226-system-pm";
+		qcom,cpr = <&cpr>;
+		qcom,mpm = <&mpm>;
+		qcom,l2-spm = <&saw_l2>;
+	};
+};
+
+&tlmm {
+	wakeup-parent = <&mpm>;
+};
+
+&spmi_bus {
+	/delete-property/ interrupts;
+	interrupts-extended = <&mpm 62 IRQ_TYPE_LEVEL_HIGH>;
+};
+
+&mdss {
+	/delete-property/ interrupts;
+	interrupts-extended = <&mpm 53 IRQ_TYPE_LEVEL_HIGH>;
+};
+
+&tsens {
+	/delete-property/ interrupts;
+	interrupts-extended = <&mpm 2 IRQ_TYPE_LEVEL_HIGH>;
+};
