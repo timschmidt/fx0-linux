@@ -14,6 +14,7 @@
 #include <linux/list.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/bitops.h>
 #include <linux/slab.h>
 #include <linux/of.h>
@@ -32,6 +33,7 @@
 
 #include "cpr-voltage.h"
 #include "cpr-sleep.h"
+#include "cpr-msm8926-suspend.h"
 #include "cpr-msm8926-corner.h"
 #include "cpr-msm8926-fuses.h"
 
@@ -234,6 +236,10 @@ struct corner {
 };
 
 struct cpr_msm8926_data {
+	struct cpr_msm8926_suspend sleep;
+	struct device *suspend_owner;
+	bool suspend_irq_disabled;
+	bool suspend_was_applied;
 	struct cpr_msm8926_calibration calibration;
 	struct cpr_msm8926_voltage_plan plan;
 	bool apc_enabled;
@@ -274,6 +280,7 @@ struct cpr_drv {
 	struct dentry *debugfs;
 	struct cpr_msm8926_data *msm8926;
 	bool suspended;
+	int irq;
 
 	struct fuse_corner	fuse_corners[];
 };
@@ -2176,6 +2183,7 @@ static int cpr_probe(struct platform_device *pdev)
 	if (drv->msm8926)
 		cpr_ctl_disable(drv);
 
+	drv->irq = irq;
 	ret = devm_request_threaded_irq(dev, irq, NULL,
 					cpr_irq_handler,
 					IRQF_ONESHOT | IRQF_TRIGGER_RISING,
@@ -2223,12 +2231,133 @@ static void cpr_remove(struct platform_device *pdev)
 	debugfs_remove_recursive(drv->debugfs);
 }
 
+#if IS_ENABLED(CONFIG_QCOM_CPR_MSM8926)
+/* A registered supplier coordinates the interval between CPR late/early PM. */
+int qcom_cpr_msm8926_suspend_attach(struct device *dev, struct device *owner)
+{
+	struct cpr_drv *drv = dev_get_drvdata(dev);
+	struct cpr_msm8926_data *data;
+
+	if (dev->driver != &cpr_driver.driver || !drv || !owner)
+		return -ENODEV;
+	guard(mutex)(&drv->lock);
+	data = drv->msm8926;
+	if (!data || !drv->initialized || !drv->corner || !data->mx_sleep)
+		return -EPROBE_DEFER;
+	if (data->suspend_owner || drv->suspended)
+		return -EBUSY;
+	data->sleep = (struct cpr_msm8926_suspend) {
+		.rails = &drv->rails,
+		.sleep_mx = data->mx_sleep,
+		.clock = drv->cpu_clk,
+		.aux = data->aux_clk,
+		.pll = data->pll_clk,
+		.apcs = data->apcs,
+	};
+	data->suspend_owner = owner;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_cpr_msm8926_suspend_attach);
+
+int qcom_cpr_msm8926_suspend_detach(struct device *dev, struct device *owner)
+{
+	struct cpr_drv *drv = dev_get_drvdata(dev);
+	struct cpr_msm8926_data *data = drv->msm8926;
+
+	guard(mutex)(&drv->lock);
+	if (data->suspend_owner != owner)
+		return -ESTALE;
+	if (data->sleep.active || data->suspend_irq_disabled || drv->suspended)
+		return -EBUSY;
+	data->suspend_owner = NULL;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_cpr_msm8926_suspend_detach);
+
+int qcom_cpr_msm8926_suspend_prepare(struct device *dev, struct device *owner)
+{
+	struct cpr_drv *drv = dev_get_drvdata(dev);
+	struct cpr_msm8926_data *data = drv->msm8926;
+	u32 value;
+	int ret;
+
+	/* Never wait for the threaded handler while holding its mutex. */
+	disable_irq(drv->irq);
+	mutex_lock(&drv->lock);
+	if (data->suspend_owner != owner || !drv->suspended ||
+	    !data->suspend_was_applied || !drv->corner || data->suspend_irq_disabled) {
+		ret = -EBUSY;
+		goto out;
+	}
+	if (cpr_read(drv, REG_RBCPR_CTL) & RBCPR_CTL_LOOP_EN ||
+	    cpr_read(drv, REG_RBIF_IRQ_EN(0))) {
+		ret = -EIO;
+		goto out;
+	}
+	ret = readl_poll_timeout(drv->base + REG_RBCPR_RESULT_0, value,
+				 !(value & RBCPR_RESULT0_BUSY_MASK), 1, 1000);
+	if (ret)
+		goto out;
+	ret = cpr_msm8926_check_cpu_rate(drv, drv->corner->freq);
+	if (ret)
+		goto out;
+	ret = cpr_suspend_prepare(&data->sleep, drv->corner->freq,
+				  drv->corner->min_uV, drv->corner->max_uV);
+	if (!ret)
+		data->suspend_irq_disabled = true;
+out:
+	mutex_unlock(&drv->lock);
+	if (ret)
+		enable_irq(drv->irq);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(qcom_cpr_msm8926_suspend_prepare);
+
+int qcom_cpr_msm8926_suspend_restore(struct device *dev, struct device *owner)
+{
+	struct cpr_drv *drv = dev_get_drvdata(dev);
+	struct cpr_msm8926_data *data = drv->msm8926;
+	bool enable;
+
+	mutex_lock(&drv->lock);
+	if (data->suspend_owner != owner) {
+		mutex_unlock(&drv->lock);
+		return -ESTALE;
+	}
+	cpr_suspend_restore(&data->sleep);
+	enable = data->suspend_irq_disabled;
+	data->suspend_irq_disabled = false;
+	mutex_unlock(&drv->lock);
+	if (enable)
+		enable_irq(drv->irq);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_cpr_msm8926_suspend_restore);
+
+/* PM callbacks and the supplier link retain both bound devices here. */
+bool qcom_cpr_msm8926_suspend_ready(struct device *dev, struct device *owner)
+{
+	struct cpr_drv *drv = dev_get_drvdata(dev);
+	struct cpr_msm8926_data *data = drv->msm8926;
+
+	return READ_ONCE(data->suspend_owner) == owner &&
+	       READ_ONCE(data->suspend_irq_disabled) && READ_ONCE(data->sleep.active) &&
+	       !__clk_get_enable_count(data->sleep.pll) &&
+	       !clk_hw_is_prepared(__clk_get_hw(data->sleep.pll)) && READ_ONCE(drv->suspended) &&
+	       !(cpr_read(drv, REG_RBCPR_CTL) & RBCPR_CTL_LOOP_EN) &&
+	       !cpr_read(drv, REG_RBIF_IRQ_EN(0));
+}
+EXPORT_SYMBOL_GPL(qcom_cpr_msm8926_suspend_ready);
+
+#endif
+
 static int cpr_pm_prepare(struct device *dev)
 {
 	struct cpr_drv *drv = dev_get_drvdata(dev);
 
-	/* Active-only MX requests do not establish an RPM sleep-state vote. */
-	if (drv->msm8926 && pm_suspend_target_state != PM_SUSPEND_TO_IDLE)
+	/* Only the registered full-system supplier can authorize deep entry. */
+	if (drv->msm8926 && pm_suspend_target_state != PM_SUSPEND_TO_IDLE &&
+	    (pm_suspend_target_state != PM_SUSPEND_MEM || !drv->msm8926->suspend_owner))
 		return -EOPNOTSUPP;
 	return 0;
 }
@@ -2243,6 +2372,7 @@ static int cpr_pm_suspend(struct device *dev)
 	if (drv->corner && cpr_is_allowed(drv))
 		cpr_corner_save(drv, drv->corner);
 	cpr_ctl_disable(drv);
+	drv->msm8926->suspend_was_applied = drv->msm8926->applied;
 	drv->suspended = true;
 	/* Do not run feedback on assumed boot/resume voltage. */
 	drv->msm8926->applied = false;
@@ -2257,6 +2387,9 @@ static int cpr_pm_resume(struct device *dev)
 	if (!drv->msm8926)
 		return 0;
 	guard(mutex)(&drv->lock);
+	/* Keep feedback quiescent until the coordinating supplier restores rails. */
+	if (drv->msm8926->sleep.active || drv->msm8926->suspend_irq_disabled)
+		return -EBUSY;
 	ret = cpr_config(drv);
 	if (ret)
 		return ret;
