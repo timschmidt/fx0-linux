@@ -441,7 +441,7 @@ static int qcom_mpm_probe(struct platform_device *pdev, struct device_node *pare
 	if (IS_ERR(priv->mbox_chan)) {
 		ret = PTR_ERR(priv->mbox_chan);
 		dev_err(dev, "failed to acquire IPC channel: %d\n", ret);
-		return ret;
+		goto remove_provider;
 	}
 
 	parent_domain = irq_find_host(parent);
@@ -475,6 +475,8 @@ remove_domain:
 	irq_domain_remove(priv->domain);
 free_mbox:
 	mbox_free_channel(priv->mbox_chan);
+remove_provider:
+	of_genpd_del_provider(np);
 remove_genpd:
 	pm_genpd_remove(genpd);
 	return ret;
