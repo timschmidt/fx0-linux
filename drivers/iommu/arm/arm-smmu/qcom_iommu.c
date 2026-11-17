@@ -1168,11 +1168,11 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 	if (qcom_iommu->non_secure) {
 		ret = qcom_iommu_reset_ns(qcom_iommu);
 		if (ret)
-			return ret;
+			goto err_disable_clks;
 	} else if (dev->pm_domain) {
 		ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, 0);
 		if (ret)
-			return ret;
+			goto err_disable_clks;
 	}
 
 	qcom_iommu_bfb_setup(qcom_iommu);
@@ -1187,6 +1187,10 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 		}
 	}
 
+	return 0;
+
+err_disable_clks:
+	clk_bulk_disable_unprepare(CLK_NUM, qcom_iommu->clks);
 	return ret;
 }
 
