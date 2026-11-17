@@ -116,6 +116,24 @@ static int qcom_a53pll_probe(struct platform_device *pdev)
 	pll->status_bit = 16;
 	/* Returning an uncertain CPU PLL to CCF can select it after an error. */
 	pll->critical_rate = of_device_is_compatible(np, "qcom,msm8226-a7pll");
+	if (pll->critical_rate && IS_ENABLED(CONFIG_QCOM_MSM8226_PM)) {
+		ret = regmap_read(regmap, pll->config_reg, &pll->suspend_config);
+		if (ret)
+			return ret;
+		ret = regmap_read(regmap, pll->l_reg, &pll->suspend_l);
+		if (ret)
+			return ret;
+		ret = regmap_read(regmap, pll->m_reg, &pll->suspend_m);
+		if (ret)
+			return ret;
+		ret = regmap_read(regmap, pll->n_reg, &pll->suspend_n);
+		if (ret)
+			return ret;
+		pll->suspend_l &= 0x3ff;
+		pll->suspend_m &= 0x7ffff;
+		pll->suspend_n &= 0x7ffff;
+		pll->suspend_valid = true;
+	}
 
 	pll->freq_tbl = qcom_a53pll_get_freq_tbl(dev);
 	if (!pll->freq_tbl) {

@@ -84,9 +84,15 @@ static int clk_pll_disable_checked(struct clk_hw *hw)
 		return ret;
 	/* Skip if in FSM mode */
 	if (val & PLL_VOTE_FSM_ENA)
-		return 0;
+		return pll->critical_rate ? -EOPNOTSUPP : 0;
 	mask = PLL_OUTCTRL | PLL_RESET_N | PLL_BYPASSNL;
-	return regmap_update_bits(pll->clkr.regmap, pll->mode_reg, mask, 0);
+	ret = regmap_update_bits(pll->clkr.regmap, pll->mode_reg, mask, 0);
+	if (ret || !pll->critical_rate)
+		return ret;
+	ret = regmap_read(pll->clkr.regmap, pll->mode_reg, &val);
+	if (!ret && val & mask)
+		ret = -EIO;
+	return ret;
 }
 
 static void clk_pll_disable(struct clk_hw *hw)
@@ -97,6 +103,8 @@ static void clk_pll_disable(struct clk_hw *hw)
 	if (ret)
 		pr_err("%s: PLL disable failed: %d\n", clk_hw_get_name(hw), ret);
 }
+
+#include "clk-pll-suspend.h"
 
 static unsigned long
 clk_pll_recalc_rate(struct clk_hw *hw, unsigned long parent_rate)
@@ -365,6 +373,11 @@ clk_pll_sr2_set_rate(struct clk_hw *hw, unsigned long rate, unsigned long prate)
 		return clk_pll_rate_error(pll, ret);
 	if (pll->critical_rate && clk_pll_recalc_rate(hw, prate) != f->freq)
 		return clk_pll_rate_error(pll, -EIO);
+	if (pll->suspend_valid) {
+		pll->suspend_l = f->l;
+		pll->suspend_m = f->m;
+		pll->suspend_n = f->n;
+	}
 
 	if (enabled)
 		return clk_pll_sr2_enable(hw);
@@ -373,6 +386,8 @@ clk_pll_sr2_set_rate(struct clk_hw *hw, unsigned long rate, unsigned long prate)
 }
 
 const struct clk_ops clk_pll_sr2_ops = {
+	.prepare = clk_pll_suspend_prepare,
+	.unprepare = clk_pll_suspend_unprepare,
 	.enable = clk_pll_sr2_enable,
 	.disable = clk_pll_disable,
 	.set_rate = clk_pll_sr2_set_rate,

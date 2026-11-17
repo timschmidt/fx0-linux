@@ -35,6 +35,12 @@ struct pll_freq_tbl {
  * @status_bit: ANDed with @status_reg to determine if PLL is enabled
  * @freq_tbl: PLL frequency table
  * @critical_rate: Stop on uncertain CPU PLL programming; CCF can discard errors
+ * @suspend_valid: MSM8226 configuration snapshot is available
+ * @suspend_armed: CCF unprepared the PLL after its last verified disable
+ * @suspend_config: original static configuration register
+ * @suspend_l: latest successfully programmed L value
+ * @suspend_m: latest successfully programmed M value
+ * @suspend_n: latest successfully programmed N value
  * @hw: handle between common and hardware-specific interfaces
  */
 struct clk_pll {
@@ -48,6 +54,12 @@ struct clk_pll {
 	u8	post_div_width;
 	u8	post_div_shift;
 	bool	critical_rate;
+	bool	suspend_valid;
+	bool	suspend_armed;
+	u32	suspend_config;
+	u32	suspend_l;
+	u32	suspend_m;
+	u32	suspend_n;
 
 	const struct pll_freq_tbl *freq_tbl;
 
