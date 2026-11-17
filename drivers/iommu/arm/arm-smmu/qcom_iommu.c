@@ -499,6 +499,11 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 			}
 			ctx->secure_init = true;
 		}
+	}
+
+	/* Finish all fallible secure setup before programming any context bank. */
+	for (i = 0; i < fwspec->num_ids; i++) {
+		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
 
 		/* Secured QSMMU-500/QSMMU-v2 contexts cannot be programmed */
 		if (ctx->secured_ctx) {
@@ -551,7 +556,9 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 	return 0;
 out_clear_iommu:
+	free_io_pgtable_ops(pgtbl_ops);
 	qcom_domain->iommu = NULL;
+	qcom_domain->fwspec = NULL;
 out_unlock:
 	mutex_unlock(&qcom_domain->init_mutex);
 	return ret;
