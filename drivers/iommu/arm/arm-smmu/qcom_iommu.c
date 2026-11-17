@@ -1149,10 +1149,13 @@ static void qcom_iommu_device_remove(struct platform_device *pdev)
 {
 	struct qcom_iommu_dev *qcom_iommu = platform_get_drvdata(pdev);
 
+	/* Retire clients while their context banks and parent PM are available. */
+	iommu_device_unregister(&qcom_iommu->iommu);
+	iommu_device_sysfs_remove(&qcom_iommu->iommu);
+	devm_of_platform_depopulate(&pdev->dev);
+
 	pm_runtime_force_suspend(&pdev->dev);
 	platform_set_drvdata(pdev, NULL);
-	iommu_device_sysfs_remove(&qcom_iommu->iommu);
-	iommu_device_unregister(&qcom_iommu->iommu);
 }
 
 static int __maybe_unused qcom_iommu_resume(struct device *dev)
