@@ -524,6 +524,27 @@ static int gic_cpu_init(struct gic_chip_data *gic)
 	return 0;
 }
 
+/* Keep SGIs deliverable for an IRQ-woken secondary power-collapse path. */
+int gic_cpu_quiesce_ppis(unsigned int gic_nr)
+{
+	void __iomem *base;
+	int i;
+
+	if (gic_nr >= CONFIG_ARM_GIC_MAX_NR || !irqs_disabled())
+		return -EINVAL;
+	base = gic_data_dist_base(&gic_data[gic_nr]);
+	if (!base)
+		return -ENODEV;
+	writel_relaxed(GENMASK(31, 16), base + GIC_DIST_ENABLE_CLEAR);
+	/* No new boot SGI can be lost: the caller rechecks its boot request. */
+	for (i = 0; i < 16; i += 4)
+		writel_relaxed(U32_MAX, base + GIC_DIST_SGI_PENDING_CLEAR + i);
+	dsb(ishst);
+	if (readl_relaxed(base + GIC_DIST_ENABLE_SET) & GENMASK(31, 16))
+		return -EIO;
+	return 0;
+}
+
 int gic_cpu_if_down(unsigned int gic_nr)
 {
 	void __iomem *cpu_base;

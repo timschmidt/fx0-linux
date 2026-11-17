@@ -15,6 +15,8 @@
 #include <linux/smp.h>
 #include <linux/io.h>
 #include <linux/firmware/qcom/qcom_scm.h>
+#include <linux/irqchip/arm-gic.h>
+#include <soc/qcom/msm8226-pm.h>
 
 #include <asm/smp_plat.h>
 
@@ -376,6 +378,56 @@ static const struct smp_operations smp_msm8660_ops __initconst = {
 };
 CPU_METHOD_OF_DECLARE(qcom_smp, "qcom,gcc-msm8660", &smp_msm8660_ops);
 
+#ifdef CONFIG_HOTPLUG_CPU
+static DEFINE_PER_CPU(bool, msm8226_boot_requested);
+
+static int msm8226_cpu_disable(unsigned int cpu)
+{
+	if (qcom_msm8226_pm_active() && !cpu)
+		return -EPERM;
+	/* Publish a fresh offline interval before waiting for a new boot request. */
+	smp_store_release(&per_cpu(msm8226_boot_requested, cpu), false);
+	return 0;
+}
+
+static void msm8226_cpu_die(unsigned int cpu)
+{
+	bool quiesced;
+	int ret;
+
+	if (!qcom_msm8226_pm_active()) {
+		wfi();
+		return;
+	}
+	quiesced = !gic_cpu_quiesce_ppis(0);
+	/* Recheck after SGI cleanup so a concurrent boot request cannot be lost. */
+	while (!smp_load_acquire(&per_cpu(msm8226_boot_requested, cpu))) {
+		ret = quiesced ? qcom_msm8226_cpu_collapse(cpu) : -EIO;
+		if (ret)
+			wfi();
+	}
+}
+#endif
+
+static int msm8226_boot_secondary(unsigned int cpu, struct task_struct *idle)
+{
+#ifdef CONFIG_HOTPLUG_CPU
+	/* Publish the request before the bring-up path sends its boot SGI. */
+	smp_store_release(&per_cpu(msm8226_boot_requested, cpu), true);
+#endif
+	return cortex_a7_boot_secondary(cpu, idle);
+}
+
+static const struct smp_operations qcom_smp_msm8226_ops __initconst = {
+	.smp_prepare_cpus = qcom_smp_prepare_cpus,
+	.smp_boot_secondary = msm8226_boot_secondary,
+#ifdef CONFIG_HOTPLUG_CPU
+	.cpu_disable = msm8226_cpu_disable,
+	.cpu_die = msm8226_cpu_die,
+	.cpu_kill = qcom_msm8226_cpu_kill,
+#endif
+};
+
 static const struct smp_operations qcom_smp_cortex_a7_ops __initconst = {
 	.smp_prepare_cpus	= qcom_smp_prepare_cpus,
 	.smp_boot_secondary	= cortex_a7_boot_secondary,
@@ -383,7 +435,8 @@ static const struct smp_operations qcom_smp_cortex_a7_ops __initconst = {
 	.cpu_die		= qcom_cpu_die,
 #endif
 };
-CPU_METHOD_OF_DECLARE(qcom_smp_msm8226, "qcom,msm8226-smp", &qcom_smp_cortex_a7_ops);
+
+CPU_METHOD_OF_DECLARE(qcom_smp_msm8226, "qcom,msm8226-smp", &qcom_smp_msm8226_ops);
 CPU_METHOD_OF_DECLARE(qcom_smp_msm8909, "qcom,msm8909-smp", &qcom_smp_cortex_a7_ops);
 CPU_METHOD_OF_DECLARE(qcom_smp_msm8916, "qcom,msm8916-smp", &qcom_smp_cortex_a7_ops);
 
