@@ -16,8 +16,9 @@ enum pm_sleep_mode {
 };
 
 struct spm_driver_data;
-void spm_set_low_power_mode(struct spm_driver_data *drv,
-			    enum pm_sleep_mode mode);
+/* A mode error on a usable CPU controller leaves its sequencer disabled. */
+int spm_set_low_power_mode(struct spm_driver_data *drv,
+			   enum pm_sleep_mode mode);
 
 enum spm_l2_sleep_mode {
 	SPM_L2_MODE_DISABLED,

@@ -8,6 +8,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/cpu.h>
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -35,6 +36,7 @@
 #define SPM_CTL_INDEX		0x7f
 #define SPM_CTL_INDEX_SHIFT	4
 #define SPM_CTL_EN		BIT(0)
+#define SPM_CTL_WRITE_RETRIES	50
 
 /* These registers might be specific to SPM 1.1 */
 #define SPM_VCTL_VLVL			GENMASK(7, 0)
@@ -228,6 +230,8 @@ static const struct spm_reg_data spm_reg_8226_cpu  = {
 		0x80, 0x10, 0x26, 0x30, 0x0F },
 	.start_index[PM_SLEEP_MODE_STBY] = 0,
 	.start_index[PM_SLEEP_MODE_SPC] = 5,
+	/* Vendor SPC and PC programs are identical on MSM8226 v2. */
+	.start_index[PM_SLEEP_MODE_PC] = 5,
 };
 
 static const u16 spm_reg_offset_v1_1[SPM_REG_NR] = {
@@ -273,24 +277,26 @@ static inline void spm_register_write(struct spm_driver_data *drv,
 				drv->reg_data->reg_offset[reg]);
 }
 
-/* Ensure a guaranteed write, before return */
-static inline void spm_register_write_sync(struct spm_driver_data *drv,
-					enum spm_reg reg, u32 val)
+/* Bound failed readback without sleeping in the CPU-idle/entry path. */
+static inline int spm_register_write_sync(struct spm_driver_data *drv,
+					  enum spm_reg reg, u32 val, u32 mask)
 {
-	u32 ret;
+	unsigned int attempt;
+	u32 value;
 
 	if (!drv->reg_data->reg_offset[reg])
-		return;
+		return -EOPNOTSUPP;
 
-	do {
+	for (attempt = 0; attempt < SPM_CTL_WRITE_RETRIES; attempt++) {
 		writel_relaxed(val, drv->reg_base +
 				drv->reg_data->reg_offset[reg]);
-		ret = readl_relaxed(drv->reg_base +
+		value = readl_relaxed(drv->reg_base +
 				drv->reg_data->reg_offset[reg]);
-		if (ret == val)
-			break;
-		cpu_relax();
-	} while (1);
+		if ((value & mask) == (val & mask))
+			return 0;
+		udelay(1);
+	}
+	return -ETIMEDOUT;
 }
 
 static inline u32 spm_register_read(struct spm_driver_data *drv,
@@ -313,24 +319,60 @@ int spm_set_l2_low_power_mode(struct spm_driver_data *drv,
 	return spm_8226_l2_set_mode(drv->l2_map, mode);
 }
 
-void spm_set_low_power_mode(struct spm_driver_data *drv,
-			    enum pm_sleep_mode mode)
+static void spm_force_disable(struct spm_driver_data *drv, u32 saved_ctl)
+{
+	u32 mask = ~(SPM_CTL_INDEX << SPM_CTL_INDEX_SHIFT);
+	int ret;
+
+	/* Preserve inherited bypass and other control bits for a later retry. */
+	/* The start index can reset after END; it has no meaning with EN clear. */
+	ret = spm_register_write_sync(drv, SPM_REG_SPM_CTL, saved_ctl & ~SPM_CTL_EN, mask);
+	if (ret)
+		ret = spm_register_write_sync(drv, SPM_REG_SPM_CTL, saved_ctl & ~SPM_CTL_EN, mask);
+	if (ret)
+		panic("CPU SPM disable could not be verified: %d", ret);
+}
+
+int spm_set_low_power_mode(struct spm_driver_data *drv,
+			   enum pm_sleep_mode mode)
 {
 	u32 start_index;
-	u32 ctl_val;
+	u32 ctl_val, saved_ctl;
+	int ret;
 
-	/* This owner supplies voltage arbitration, not L2 low-power sequences. */
-	if (drv->reg_data->pmic_arbiter_master) {
-		dev_warn_ratelimited(drv->dev, "L2 master has no low-power sequence\n");
-		return;
+	if (!drv || !drv->reg_data)
+		return -ENODEV;
+	/* L2 master modes use their separate, context-checked interface. */
+	if (drv->reg_data->pmic_arbiter_master || !drv->reg_data->reg_offset ||
+	    !drv->reg_data->reg_offset[SPM_REG_SPM_CTL])
+		return -EOPNOTSUPP;
+	saved_ctl = spm_register_read(drv, SPM_REG_SPM_CTL);
+	if ((unsigned int)mode >= PM_SLEEP_MODE_NR) {
+		ret = -EINVAL;
+		goto disable;
 	}
 	start_index = drv->reg_data->start_index[mode];
+	if (mode != PM_SLEEP_MODE_STBY && !start_index) {
+		ret = -EOPNOTSUPP;
+		goto disable;
+	}
+	if (start_index > SPM_CTL_INDEX) {
+		ret = -EINVAL;
+		goto disable;
+	}
 
-	ctl_val = spm_register_read(drv, SPM_REG_SPM_CTL);
+	ctl_val = saved_ctl;
 	ctl_val &= ~(SPM_CTL_INDEX << SPM_CTL_INDEX_SHIFT);
 	ctl_val |= start_index << SPM_CTL_INDEX_SHIFT;
 	ctl_val |= SPM_CTL_EN;
-	spm_register_write_sync(drv, SPM_REG_SPM_CTL, ctl_val);
+	ret = spm_register_write_sync(drv, SPM_REG_SPM_CTL, ctl_val, ~0U);
+	if (!ret)
+		return 0;
+
+disable:
+	/* An uncertain mode write must not reach generic WFI with EN still set. */
+	spm_force_disable(drv, saved_ctl);
+	return ret;
 }
 
 static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector)
@@ -624,6 +666,7 @@ static int spm_dev_probe(struct platform_device *pdev)
 	const struct of_device_id *match_id;
 	struct spm_driver_data *drv;
 	void __iomem *addr;
+	int ret;
 
 	drv = devm_kzalloc(&pdev->dev, sizeof(*drv), GFP_KERNEL);
 	if (!drv)
@@ -639,10 +682,14 @@ static int spm_dev_probe(struct platform_device *pdev)
 
 	drv->reg_data = match_id->data;
 	drv->dev = &pdev->dev;
-	platform_set_drvdata(pdev, drv);
 
-	if (drv->reg_data->pmic_arbiter_master)
-		return spm_8226_l2_register(pdev, drv);
+	if (drv->reg_data->pmic_arbiter_master) {
+		ret = spm_8226_l2_register(pdev, drv);
+		if (ret)
+			return ret;
+		platform_set_drvdata(pdev, drv);
+		return 0;
+	}
 
 	/* Write the SPM sequences first.. */
 	if (drv->reg_data->reg_offset[SPM_REG_SEQ_ENTRY]) {
@@ -668,12 +715,19 @@ static int spm_dev_probe(struct platform_device *pdev)
 				drv->reg_data->pmic_data[1]);
 
 	/* Set up Standby as the default low power mode */
-	if (drv->reg_data->reg_offset[SPM_REG_SPM_CTL])
-		spm_set_low_power_mode(drv, PM_SLEEP_MODE_STBY);
+	if (drv->reg_data->reg_offset[SPM_REG_SPM_CTL]) {
+		ret = spm_set_low_power_mode(drv, PM_SLEEP_MODE_STBY);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret, "could not set standby\n");
+	}
 
-	if (IS_ENABLED(CONFIG_REGULATOR))
-		return spm_register_regulator(&pdev->dev, drv);
+	if (IS_ENABLED(CONFIG_REGULATOR)) {
+		ret = spm_register_regulator(&pdev->dev, drv);
+		if (ret)
+			return ret;
+	}
 
+	platform_set_drvdata(pdev, drv);
 	return 0;
 }
 

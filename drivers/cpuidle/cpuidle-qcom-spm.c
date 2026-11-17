@@ -42,19 +42,21 @@ static int qcom_pm_collapse(unsigned long int unused)
 
 static int qcom_cpu_spc(struct spm_driver_data *drv)
 {
-	int ret;
+	int ret, restore_ret;
 
-	spm_set_low_power_mode(drv, PM_SLEEP_MODE_SPC);
+	ret = spm_set_low_power_mode(drv, PM_SLEEP_MODE_SPC);
+	if (ret)
+		return ret;
 	ret = cpu_suspend(0, qcom_pm_collapse);
 	/*
 	 * ARM common code executes WFI without calling into our driver and
 	 * if the SPM mode is not reset, then we may accidentally power down the
 	 * cpu when we intended only to gate the cpu clock.
-	 * Ensure the state is set to standby before returning.
+	 * Restore standby, or verify EN is clear if the restore cannot be written.
 	 */
-	spm_set_low_power_mode(drv, PM_SLEEP_MODE_STBY);
+	restore_ret = spm_set_low_power_mode(drv, PM_SLEEP_MODE_STBY);
 
-	return ret;
+	return ret ?: restore_ret;
 }
 
 static __cpuidle int spm_enter_idle_state(struct cpuidle_device *dev,
@@ -84,37 +86,49 @@ static const struct of_device_id qcom_idle_state_match[] = {
 	{ },
 };
 
-static int spm_cpuidle_register(struct device *cpuidle_dev, int cpu)
+static struct spm_driver_data *spm_cpuidle_get_spm(int cpu)
 {
 	struct platform_device *pdev;
 	struct device_node *cpu_node, *saw_node;
-	struct cpuidle_qcom_spm_data *data;
-	int ret;
+	struct spm_driver_data *spm;
 
 	cpu_node = of_cpu_device_node_get(cpu);
 	if (!cpu_node)
-		return -ENODEV;
+		return ERR_PTR(-ENODEV);
 
 	saw_node = of_parse_phandle(cpu_node, "qcom,saw", 0);
 	of_node_put(cpu_node);
 	if (!saw_node)
-		return -ENODEV;
+		return ERR_PTR(-ENODEV);
+	if (!of_device_is_available(saw_node)) {
+		of_node_put(saw_node);
+		return ERR_PTR(-ENODEV);
+	}
 
 	pdev = of_find_device_by_node(saw_node);
 	of_node_put(saw_node);
 	if (!pdev)
-		return -ENODEV;
+		return ERR_PTR(-EPROBE_DEFER);
+	spm = dev_get_drvdata(&pdev->dev);
+	put_device(&pdev->dev);
+	return spm ?: ERR_PTR(-EPROBE_DEFER);
+}
+
+static int spm_cpuidle_register(struct device *cpuidle_dev, int cpu)
+{
+	struct cpuidle_qcom_spm_data *data;
+	struct spm_driver_data *spm;
+	int ret;
+
+	spm = spm_cpuidle_get_spm(cpu);
+	if (IS_ERR(spm))
+		return PTR_ERR(spm);
 
 	data = devm_kzalloc(cpuidle_dev, sizeof(*data), GFP_KERNEL);
-	if (!data) {
-		put_device(&pdev->dev);
+	if (!data)
 		return -ENOMEM;
-	}
 
-	data->spm = dev_get_drvdata(&pdev->dev);
-	put_device(&pdev->dev);
-	if (!data->spm)
-		return -EINVAL;
+	data->spm = spm;
 
 	data->cpuidle_driver = qcom_spm_idle_driver;
 	data->cpuidle_driver.cpumask = (struct cpumask *)cpumask_of(cpu);
@@ -129,10 +143,18 @@ static int spm_cpuidle_register(struct device *cpuidle_dev, int cpu)
 
 static int spm_cpuidle_drv_probe(struct platform_device *pdev)
 {
+	struct spm_driver_data *spm;
 	int cpu, ret;
 
 	if (!qcom_scm_is_available())
 		return -EPROBE_DEFER;
+
+	/* Defer before publishing any CPU-idle driver, not partway through. */
+	for_each_present_cpu(cpu) {
+		spm = spm_cpuidle_get_spm(cpu);
+		if (IS_ERR(spm) && PTR_ERR(spm) != -ENODEV)
+			return PTR_ERR(spm);
+	}
 
 	ret = qcom_scm_set_warm_boot_addr(cpu_resume_arm);
 	if (ret)
