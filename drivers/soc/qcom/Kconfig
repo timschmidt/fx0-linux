@@ -237,6 +237,17 @@ config QCOM_SPM
 	  to manage cores, L2 low power modes and to configure the internal
 	  Adaptive Voltage Scaler parameters, where supported.
 
+config QCOM_MSM8226_PM
+	bool "MSM8226 system suspend coordinator"
+	depends on ARM && ARCH_QCOM && SMP && HOTPLUG_CPU && SUSPEND && CPU_PM
+	depends on QCOM_CPR_MSM8926 && QCOM_SPM=y && QCOM_SMD_RPM=y
+	depends on RPMSG_QCOM_SMD=y && QCOM_MPM=y
+	help
+	  Coordinate MSM8226 CPU/L2, CPR, RPM and MPM system sleep for an
+	  explicitly described system-pm device. This does not enable system
+	  collapse for boards without that device and its supplier links.
+	  The coordinator also provides the MSM8226 CPU hotplug collapse path.
+
 config QCOM_STATS
 	tristate "Qualcomm Technologies, Inc. (QTI) Sleep stats driver"
 	depends on (ARCH_QCOM && DEBUG_FS) || COMPILE_TEST
