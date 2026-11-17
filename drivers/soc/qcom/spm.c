@@ -319,6 +319,32 @@ int spm_set_l2_low_power_mode(struct spm_driver_data *drv,
 	return spm_8226_l2_set_mode(drv->l2_map, mode);
 }
 
+int spm_msm8226_cpu_ready(struct spm_driver_data *drv)
+{
+	const struct spm_reg_data *data;
+	u32 word;
+	int i;
+
+	if (!drv || drv->reg_data != &spm_reg_8226_cpu)
+		return -ENODEV;
+	if (!irqs_disabled() || raw_smp_processor_id() != drv->reg_cpu)
+		return -EPERM;
+	data = drv->reg_data;
+	if (readl_relaxed(drv->reg_base + 0xfd0) != 0x20010000 ||
+	    readl_relaxed(drv->reg_base + 0x20) & BIT(0) ||
+	    spm_register_read(drv, SPM_REG_CFG) != data->spm_cfg ||
+	    spm_register_read(drv, SPM_REG_DLY) != data->spm_dly ||
+	    spm_register_read(drv, SPM_REG_SPM_CTL) & ~SPM_CTL_EN)
+		return -EIO;
+	for (i = 0; i < MAX_SEQ_DATA; i += sizeof(word)) {
+		word = data->seq[i] | (u32)data->seq[i + 1] << 8 |
+		       (u32)data->seq[i + 2] << 16 | (u32)data->seq[i + 3] << 24;
+		if (readl_relaxed(drv->reg_base + 0x80 + i) != word)
+			return -EIO;
+	}
+	return 0;
+}
+
 static void spm_force_disable(struct spm_driver_data *drv, u32 saved_ctl)
 {
 	u32 mask = ~(SPM_CTL_INDEX << SPM_CTL_INDEX_SHIFT);
@@ -682,6 +708,12 @@ static int spm_dev_probe(struct platform_device *pdev)
 
 	drv->reg_data = match_id->data;
 	drv->dev = &pdev->dev;
+	if (drv->reg_data == &spm_reg_8226_cpu) {
+		ret = spm_get_cpu(&pdev->dev);
+		if (ret < 0)
+			return ret;
+		drv->reg_cpu = ret;
+	}
 
 	if (drv->reg_data->pmic_arbiter_master) {
 		ret = spm_8226_l2_register(pdev, drv);

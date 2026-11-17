@@ -20,6 +20,9 @@ struct spm_driver_data;
 int spm_set_low_power_mode(struct spm_driver_data *drv,
 			   enum pm_sleep_mode mode);
 
+/* Exact MSM8226 CPU program/state check on its own CPU, with IRQs off. */
+int spm_msm8226_cpu_ready(struct spm_driver_data *drv);
+
 enum spm_l2_sleep_mode {
 	SPM_L2_MODE_DISABLED,
 	SPM_L2_MODE_RETENTION,
