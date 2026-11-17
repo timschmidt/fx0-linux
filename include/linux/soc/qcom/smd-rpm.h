@@ -5,6 +5,7 @@
 #include <linux/types.h>
 
 struct qcom_smd_rpm;
+struct device;
 
 /* Initialize to zero and keep alive, at the same address, until thaw. */
 struct qcom_rpm_smd_sleep_token {
@@ -74,5 +75,12 @@ int qcom_rpm_smd_freeze(struct qcom_smd_rpm *rpm,
 			struct qcom_rpm_smd_sleep_token *token);
 int qcom_rpm_smd_thaw(struct qcom_smd_rpm *rpm,
 		      struct qcom_rpm_smd_sleep_token *token);
+
+/* Child lifetime and PM ordering must be synchronized with system sleep. */
+int qcom_rpm_smd_register_sleep(struct qcom_smd_rpm *rpm, struct device *client);
+int qcom_rpm_smd_unregister_sleep(struct qcom_smd_rpm *rpm, struct device *client);
+int qcom_rpm_smd_prepare_sleep(struct qcom_smd_rpm *rpm, struct device *client);
+int qcom_rpm_smd_finish_sleep(struct qcom_smd_rpm *rpm, struct device *client);
+bool qcom_rpm_smd_sleep_ready(struct qcom_smd_rpm *rpm, struct device *client);
 
 #endif
