@@ -6,6 +6,7 @@
 #include <linux/device.h>
 
 struct qcom_smd_edge;
+struct rpmsg_endpoint;
 
 #if IS_ENABLED(CONFIG_RPMSG_QCOM_SMD)
 
@@ -26,6 +27,15 @@ static inline void qcom_smd_unregister_edge(struct qcom_smd_edge *edge)
 {
 }
 
+#endif
+
+#if IS_REACHABLE(CONFIG_RPMSG_QCOM_SMD)
+int qcom_smd_rpm_get_irq(struct rpmsg_endpoint *ept);
+#else
+static inline int qcom_smd_rpm_get_irq(struct rpmsg_endpoint *ept)
+{
+	return -EOPNOTSUPP;
+}
 #endif
 
 #endif

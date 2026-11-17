@@ -57,6 +57,7 @@ static struct platform_driver rpm_proc_driver = {
 	.driver = {
 		.name = "qcom-rpm-proc",
 		.of_match_table = rpm_proc_of_match,
+		.suppress_bind_attrs = IS_ENABLED(CONFIG_QCOM_MSM8226_PM),
 	},
 };
 

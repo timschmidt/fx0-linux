@@ -9,6 +9,9 @@
 #include <linux/mailbox_client.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/notifier.h>
+#include <linux/suspend.h>
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -100,6 +103,7 @@ static const struct {
  * @edge_id:		identifier of this edge
  * @remote_pid:		identifier of remote processor
  * @irq:		interrupt for signals on this edge
+ * @no_suspend:		receive IRQ services RPM requests through device noirq PM
  * @ipc_regmap:		regmap handle holding the outgoing ipc register
  * @ipc_offset:		offset within @ipc_regmap of the register for ipc
  * @ipc_bit:		bit in the register at @ipc_offset of @ipc_regmap
@@ -112,6 +116,10 @@ static const struct {
  * @new_channel_event:	wait queue for new channel events
  * @scan_work:		work item for discovering new channels
  * @state_work:		work item for edge state changes
+ * @sleep_lock:		serializes RPM lifecycle work and sleep admission
+ * @sleep_nb:		system-sleep admission notifier for the RPM edge
+ * @system_sleep:	lifecycle work is deferred until post-suspend
+ * @sleep_nb_registered: notifier registration must be undone on teardown
  */
 struct qcom_smd_edge {
 	struct device dev;
@@ -123,6 +131,11 @@ struct qcom_smd_edge {
 	unsigned remote_pid;
 
 	int irq;
+	bool no_suspend;
+	struct mutex sleep_lock; /* Serializes lifecycle removal and sleep admission. */
+	struct notifier_block sleep_nb;
+	bool system_sleep;
+	bool sleep_nb_registered;
 
 	struct regmap *ipc_regmap;
 	int ipc_offset;
@@ -950,6 +963,27 @@ free_ept:
 	return NULL;
 }
 
+/* The endpoint and its always-on, dedicated RPM edge must remain bound. */
+int qcom_smd_rpm_get_irq(struct rpmsg_endpoint *ept)
+{
+	struct qcom_smd_endpoint *endpoint;
+	struct qcom_smd_channel *channel;
+
+	if (!ept || ept->ops != &qcom_smd_endpoint_ops)
+		return -EOPNOTSUPP;
+	endpoint = to_smd_endpoint(ept);
+	channel = endpoint->qsch;
+	if (!channel->edge->no_suspend || strcmp(channel->name, "rpm_requests"))
+		return -EOPNOTSUPP;
+	if (READ_ONCE(channel->qsept) != endpoint)
+		return -EBUSY;
+	if (READ_ONCE(channel->state) != SMD_CHANNEL_OPENED ||
+	    GET_RX_CHANNEL_INFO(channel, state) != SMD_CHANNEL_OPENED)
+		return -ENOTCONN;
+	return channel->edge->irq;
+}
+EXPORT_SYMBOL_GPL(qcom_smd_rpm_get_irq);
+
 static void qcom_smd_destroy_ept(struct rpmsg_endpoint *ept)
 {
 	struct qcom_smd_endpoint *qsept = to_smd_endpoint(ept);
@@ -1202,7 +1236,7 @@ free_channel:
  * qcom_smd_create_channel() to create representations of these and add
  * them to the edge's list of channels.
  */
-static void qcom_channel_scan_worker(struct work_struct *work)
+static void qcom_channel_scan_worker_run(struct work_struct *work)
 {
 	struct qcom_smd_edge *edge = container_of(work, struct qcom_smd_edge, scan_work);
 	struct qcom_smd_alloc_entry *alloc_tbl;
@@ -1269,7 +1303,7 @@ static void qcom_channel_scan_worker(struct work_struct *work)
  * LOCKING: edge->channels_lock only needs to cover the list operations, as the
  * worker is killed before any channels are deallocated
  */
-static void qcom_channel_state_worker(struct work_struct *work)
+static void qcom_channel_state_worker_run(struct work_struct *work)
 {
 	struct qcom_smd_channel *channel;
 	struct qcom_smd_edge *edge = container_of(work,
@@ -1286,6 +1320,8 @@ static void qcom_channel_state_worker(struct work_struct *work)
 	 */
 	spin_lock_irqsave(&edge->channels_lock, flags);
 	list_for_each_entry(channel, &edge->channels, list) {
+		if (edge->no_suspend && strcmp(channel->name, "rpm_requests"))
+			continue;
 		if (channel->state != SMD_CHANNEL_CLOSED)
 			continue;
 
@@ -1338,6 +1374,67 @@ static void qcom_channel_state_worker(struct work_struct *work)
 /*
  * Parses an of_node describing an edge.
  */
+/* No lifecycle worker can remove RPM suppliers during a system transition. */
+static void qcom_channel_scan_worker(struct work_struct *work)
+{
+	struct qcom_smd_edge *edge = container_of(work, struct qcom_smd_edge, scan_work);
+
+	if (!edge->no_suspend) {
+		qcom_channel_scan_worker_run(work);
+		return;
+	}
+	mutex_lock(&edge->sleep_lock);
+	if (!edge->system_sleep)
+		qcom_channel_scan_worker_run(work);
+	mutex_unlock(&edge->sleep_lock);
+}
+
+static void qcom_channel_state_worker(struct work_struct *work)
+{
+	struct qcom_smd_edge *edge = container_of(work, struct qcom_smd_edge, state_work);
+
+	if (!edge->no_suspend) {
+		qcom_channel_state_worker_run(work);
+		return;
+	}
+	mutex_lock(&edge->sleep_lock);
+	if (!edge->system_sleep)
+		qcom_channel_state_worker_run(work);
+	mutex_unlock(&edge->sleep_lock);
+}
+
+static int qcom_smd_sleep_notify(struct notifier_block *nb, unsigned long event, void *unused)
+{
+	struct qcom_smd_edge *edge = container_of(nb, struct qcom_smd_edge, sleep_nb);
+
+	switch (event) {
+	case PM_SUSPEND_PREPARE:
+	case PM_HIBERNATION_PREPARE:
+	case PM_RESTORE_PREPARE:
+		/* A removing child can need the system-sleep mutex: never wait here. */
+		if (!mutex_trylock(&edge->sleep_lock))
+			return NOTIFY_BAD;
+		if (edge->system_sleep) {
+			mutex_unlock(&edge->sleep_lock);
+			return NOTIFY_BAD;
+		}
+		edge->system_sleep = true;
+		mutex_unlock(&edge->sleep_lock);
+		return NOTIFY_OK;
+	case PM_POST_SUSPEND:
+	case PM_POST_HIBERNATION:
+	case PM_POST_RESTORE:
+		mutex_lock(&edge->sleep_lock);
+		edge->system_sleep = false;
+		mutex_unlock(&edge->sleep_lock);
+		schedule_work(&edge->scan_work);
+		schedule_work(&edge->state_work);
+		return NOTIFY_OK;
+	default:
+		return NOTIFY_DONE;
+	}
+}
+
 static int qcom_smd_parse_edge(struct device *dev,
 			       struct device_node *node,
 			       struct qcom_smd_edge *edge)
@@ -1347,6 +1444,7 @@ static int qcom_smd_parse_edge(struct device *dev,
 	int irq;
 	int ret;
 
+	mutex_init(&edge->sleep_lock);
 	INIT_LIST_HEAD(&edge->channels);
 	spin_lock_init(&edge->channels_lock);
 
@@ -1418,8 +1516,13 @@ static int qcom_smd_parse_edge(struct device *dev,
 		goto put_node;
 	}
 
+	/* The always-on RPM must ACK genpd requests during device noirq PM. */
+	edge->no_suspend = IS_ENABLED(CONFIG_QCOM_MSM8226_PM) &&
+		of_device_is_compatible(dev->parent->of_node,
+					"qcom,msm8226-rpm-proc");
 	ret = devm_request_irq(dev, irq,
-			       qcom_smd_edge_intr, IRQF_TRIGGER_RISING,
+			       qcom_smd_edge_intr, IRQF_TRIGGER_RISING |
+			       (edge->no_suspend ? IRQF_NO_SUSPEND : 0),
 			       node->name, edge);
 	if (ret) {
 		dev_err(dev, "failed to request smd irq\n");
@@ -1509,16 +1612,30 @@ struct qcom_smd_edge *qcom_smd_register_edge(struct device *parent,
 	if (ret)
 		goto unregister_dev;
 
-	ret = qcom_smd_create_chrdev(edge);
-	if (ret) {
-		dev_err(&edge->dev, "failed to register chrdev for edge\n");
-		goto unregister_dev;
+	if (edge->no_suspend) {
+		edge->sleep_nb.notifier_call = qcom_smd_sleep_notify;
+		ret = register_pm_notifier(&edge->sleep_nb);
+		if (ret)
+			goto unregister_edge;
+		edge->sleep_nb_registered = true;
+	}
+
+	/* The noirq-capable RPM edge is reserved for its resource service. */
+	if (!edge->no_suspend) {
+		ret = qcom_smd_create_chrdev(edge);
+		if (ret) {
+			dev_err(&edge->dev, "failed to register chrdev for edge\n");
+			goto unregister_edge;
+		}
 	}
 
 	schedule_work(&edge->scan_work);
 
 	return edge;
 
+unregister_edge:
+	qcom_smd_unregister_edge(edge);
+	return ERR_PTR(ret);
 unregister_dev:
 	if (!IS_ERR_OR_NULL(edge->mbox_chan))
 		mbox_free_channel(edge->mbox_chan);
@@ -1543,6 +1660,8 @@ void qcom_smd_unregister_edge(struct qcom_smd_edge *edge)
 {
 	int ret;
 
+	if (edge->sleep_nb_registered)
+		unregister_pm_notifier(&edge->sleep_nb);
 	disable_irq(edge->irq);
 	cancel_work_sync(&edge->scan_work);
 	cancel_work_sync(&edge->state_work);
