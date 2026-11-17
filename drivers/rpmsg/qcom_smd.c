@@ -1278,6 +1278,7 @@ static void qcom_channel_state_worker(struct work_struct *work)
 	struct rpmsg_channel_info chinfo;
 	unsigned remote_state;
 	unsigned long flags;
+	int ret;
 
 	/*
 	 * Register a device for any closed channel where the remote processor
@@ -1302,9 +1303,10 @@ static void qcom_channel_state_worker(struct work_struct *work)
 			continue;
 
 		spin_unlock_irqrestore(&edge->channels_lock, flags);
-		qcom_smd_create_device(channel);
+		ret = qcom_smd_create_device(channel);
 		spin_lock_irqsave(&edge->channels_lock, flags);
-		channel->registered = true;
+		if (!ret)
+			channel->registered = true;
 	}
 
 	/*
