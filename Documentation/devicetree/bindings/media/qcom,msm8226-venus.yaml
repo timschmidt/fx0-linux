@@ -62,11 +62,13 @@ properties:
     maxItems: 1
 
   interconnects:
+    minItems: 1
     items:
       - description: Venus video data path to main memory
       - description: CPU access path to the Venus configuration registers
 
   interconnect-names:
+    minItems: 1
     items:
       - const: video-mem
       - const: cpu-cfg
