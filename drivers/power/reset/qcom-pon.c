@@ -2,6 +2,7 @@
 // Copyright (c) 2017-18 Linaro Limited
 
 #include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -13,6 +14,13 @@
 #include <linux/regmap.h>
 
 #define PON_SOFT_RB_SPARE		0x8f
+#define PON_REVISION			0x01
+#define PON_PERIPHERAL_TYPE		0x04
+#define PON_WATCHDOG_S1_TIMER		0x54
+
+static bool fx0_watchdog_inventory;
+module_param(fx0_watchdog_inventory, bool, 0400);
+MODULE_PARM_DESC(fx0_watchdog_inventory, "Expose read-only PM8226 watchdog registers on the Fx0");
 
 #define GEN1_REASON_SHIFT		2
 #define GEN2_REASON_SHIFT		1
@@ -25,6 +33,41 @@ struct qcom_pon {
 	u32 baseaddr;
 	struct reboot_mode_driver reboot_mode;
 	long reason_shift;
+};
+
+static ssize_t watchdog_inventory_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct qcom_pon *pon = dev_get_drvdata(dev);
+	unsigned int revision;
+	u8 type[2], watchdog[4];
+	int ret;
+
+	ret = regmap_read(pon->regmap, pon->baseaddr + PON_REVISION, &revision);
+	if (ret)
+		return ret;
+	ret = regmap_bulk_read(pon->regmap, pon->baseaddr + PON_PERIPHERAL_TYPE,
+			       type, ARRAY_SIZE(type));
+	if (ret)
+		return ret;
+	/* S1, S2, reset type and enable. Leave the adjacent pet register alone. */
+	ret = regmap_bulk_read(pon->regmap, pon->baseaddr + PON_WATCHDOG_S1_TIMER,
+			       watchdog, ARRAY_SIZE(watchdog));
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "%02x %02x %02x %02x %02x %02x %02x\n",
+			  revision, type[0], type[1], watchdog[0],
+			  watchdog[1], watchdog[2], watchdog[3]);
+}
+static DEVICE_ATTR_RO(watchdog_inventory);
+
+static struct attribute *inventory_attrs[] = {
+	&dev_attr_watchdog_inventory.attr,
+	NULL,
+};
+static const struct attribute_group inventory_group = {
+	.attrs = inventory_attrs,
 };
 
 static int qcom_pon_reboot_mode_write(struct reboot_mode_driver *reboot,
@@ -81,6 +124,15 @@ static int qcom_pon_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, pon);
+
+	if (fx0_watchdog_inventory && pon->baseaddr == 0x800 &&
+	    of_machine_is_compatible("lg,madai") &&
+	    of_device_is_compatible(pdev->dev.of_node, "qcom,pm8916-pon") &&
+	    of_device_is_compatible(pdev->dev.parent->of_node, "qcom,pm8226")) {
+		error = devm_device_add_group(&pdev->dev, &inventory_group);
+		if (error)
+			return error;
+	}
 
 	return devm_of_platform_populate(&pdev->dev);
 }
