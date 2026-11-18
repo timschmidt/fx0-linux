@@ -749,20 +749,25 @@ static __maybe_unused int venus_runtime_resume(struct device *dev)
 	int ret;
 
 	ret = icc_set_bw(core->video_path, kbps_to_icc(20000), 0);
+	dev_dbg(dev, "runtime resume video interconnect vote: %d\n", ret);
 	if (ret)
 		return ret;
 
 	ret = icc_set_bw(core->cpucfg_path, kbps_to_icc(1000), 0);
+	dev_dbg(dev, "runtime resume CPU interconnect vote: %d\n", ret);
 	if (ret)
 		return ret;
 
 	if (pm_ops->core_power) {
 		ret = pm_ops->core_power(core, POWER_ON);
+		dev_dbg(dev, "runtime resume core power: %d\n", ret);
 		if (ret)
 			return ret;
 	}
 
-	return hfi_core_resume(core, false);
+	ret = hfi_core_resume(core, false);
+	dev_dbg(dev, "runtime resume HFI: %d\n", ret);
+	return ret;
 }
 
 static const struct dev_pm_ops venus_pm_ops = {

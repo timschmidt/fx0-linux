@@ -685,10 +685,12 @@ static int venus_power_on(struct venus_hfi_device *hdev)
 		return 0;
 
 	ret = venus_set_hw_state_resume(hdev->core);
+	dev_dbg(hdev->core->dev, "HFI resume hardware state: %d\n", ret);
 	if (ret)
 		goto err;
 
 	ret = venus_run(hdev);
+	dev_dbg(hdev->core->dev, "HFI resume firmware run: %d\n", ret);
 	if (ret)
 		goto err_suspend;
 
