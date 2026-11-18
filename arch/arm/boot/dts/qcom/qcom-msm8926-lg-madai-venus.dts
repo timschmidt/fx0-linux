@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "qcom-msm8926-lg-madai.dts"
+#include <dt-bindings/interconnect/qcom,msm8226.h>
 
 &{/reserved-memory} {
 	venus_mem: memory@f500000 {
@@ -9,6 +10,22 @@
 };
 
 &soc {
+	bimc: interconnect@fc380000 {
+		compatible = "qcom,msm8226-bimc";
+		reg = <0xfc380000 0x6a000>;
+		#interconnect-cells = <1>;
+		status = "disabled";
+	};
+
+	mmss_noc: interconnect@fc478000 {
+		compatible = "qcom,msm8226-mmssnoc";
+		reg = <0xfc478000 0x4000>;
+		#interconnect-cells = <1>;
+		clocks = <&mmcc MMSS_AXI_CLK_SRC>, <&mmcc MMSS_S0_AXI_CLK>;
+		clock-names = "bus", "iface";
+		status = "disabled";
+	};
+
 	venus_iommu: iommu@fdc84000 {
 		compatible = "qcom,msm8226-venus-iommu";
 		reg = <0xfdc84000 0x2600>, <0xfdce0004 0x4>;
@@ -56,6 +73,9 @@
 			power-domains = <&mmcc VENUS0_GDSC>;
 			iommus = <&venus_iommu 0>;
 			memory-region = <&venus_mem>;
+			interconnects = <&mmss_noc MSM8226_MMSS_MASTER_VIDEO_P0
+					 &bimc MSM8226_BIMC_SLAVE_EBI_CH0>;
+			interconnect-names = "video-mem";
 			status = "disabled";
 		};
 	};

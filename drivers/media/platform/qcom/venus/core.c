@@ -497,13 +497,12 @@ static int venus_probe(struct platform_device *pdev)
 	core->video_path = devm_of_icc_get(dev, "video-mem");
 	if (IS_ERR(core->video_path))
 		return PTR_ERR(core->video_path);
+	if (core->res->require_video_path && !core->video_path)
+		return dev_err_probe(dev, -ENODEV, "video-mem interconnect required\n");
 
 	core->cpucfg_path = devm_of_icc_get(dev, "cpu-cfg");
 	if (IS_ERR(core->cpucfg_path))
 		return PTR_ERR(core->cpucfg_path);
-	if (core->res->require_interconnects && (!core->video_path || !core->cpucfg_path))
-		return dev_err_probe(dev, -ENODEV,
-				     "video-mem and cpu-cfg interconnects required\n");
 
 	core->irq = platform_get_irq(pdev, 0);
 	if (core->irq < 0)
@@ -818,7 +817,7 @@ static const struct venus_resources msm8226_res = {
 	.dec_nodename = "video-decoder",
 	.enc_nodename = "video-encoder",
 	.split_reg_banks = true,
-	.require_interconnects = true,
+	.require_video_path = true,
 	.bw_per_direction = true,
 };
 

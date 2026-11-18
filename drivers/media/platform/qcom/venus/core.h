@@ -107,7 +107,7 @@ struct venus_resources {
 	const char *dec_nodename;
 	const struct firmware_version *min_fw;
 	bool split_reg_banks;
-	bool require_interconnects;
+	bool require_video_path;
 	bool bw_per_direction;
 };
 
