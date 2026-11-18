@@ -7,6 +7,7 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -27,6 +28,11 @@ enum wdt_reg {
 static bool msm8226_suspend_recovery;
 module_param(msm8226_suspend_recovery, bool, 0400);
 MODULE_PARM_DESC(msm8226_suspend_recovery, "Keep the Fx0 hardware watchdog armed during suspend for recovery tests");
+
+static bool msm8226_suspend_counter_sample;
+module_param(msm8226_suspend_counter_sample, bool, 0400);
+MODULE_PARM_DESC(msm8226_suspend_counter_sample,
+		 "Sample the Fx0 watchdog counter before and after suspend");
 
 static const u32 reg_offset_data_apcs_tmr[] = {
 	[WDT_RST] = 0x38,
@@ -317,6 +323,8 @@ static int qcom_wdt_probe(struct platform_device *pdev)
 static int __maybe_unused qcom_wdt_suspend(struct device *dev)
 {
 	struct qcom_wdt *wdt = dev_get_drvdata(dev);
+	u32 status;
+	int ret;
 
 	if (!watchdog_active(&wdt->wdd))
 		return 0;
@@ -324,6 +332,19 @@ static int __maybe_unused qcom_wdt_suspend(struct device *dev)
 		if (!qcom_wdt_is_running(&wdt->wdd))
 			return -EIO;
 		qcom_wdt_ping(&wdt->wdd);
+		/*
+		 * Take a nonzero sample before entering system sleep. A lower
+		 * sample at early resume identifies a counter discontinuity.
+		 */
+		if (msm8226_suspend_counter_sample) {
+			ret = readl_poll_timeout(wdt_addr(wdt, WDT_STS), status,
+						 FIELD_GET(MSM8226_WDT_COUNT, status) >= 4096,
+						 500, 250000);
+			dev_info(dev, "Fx0 watchdog late sample: raw=0x%08x ticks=%lu ret=%d\n",
+				 status, FIELD_GET(MSM8226_WDT_COUNT, status), ret);
+			if (ret)
+				return ret;
+		}
 		dev_info(dev, "suspend recovery watchdog armed: rate=%lu timeout=%u\n",
 			 wdt->rate, wdt->wdd.timeout);
 		return 0;
@@ -343,6 +364,9 @@ static int __maybe_unused qcom_wdt_resume(struct device *dev)
 		return 0;
 	if (wdt->suspend_recovery) {
 		status = readl(wdt_addr(wdt, WDT_STS));
+		if (msm8226_suspend_counter_sample)
+			dev_info(dev, "Fx0 watchdog early sample: raw=0x%08x ticks=%lu\n",
+				 status, FIELD_GET(MSM8226_WDT_COUNT, status));
 		dev_info(dev, "suspend recovery watchdog resume: running=%d ticks=%lu\n",
 			 qcom_wdt_is_running(&wdt->wdd), FIELD_GET(MSM8226_WDT_COUNT, status));
 	}
