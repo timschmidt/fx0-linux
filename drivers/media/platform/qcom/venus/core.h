@@ -106,6 +106,9 @@ struct venus_resources {
 	const char *enc_nodename;
 	const char *dec_nodename;
 	const struct firmware_version *min_fw;
+	bool split_reg_banks;
+	bool require_interconnects;
+	bool bw_per_direction;
 };
 
 enum venus_fmt {
@@ -141,6 +144,7 @@ struct venus_format {
  * @cpu_cs_base:	IO memory cpu_cs base address
  * @cpu_ic_base:	IO memory cpu_ic base address
  * @wrapper_base:	IO memory wrapper base address
+ * @wrapper_version:	Version register in the split wrapper layout
  * @wrapper_tz_base:	IO memory wrapper TZ base address
  * @aon_base:	AON base address
  * @irq:		Venus irq
@@ -196,6 +200,7 @@ struct venus_core {
 	void __iomem *cpu_cs_base;
 	void __iomem *cpu_ic_base;
 	void __iomem *wrapper_base;
+	void __iomem *wrapper_version;
 	void __iomem *wrapper_tz_base;
 	void __iomem *aon_base;
 	int irq;
@@ -539,6 +544,18 @@ struct venus_inst {
 #define IS_IRIS1(core)		((core)->res->vpu_version == VPU_VERSION_IRIS1)
 #define IS_IRIS2(core)		((core)->res->vpu_version == VPU_VERSION_IRIS2)
 #define IS_IRIS2_1(core)	((core)->res->vpu_version == VPU_VERSION_IRIS2_1)
+
+static inline void __iomem *venus_wrapper_addr(struct venus_core *core, u32 reg)
+{
+	if (core->wrapper_version) {
+		if (!reg)
+			return core->wrapper_version;
+		/* Offsets 0 and 4 are outside the bank starting at offset 8. */
+		reg -= 8;
+	}
+
+	return core->wrapper_base + reg;
+}
 
 static inline bool is_lite(struct venus_core *core)
 {
