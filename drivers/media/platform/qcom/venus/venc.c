@@ -1180,9 +1180,9 @@ static int venc_buf_init(struct vb2_buffer *vb)
 
 static void venc_release_session(struct venus_inst *inst)
 {
-	int ret;
+	int pm_ret, ret;
 
-	venc_pm_get(inst);
+	pm_ret = venc_pm_get(inst);
 
 	mutex_lock(&inst->lock);
 
@@ -1196,7 +1196,8 @@ static void venc_release_session(struct venus_inst *inst)
 	INIT_LIST_HEAD(&inst->registeredbufs);
 	venus_pm_release_core(inst);
 
-	venc_pm_put(inst, false);
+	if (!pm_ret)
+		venc_pm_put(inst, false);
 }
 
 static void venc_buf_cleanup(struct vb2_buffer *vb)
@@ -1534,11 +1535,13 @@ err_free:
 static int venc_close(struct file *file)
 {
 	struct venus_inst *inst = to_inst(file);
+	int pm_ret;
 
-	venc_pm_get(inst);
+	pm_ret = venc_pm_get(inst);
 	venus_close_common(inst, file);
 	inst->enc_state = VENUS_ENC_STATE_DEINIT;
-	venc_pm_put(inst, false);
+	if (!pm_ret)
+		venc_pm_put(inst, false);
 
 	kfree(inst);
 	return 0;
