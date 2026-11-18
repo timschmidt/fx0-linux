@@ -39,6 +39,7 @@ properties:
           - qcom,msm8226-gpu-iommu
           - qcom,msm8226-vfe-iommu
           - qcom,msm8226-mdp-iommu
+          - qcom,msm8226-venus-iommu
           - qcom,msm8974-gpu-iommu
           - qcom,msm8974-mdp-iommu
           - qcom,msm8974-venus-iommu
@@ -61,7 +62,8 @@ properties:
     maxItems: 1
 
   reg:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
     description:
       For instances using the qcom,msm-iommu-v1/-v2 fallbacks, the
       optional "SMMU local" register region used for interrupt routing
@@ -69,6 +71,12 @@ properties:
       SMMU global register space, used for stream mapping configuration
       on non-secured instances and for the implementation-defined
       prefetch registers on all instances.
+      The MSM8226 Venus instance has a separate wrapper clock-select register.
+
+  reg-names:
+    items:
+      - const: global
+      - const: clock-select
 
   ranges: true
 
@@ -141,6 +149,38 @@ allOf:
     then:
       required:
         - reg
+
+  - if:
+      properties:
+        compatible:
+          const: qcom,msm8226-venus-iommu
+    then:
+      properties:
+        reg:
+          minItems: 2
+        clocks:
+          minItems: 3
+        clock-names:
+          minItems: 3
+        qcom,iommu-secure-id:
+          const: 0
+        iommu-ctx@0:
+          properties:
+            compatible:
+              const: qcom,msm-iommu-v1-ns
+      patternProperties:
+        "^iommu-ctx@(?!0$)[0-9a-f]+$": false
+      required:
+        - reg
+        - reg-names
+        - power-domains
+        - qcom,iommu-secure-id
+        - iommu-ctx@0
+    else:
+      properties:
+        reg:
+          maxItems: 1
+        reg-names: false
 
 additionalProperties: false
 
