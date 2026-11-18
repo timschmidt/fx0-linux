@@ -1311,9 +1311,9 @@ unlock:
 static void vdec_session_release(struct venus_inst *inst)
 {
 	struct venus_core *core = inst->core;
-	int ret, abort = 0;
+	int pm_ret, ret, abort = 0;
 
-	vdec_pm_get(inst);
+	pm_ret = vdec_pm_get(inst);
 
 	mutex_lock(&inst->lock);
 	inst->codec_state = VENUS_DEC_STATE_DEINIT;
@@ -1341,7 +1341,8 @@ static void vdec_session_release(struct venus_inst *inst)
 	mutex_unlock(&inst->lock);
 
 	venus_pm_release_core(inst);
-	vdec_pm_put(inst, false);
+	if (!pm_ret)
+		vdec_pm_put(inst, false);
 }
 
 static int vdec_buf_init(struct vb2_buffer *vb)
@@ -1757,12 +1758,14 @@ err_free:
 static int vdec_close(struct file *file)
 {
 	struct venus_inst *inst = to_inst(file);
+	int pm_ret;
 
-	vdec_pm_get(inst);
+	pm_ret = vdec_pm_get(inst);
 	cancel_work_sync(&inst->delayed_process_work);
 	venus_close_common(inst, file);
 	ida_destroy(&inst->dpb_ids);
-	vdec_pm_put(inst, false);
+	if (!pm_ret)
+		vdec_pm_put(inst, false);
 
 	kfree(inst);
 	return 0;
