@@ -4,6 +4,7 @@
  * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  */
 
+#include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -157,8 +158,39 @@ static const struct of_device_id msm8226_icc_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, msm8226_icc_of_match);
 
+static bool fx0_hold_mmss_iface;
+module_param(fx0_hold_mmss_iface, bool, 0400);
+MODULE_PARM_DESC(fx0_hold_mmss_iface,
+		 "Keep an S0 AXI clock reference for the Fx0 MMSS probe diagnostic");
+
+static int msm8226_icc_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct clk *iface;
+	int ret;
+
+	if (!fx0_hold_mmss_iface || !of_machine_is_compatible("lg,madai") ||
+	    !of_device_is_compatible(dev->of_node, "qcom,msm8226-mmssnoc"))
+		return qnoc_probe(pdev);
+
+	/*
+	 * The installed kernel sees S0 enabled with no CCF references.
+	 * Keep a reference while qnoc_probe() releases its QoS setup vote.
+	 */
+	iface = devm_clk_get_enabled(dev, "iface");
+	if (IS_ERR(iface))
+		return dev_err_probe(dev, PTR_ERR(iface), "cannot hold S0 AXI clock\n");
+
+	dev_info(dev, "Fx0 S0 AXI hold acquired before provider probe\n");
+	ret = qnoc_probe(pdev);
+	if (!ret)
+		dev_info(dev, "Fx0 S0 AXI hold retained after provider probe\n");
+
+	return ret;
+}
+
 static struct platform_driver msm8226_icc_driver = {
-	.probe = qnoc_probe,
+	.probe = msm8226_icc_probe,
 	.remove = qnoc_remove,
 	.driver = {
 		.name = "qnoc-msm8226",
