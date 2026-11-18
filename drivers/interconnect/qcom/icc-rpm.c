@@ -445,6 +445,10 @@ static int qcom_icc_set(struct icc_node *src, struct icc_node *dst)
 	return 0;
 }
 
+static bool fx0_trace;
+module_param(fx0_trace, bool, 0400);
+MODULE_PARM_DESC(fx0_trace, "Trace stages of the MMSS interconnect probe on Fx0");
+
 int qnoc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -456,8 +460,14 @@ int qnoc_probe(struct platform_device *pdev)
 	struct icc_node *node;
 	size_t num_nodes, i;
 	const char * const *cds = NULL;
+	bool trace;
 	int cd_num;
 	int ret;
+
+	trace = fx0_trace && of_machine_is_compatible("lg,madai") &&
+		of_device_is_compatible(dev->of_node, "qcom,msm8226-mmssnoc");
+	if (trace)
+		dev_info(dev, "fx0-mmss-trace: probe entered\n");
 
 	/* wait for the RPM proxy */
 	if (!qcom_icc_rpm_smd_available())
@@ -543,7 +553,11 @@ int qnoc_probe(struct platform_device *pdev)
 	}
 
 regmap_done:
+	if (trace)
+		dev_info(dev, "fx0-mmss-trace: bus clock enable begin\n");
 	ret = clk_prepare_enable(qp->bus_clk);
+	if (trace)
+		dev_info(dev, "fx0-mmss-trace: bus clock enable end ret=%d\n", ret);
 	if (ret)
 		return ret;
 
@@ -563,7 +577,11 @@ regmap_done:
 	icc_provider_init(provider);
 
 	/* If this fails, bus accesses will crash the platform! */
+	if (trace)
+		dev_info(dev, "fx0-mmss-trace: interface clocks enable begin\n");
 	ret = clk_bulk_prepare_enable(qp->num_intf_clks, qp->intf_clks);
+	if (trace)
+		dev_info(dev, "fx0-mmss-trace: interface clocks enable end ret=%d\n", ret);
 	if (ret)
 		goto err_disable_unprepare_clk;
 
@@ -576,6 +594,8 @@ regmap_done:
 		if (!qnodes[i]->ib_coeff)
 			qnodes[i]->ib_coeff = qp->ib_coeff;
 
+		if (trace)
+			dev_info(dev, "fx0-mmss-trace: node %zu creation begin\n", i);
 		node = icc_node_create(qnodes[i]->id);
 		if (IS_ERR(node)) {
 			clk_bulk_disable_unprepare(qp->num_intf_clks,
@@ -590,11 +610,17 @@ regmap_done:
 
 		for (j = 0; j < qnodes[i]->num_links; j++)
 			icc_link_create(node, qnodes[i]->links[j]);
+		if (trace)
+			dev_info(dev, "fx0-mmss-trace: node %zu links added\n", i);
 
 		/* Set QoS registers (we only need to do it once, generally) */
 		if (qnodes[i]->qos.ap_owned &&
 		    qnodes[i]->qos.qos_mode != NOC_QOS_MODE_INVALID) {
+			if (trace)
+				dev_info(dev, "fx0-mmss-trace: node %zu QoS begin\n", i);
 			ret = qcom_icc_qos_set(node);
+			if (trace)
+				dev_info(dev, "fx0-mmss-trace: node %zu QoS end ret=%d\n", i, ret);
 			if (ret) {
 				clk_bulk_disable_unprepare(qp->num_intf_clks,
 							   qp->intf_clks);
@@ -605,9 +631,17 @@ regmap_done:
 		data->nodes[i] = node;
 	}
 
+	if (trace)
+		dev_info(dev, "fx0-mmss-trace: interface clocks release begin\n");
 	clk_bulk_disable_unprepare(qp->num_intf_clks, qp->intf_clks);
+	if (trace)
+		dev_info(dev, "fx0-mmss-trace: interface clocks release end\n");
 
+	if (trace)
+		dev_info(dev, "fx0-mmss-trace: provider publication begin\n");
 	ret = icc_provider_register(provider);
+	if (trace)
+		dev_info(dev, "fx0-mmss-trace: provider publication end ret=%d\n", ret);
 	if (ret)
 		goto err_remove_nodes;
 
@@ -620,6 +654,8 @@ regmap_done:
 			goto err_deregister_provider;
 	}
 
+	if (trace)
+		dev_info(dev, "fx0-mmss-trace: probe returning success\n");
 	return 0;
 
 err_deregister_provider:

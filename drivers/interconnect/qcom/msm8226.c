@@ -90,9 +90,23 @@ static int msm8226_get_bw(struct icc_node *node, u32 *avg, u32 *peak)
 	return 0;
 }
 
+static bool fx0_trace;
+module_param(fx0_trace, bool, 0400);
+MODULE_PARM_DESC(fx0_trace, "Trace MMSS provider registration and AXI votes on Fx0");
+
+static bool msm8226_fx0_trace(void)
+{
+	return fx0_trace && of_machine_is_compatible("lg,madai");
+}
+
 static int msm8226_set_mmss_rate(struct clk *clk, unsigned long rate)
 {
+	bool trace = msm8226_fx0_trace();
 	long actual;
+	int ret;
+
+	if (trace)
+		pr_info("fx0-mmss-trace: AXI vote begin rate=%lu\n", rate);
 
 	if (rate) {
 		actual = clk_round_rate(clk, rate);
@@ -103,7 +117,11 @@ static int msm8226_set_mmss_rate(struct clk *clk, unsigned long rate)
 	}
 
 	/* Display and camera clocks can also propagate rates to this root. */
-	return clk_set_min_rate(clk, rate);
+	ret = clk_set_min_rate(clk, rate);
+	if (trace)
+		pr_info("fx0-mmss-trace: AXI vote end ret=%d\n", ret);
+
+	return ret;
 }
 
 static const struct regmap_config msm8226_mmss_regmap_config = {
@@ -165,7 +183,27 @@ static struct platform_driver msm8226_icc_driver = {
 		.of_match_table = msm8226_icc_of_match,
 	},
 };
-module_platform_driver(msm8226_icc_driver);
+
+static int __init msm8226_icc_driver_init(void)
+{
+	bool trace = msm8226_fx0_trace();
+	int ret;
+
+	if (trace)
+		pr_info("fx0-mmss-trace: platform driver registration begin\n");
+	ret = platform_driver_register(&msm8226_icc_driver);
+	if (trace)
+		pr_info("fx0-mmss-trace: platform driver registration end ret=%d\n", ret);
+
+	return ret;
+}
+module_init(msm8226_icc_driver_init);
+
+static void __exit msm8226_icc_driver_exit(void)
+{
+	platform_driver_unregister(&msm8226_icc_driver);
+}
+module_exit(msm8226_icc_driver_exit);
 
 MODULE_DESCRIPTION("Qualcomm MSM8226 multimedia interconnect preview");
 MODULE_LICENSE("GPL");
