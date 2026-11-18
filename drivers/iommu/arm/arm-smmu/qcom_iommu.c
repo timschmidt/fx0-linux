@@ -102,6 +102,9 @@ struct qcom_iommu_dev {
 	void __iomem		*local_base;
 	void __iomem		*global_base;
 	void __iomem		*wrapper_clk_sel;
+	/* Serializes Venus context ownership, TLB access and clock gating. */
+	spinlock_t		 ctx_lock;
+	bool			 ctx_online;
 	u32			 sec_id;
 	bool			 non_secure;
 	u8			 max_asid;
@@ -113,19 +116,24 @@ static enum io_pgtable_fmt qcom_iommu_pgtbl_fmt(struct qcom_iommu_dev *qcom_iomm
 	return qcom_iommu->cfg ? qcom_iommu->cfg->fmt : ARM_32_LPAE_S1;
 }
 
+struct qcom_iommu_ctx_state {
+	u64			 ttbr0;
+	u32			 tcr[2];
+	u32			 mair[2];
+	u32			 contextidr;
+	u32			 sctlr;
+};
+
 struct qcom_iommu_ctx {
 	struct device		*dev;
 	void __iomem		*base;
 	bool			 secure_init;
 	bool			 secured_ctx;
 	u8			 asid;      /* asid and ctx bank # are 1:1 */
+	int			 irq;
 	struct iommu_domain	*domain;
 	/* CB state replayed after power collapse on OS-managed instances */
-	u64			 ttbr0;
-	u32			 tcr[2];
-	u32			 mair[2];
-	u32			 contextidr;
-	u32			 sctlr;
+	struct qcom_iommu_ctx_state state;
 };
 
 struct qcom_iommu_domain {
@@ -134,7 +142,8 @@ struct qcom_iommu_domain {
 	struct mutex		 init_mutex; /* Protects iommu pointer */
 	struct iommu_domain	 domain;
 	struct qcom_iommu_dev	*iommu;
-	struct iommu_fwspec	*fwspec;
+	u32			*asids;
+	unsigned int		 num_asids;
 };
 
 static struct qcom_iommu_domain *to_qcom_iommu_domain(struct iommu_domain *dom)
@@ -196,51 +205,87 @@ qcom_iommu_gr1_write(struct qcom_iommu_dev *qcom_iommu, unsigned int reg,
 	writel_relaxed(val, qcom_iommu->global_base + QCOM_IOMMU_GR1 + reg);
 }
 
-static void qcom_iommu_tlb_sync(void *cookie)
+static int qcom_iommu_ctx_tlb_sync(struct qcom_iommu_ctx *ctx)
 {
-	struct qcom_iommu_domain *qcom_domain = cookie;
-	struct iommu_fwspec *fwspec = qcom_domain->fwspec;
-	unsigned i;
+	unsigned int val;
+	int ret;
 
-	for (i = 0; i < fwspec->num_ids; i++) {
-		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
-		unsigned int val, ret;
+	iommu_writel(ctx, ARM_SMMU_CB_TLBSYNC, 0);
+	ret = readl_poll_timeout(ctx->base + ARM_SMMU_CB_TLBSTATUS, val,
+				 (val & 0x1) == 0, 0, 5000000);
+	if (ret)
+		dev_err(ctx->dev, "timeout waiting for TLB SYNC\n");
 
-		iommu_writel(ctx, ARM_SMMU_CB_TLBSYNC, 0);
+	return ret;
+}
 
-		ret = readl_poll_timeout(ctx->base + ARM_SMMU_CB_TLBSTATUS, val,
-					 (val & 0x1) == 0, 0, 5000000);
-		if (ret)
-			dev_err(ctx->dev, "timeout waiting for TLB SYNC\n");
-	}
+static bool qcom_iommu_tlb_lock(struct qcom_iommu_dev *iommu, unsigned long *flags)
+{
+	if (!iommu->wrapper_clk_sel)
+		return true;
+
+	spin_lock_irqsave(&iommu->ctx_lock, *flags);
+	if (iommu->ctx_online)
+		return true;
+
+	/*
+	 * The linked consumer is inactive. Its page tables can still change
+	 * and the bank will be invalidated before the next successful resume.
+	 */
+	spin_unlock_irqrestore(&iommu->ctx_lock, *flags);
+	return false;
+}
+
+static void qcom_iommu_tlb_unlock(struct qcom_iommu_dev *iommu, unsigned long flags)
+{
+	if (iommu->wrapper_clk_sel)
+		spin_unlock_irqrestore(&iommu->ctx_lock, flags);
+}
+
+static void qcom_iommu_tlb_sync(struct qcom_iommu_domain *qcom_domain)
+{
+	unsigned int i;
+
+	for (i = 0; i < qcom_domain->num_asids; i++)
+		qcom_iommu_ctx_tlb_sync(to_ctx(qcom_domain, qcom_domain->asids[i]));
 }
 
 static void qcom_iommu_tlb_inv_context(void *cookie)
 {
 	struct qcom_iommu_domain *qcom_domain = cookie;
-	struct iommu_fwspec *fwspec = qcom_domain->fwspec;
-	unsigned i;
+	struct qcom_iommu_dev *iommu = qcom_domain->iommu;
+	unsigned long flags = 0;
+	unsigned int i;
 
-	for (i = 0; i < fwspec->num_ids; i++) {
-		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
+	if (!qcom_iommu_tlb_lock(iommu, &flags))
+		return;
+
+	for (i = 0; i < qcom_domain->num_asids; i++) {
+		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, qcom_domain->asids[i]);
+
 		iommu_writel(ctx, ARM_SMMU_CB_S1_TLBIASID, ctx->asid);
 	}
 
-	qcom_iommu_tlb_sync(cookie);
+	qcom_iommu_tlb_sync(qcom_domain);
+	qcom_iommu_tlb_unlock(iommu, flags);
 }
 
 static void qcom_iommu_tlb_inv_range_nosync(unsigned long iova, size_t size,
 					    size_t granule, bool leaf, void *cookie)
 {
 	struct qcom_iommu_domain *qcom_domain = cookie;
-	struct iommu_fwspec *fwspec = qcom_domain->fwspec;
+	struct qcom_iommu_dev *iommu = qcom_domain->iommu;
+	unsigned long flags = 0;
 	unsigned i, reg;
+
+	if (!qcom_iommu_tlb_lock(iommu, &flags))
+		return;
 
 	reg = leaf ? ARM_SMMU_CB_S1_TLBIVAL : ARM_SMMU_CB_S1_TLBIVA;
 	iova = (iova >> 12) << 12;
 
-	for (i = 0; i < fwspec->num_ids; i++) {
-		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
+	for (i = 0; i < qcom_domain->num_asids; i++) {
+		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, qcom_domain->asids[i]);
 		unsigned long addr = iova | ctx->asid;
 		size_t s = size;
 
@@ -249,13 +294,27 @@ static void qcom_iommu_tlb_inv_range_nosync(unsigned long iova, size_t size,
 			addr += granule;
 		} while (s -= granule);
 	}
+
+	qcom_iommu_tlb_unlock(iommu, flags);
+}
+
+static void qcom_iommu_tlb_sync_online(struct qcom_iommu_domain *qcom_domain)
+{
+	struct qcom_iommu_dev *iommu = qcom_domain->iommu;
+	unsigned long flags = 0;
+
+	if (!qcom_iommu_tlb_lock(iommu, &flags))
+		return;
+
+	qcom_iommu_tlb_sync(qcom_domain);
+	qcom_iommu_tlb_unlock(iommu, flags);
 }
 
 static void qcom_iommu_tlb_flush_walk(unsigned long iova, size_t size,
 				      size_t granule, void *cookie)
 {
 	qcom_iommu_tlb_inv_range_nosync(iova, size, granule, false, cookie);
-	qcom_iommu_tlb_sync(cookie);
+	qcom_iommu_tlb_sync_online(cookie);
 }
 
 static void qcom_iommu_tlb_add_page(struct iommu_iotlb_gather *gather,
@@ -274,18 +333,26 @@ static const struct iommu_flush_ops qcom_flush_ops = {
 static irqreturn_t qcom_iommu_fault(int irq, void *dev)
 {
 	struct qcom_iommu_ctx *ctx = dev;
+	struct device *parent = ctx->dev->parent;
+	struct qcom_iommu_dev *iommu = dev_get_drvdata(parent);
+	struct iommu_domain *domain;
+	irqreturn_t handled = IRQ_NONE;
 	u32 fsr, fsynr;
 	u64 iova;
+
+	if (iommu->wrapper_clk_sel && pm_runtime_get_if_active(parent) <= 0)
+		return IRQ_NONE;
 
 	fsr = iommu_readl(ctx, ARM_SMMU_CB_FSR);
 
 	if (!(fsr & ARM_SMMU_CB_FSR_FAULT))
-		return IRQ_NONE;
+		goto out;
 
 	fsynr = iommu_readl(ctx, ARM_SMMU_CB_FSYNR0);
 	iova = iommu_readq(ctx, ARM_SMMU_CB_FAR);
 
-	if (report_iommu_fault(ctx->domain, ctx->dev, iova, 0)) {
+	domain = READ_ONCE(ctx->domain);
+	if (!domain || report_iommu_fault(domain, ctx->dev, iova, 0)) {
 		dev_err_ratelimited(ctx->dev,
 				    "Unhandled context fault: fsr=0x%x, "
 				    "iova=0x%016llx, fsynr=0x%x, cb=%d\n",
@@ -294,8 +361,12 @@ static irqreturn_t qcom_iommu_fault(int irq, void *dev)
 
 	iommu_writel(ctx, ARM_SMMU_CB_FSR, fsr);
 	iommu_writel(ctx, ARM_SMMU_CB_RESUME, ARM_SMMU_RESUME_TERMINATE);
+	handled = IRQ_HANDLED;
+out:
+	if (iommu->wrapper_clk_sel)
+		pm_runtime_put(parent);
 
-	return IRQ_HANDLED;
+	return handled;
 }
 
 static void qcom_iommu_bfb_setup(struct qcom_iommu_dev *qcom_iommu)
@@ -388,20 +459,24 @@ static int qcom_iommu_reset_ns(struct qcom_iommu_dev *qcom_iommu)
  * retire, so that the context bank registers can be reprogrammed without
  * in-flight traffic racing the change.
  */
-static void qcom_iommu_halt(struct qcom_iommu_dev *qcom_iommu)
+static int qcom_iommu_halt(struct qcom_iommu_dev *qcom_iommu)
 {
 	void __iomem *reg;
 	u32 val;
+	int ret;
 
 	if (!qcom_iommu->cfg || !qcom_iommu->cfg->halt)
-		return;
+		return 0;
 
 	reg = qcom_iommu->global_base + QCOM_IOMMU_MICRO_MMU_CTRL;
 
 	writel_relaxed(readl_relaxed(reg) | MICRO_MMU_CTRL_HALT_REQ, reg);
 
-	if (readl_poll_timeout(reg, val, val & MICRO_MMU_CTRL_IDLE, 0, 100000))
+	ret = readl_poll_timeout(reg, val, val & MICRO_MMU_CTRL_IDLE, 0, 100000);
+	if (ret)
 		dev_err(qcom_iommu->dev, "timeout waiting for micro-MMU halt\n");
+
+	return ret;
 }
 
 static void qcom_iommu_unhalt(struct qcom_iommu_dev *qcom_iommu)
@@ -416,11 +491,10 @@ static void qcom_iommu_unhalt(struct qcom_iommu_dev *qcom_iommu)
 	writel_relaxed(readl_relaxed(reg) & ~MICRO_MMU_CTRL_HALT_REQ, reg);
 }
 
-static void qcom_iommu_program_ctx(struct qcom_iommu_dev *qcom_iommu,
-				   struct qcom_iommu_ctx *ctx)
+static void qcom_iommu_write_ctx(struct qcom_iommu_dev *qcom_iommu,
+				struct qcom_iommu_ctx *ctx,
+				const struct qcom_iommu_ctx_state *state)
 {
-	qcom_iommu_halt(qcom_iommu);
-
 	/* Disable context bank before programming */
 	iommu_writel(ctx, ARM_SMMU_CB_SCTLR, 0);
 
@@ -432,24 +506,57 @@ static void qcom_iommu_program_ctx(struct qcom_iommu_dev *qcom_iommu,
 		iommu_writel(ctx, ARM_SMMU_CB_ACTLR, QCOM_IOMMU_ACTLR_BPRC);
 
 	/* TTBRs */
-	iommu_writeq(ctx, ARM_SMMU_CB_TTBR0, ctx->ttbr0);
+	iommu_writeq(ctx, ARM_SMMU_CB_TTBR0, state->ttbr0);
 	iommu_writeq(ctx, ARM_SMMU_CB_TTBR1, 0);
 
 	/* TCR; the v7s ASID lives in CONTEXTIDR instead of TTBR0 */
 	if (qcom_iommu_pgtbl_fmt(qcom_iommu) == ARM_V7S)
-		iommu_writel(ctx, ARM_SMMU_CB_CONTEXTIDR, ctx->contextidr);
+		iommu_writel(ctx, ARM_SMMU_CB_CONTEXTIDR, state->contextidr);
 	else
-		iommu_writel(ctx, ARM_SMMU_CB_TCR2, ctx->tcr[1]);
-	iommu_writel(ctx, ARM_SMMU_CB_TCR, ctx->tcr[0]);
+		iommu_writel(ctx, ARM_SMMU_CB_TCR2, state->tcr[1]);
+	iommu_writel(ctx, ARM_SMMU_CB_TCR, state->tcr[0]);
 
 	/* MAIRs (stage-1 only) */
-	iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR0, ctx->mair[0]);
-	iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR1, ctx->mair[1]);
+	iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR0, state->mair[0]);
+	iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR1, state->mair[1]);
 
 	/* SCTLR */
-	iommu_writel(ctx, ARM_SMMU_CB_SCTLR, ctx->sctlr);
+	iommu_writel(ctx, ARM_SMMU_CB_SCTLR, state->sctlr);
+}
+
+static void qcom_iommu_program_ctx(struct qcom_iommu_dev *qcom_iommu,
+				  struct qcom_iommu_ctx *ctx)
+{
+	qcom_iommu_halt(qcom_iommu);
+	qcom_iommu_write_ctx(qcom_iommu, ctx, &ctx->state);
 
 	qcom_iommu_unhalt(qcom_iommu);
+}
+
+/*
+ * Venus uses one Linux-owned context bank. Flush it even if the old
+ * domain was freed while clocks were off. The device link keeps the
+ * client inactive until both this operation and runtime resume succeed.
+ */
+static int qcom_iommu_rearm_venus_ctx(struct qcom_iommu_dev *iommu,
+				     struct qcom_iommu_ctx *ctx,
+				     const struct qcom_iommu_ctx_state *state)
+{
+	int ret;
+
+	ret = qcom_iommu_halt(iommu);
+	if (ret)
+		goto unhalt;
+
+	iommu_writel(ctx, ARM_SMMU_CB_SCTLR, 0);
+	iommu_writel(ctx, ARM_SMMU_CB_S1_TLBIASID, ctx->asid);
+	ret = qcom_iommu_ctx_tlb_sync(ctx);
+	if (!ret && state)
+		qcom_iommu_write_ctx(iommu, ctx, state);
+
+unhalt:
+	qcom_iommu_unhalt(iommu);
+	return ret;
 }
 
 static int qcom_iommu_init_domain(struct iommu_domain *domain,
@@ -461,6 +568,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	struct io_pgtable_ops *pgtbl_ops;
 	struct io_pgtable_cfg pgtbl_cfg;
 	enum io_pgtable_fmt fmt;
+	unsigned long flags = 0;
 	int i, ret = 0;
 	u32 reg;
 
@@ -478,8 +586,14 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		.iommu_dev	= qcom_iommu->dev,
 	};
 
+	qcom_domain->asids = kmemdup_array(fwspec->ids, fwspec->num_ids,
+					 sizeof(*fwspec->ids), GFP_KERNEL);
+	if (!qcom_domain->asids) {
+		ret = -ENOMEM;
+		goto out_unlock;
+	}
+	qcom_domain->num_asids = fwspec->num_ids;
 	qcom_domain->iommu = qcom_iommu;
-	qcom_domain->fwspec = fwspec;
 
 	pgtbl_ops = alloc_io_pgtable_ops(fmt, &pgtbl_cfg, qcom_domain);
 	if (!pgtbl_ops) {
@@ -507,6 +621,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	/* Finish all fallible secure setup before programming any context bank. */
 	for (i = 0; i < fwspec->num_ids; i++) {
 		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
+		struct qcom_iommu_ctx_state state = {};
 
 		/* Secured QSMMU-500/QSMMU-v2 contexts cannot be programmed */
 		if (ctx->secured_ctx) {
@@ -515,20 +630,19 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		}
 
 		if (fmt == ARM_V7S) {
-			ctx->ttbr0 = pgtbl_cfg.arm_v7s_cfg.ttbr;
-			ctx->tcr[0] = pgtbl_cfg.arm_v7s_cfg.tcr;
-			ctx->tcr[1] = 0;
+			state.ttbr0 = pgtbl_cfg.arm_v7s_cfg.ttbr;
+			state.tcr[0] = pgtbl_cfg.arm_v7s_cfg.tcr;
 			/* PRRR/NMRR share the MAIR0/MAIR1 offsets */
-			ctx->mair[0] = pgtbl_cfg.arm_v7s_cfg.prrr;
-			ctx->mair[1] = pgtbl_cfg.arm_v7s_cfg.nmrr;
-			ctx->contextidr = ctx->asid;
+			state.mair[0] = pgtbl_cfg.arm_v7s_cfg.prrr;
+			state.mair[1] = pgtbl_cfg.arm_v7s_cfg.nmrr;
+			state.contextidr = ctx->asid;
 		} else {
-			ctx->ttbr0 = pgtbl_cfg.arm_lpae_s1_cfg.ttbr |
-				     FIELD_PREP(ARM_SMMU_TTBRn_ASID, ctx->asid);
-			ctx->tcr[0] = arm_smmu_lpae_tcr(&pgtbl_cfg) | ARM_SMMU_TCR_EAE;
-			ctx->tcr[1] = arm_smmu_lpae_tcr2(&pgtbl_cfg);
-			ctx->mair[0] = pgtbl_cfg.arm_lpae_s1_cfg.mair;
-			ctx->mair[1] = pgtbl_cfg.arm_lpae_s1_cfg.mair >> 32;
+			state.ttbr0 = pgtbl_cfg.arm_lpae_s1_cfg.ttbr |
+				      FIELD_PREP(ARM_SMMU_TTBRn_ASID, ctx->asid);
+			state.tcr[0] = arm_smmu_lpae_tcr(&pgtbl_cfg) | ARM_SMMU_TCR_EAE;
+			state.tcr[1] = arm_smmu_lpae_tcr2(&pgtbl_cfg);
+			state.mair[0] = pgtbl_cfg.arm_lpae_s1_cfg.mair;
+			state.mair[1] = pgtbl_cfg.arm_lpae_s1_cfg.mair >> 32;
 		}
 
 		reg = ARM_SMMU_SCTLR_CFIE | ARM_SMMU_SCTLR_CFRE |
@@ -545,11 +659,25 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		if (qcom_iommu->cfg && qcom_iommu->cfg->no_stall)
 			reg &= ~ARM_SMMU_SCTLR_CFCFG;
 
-		ctx->sctlr = reg;
+		state.sctlr = reg;
 
-		qcom_iommu_program_ctx(qcom_iommu, ctx);
-
-		ctx->domain = domain;
+		if (qcom_iommu->wrapper_clk_sel) {
+			if (!qcom_iommu_tlb_lock(qcom_iommu, &flags)) {
+				ret = -EIO;
+				goto out_clear_iommu;
+			}
+			ret = qcom_iommu_rearm_venus_ctx(qcom_iommu, ctx, &state);
+			if (ret) {
+				qcom_iommu_tlb_unlock(qcom_iommu, flags);
+				goto out_clear_iommu;
+			}
+			ctx->state = state;
+		} else {
+			ctx->state = state;
+			qcom_iommu_program_ctx(qcom_iommu, ctx);
+		}
+		WRITE_ONCE(ctx->domain, domain);
+		qcom_iommu_tlb_unlock(qcom_iommu, flags);
 	}
 
 	/* Publish page table ops for map/unmap */
@@ -561,7 +689,9 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 out_clear_iommu:
 	free_io_pgtable_ops(pgtbl_ops);
 	qcom_domain->iommu = NULL;
-	qcom_domain->fwspec = NULL;
+	kfree(qcom_domain->asids);
+	qcom_domain->asids = NULL;
+	qcom_domain->num_asids = 0;
 out_unlock:
 	mutex_unlock(&qcom_domain->init_mutex);
 	return ret;
@@ -587,22 +717,48 @@ static struct iommu_domain *qcom_iommu_domain_alloc_paging(struct device *dev)
 	return &qcom_domain->domain;
 }
 
+static void qcom_iommu_venus_forget_domain(struct qcom_iommu_domain *domain)
+{
+	struct qcom_iommu_dev *iommu = domain->iommu;
+	struct qcom_iommu_ctx *ctx = iommu->ctxs[0];
+	unsigned long flags;
+
+	spin_lock_irqsave(&iommu->ctx_lock, flags);
+	if (ctx->domain == &domain->domain) {
+		if (iommu->ctx_online) {
+			iommu_writel(ctx, ARM_SMMU_CB_SCTLR, 0);
+			/* Complete the disable before releasing the page table. */
+			iommu_readl(ctx, ARM_SMMU_CB_SCTLR);
+		}
+		WRITE_ONCE(ctx->domain, NULL);
+	}
+	spin_unlock_irqrestore(&iommu->ctx_lock, flags);
+
+	/* A handler that read the old owner may still be reporting a fault. */
+	synchronize_irq(ctx->irq);
+}
+
 static void qcom_iommu_domain_free(struct iommu_domain *domain)
 {
 	struct qcom_iommu_domain *qcom_domain = to_qcom_iommu_domain(domain);
+	struct qcom_iommu_dev *iommu = qcom_domain->iommu;
 
-	if (qcom_domain->iommu) {
+	if (iommu && iommu->wrapper_clk_sel) {
+		qcom_iommu_venus_forget_domain(qcom_domain);
+		free_io_pgtable_ops(qcom_domain->pgtbl_ops);
+	} else if (iommu) {
 		/*
 		 * NOTE: unmap can be called after client device is powered
 		 * off, for example, with GPUs or anything involving dma-buf.
 		 * So we cannot rely on the device_link.  Make sure the IOMMU
 		 * is on to avoid unclocked accesses in the TLB inv path:
 		 */
-		pm_runtime_get_sync(qcom_domain->iommu->dev);
+		pm_runtime_get_sync(iommu->dev);
 		free_io_pgtable_ops(qcom_domain->pgtbl_ops);
-		pm_runtime_put_sync(qcom_domain->iommu->dev);
+		pm_runtime_put_sync(iommu->dev);
 	}
 
+	kfree(qcom_domain->asids);
 	kfree(qcom_domain);
 }
 
@@ -645,6 +801,7 @@ static int qcom_iommu_identity_attach(struct iommu_domain *identity_domain,
 	struct qcom_iommu_domain *qcom_domain;
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
 	struct qcom_iommu_dev *qcom_iommu = dev_iommu_priv_get(dev);
+	unsigned long flags = 0;
 	unsigned int i;
 	int ret;
 
@@ -659,16 +816,23 @@ static int qcom_iommu_identity_attach(struct iommu_domain *identity_domain,
 	if (ret < 0)
 		return ret;
 
+	if (!qcom_iommu_tlb_lock(qcom_iommu, &flags)) {
+		ret = -EIO;
+		goto out_put;
+	}
+
 	for (i = 0; i < fwspec->num_ids; i++) {
 		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
 
 		/* Disable the context bank: */
 		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, 0);
 
-		ctx->domain = NULL;
+		WRITE_ONCE(ctx->domain, NULL);
 	}
+	qcom_iommu_tlb_unlock(qcom_iommu, flags);
+out_put:
 	pm_runtime_put_sync(qcom_iommu->dev);
-	return 0;
+	return ret;
 }
 
 static struct iommu_domain_ops qcom_iommu_identity_ops = {
@@ -706,41 +870,58 @@ static size_t qcom_iommu_unmap(struct iommu_domain *domain, unsigned long iova,
 	unsigned long flags;
 	struct qcom_iommu_domain *qcom_domain = to_qcom_iommu_domain(domain);
 	struct io_pgtable_ops *ops = qcom_domain->pgtbl_ops;
+	struct qcom_iommu_dev *iommu = qcom_domain->iommu;
 
 	if (!ops)
 		return 0;
 
-	/* NOTE: unmap can be called after client device is powered off,
-	 * for example, with GPUs or anything involving dma-buf.  So we
-	 * cannot rely on the device_link.  Make sure the IOMMU is on to
-	 * avoid unclocked accesses in the TLB inv path:
+	/*
+	 * Unmap can run after the consumer powers down. Venus removes the
+	 * PTEs even when inactive and flushes the whole bank on resume.
+	 * The other instances still need to power up for invalidation.
 	 */
-	pm_runtime_get_sync(qcom_domain->iommu->dev);
+	if (!iommu->wrapper_clk_sel)
+		pm_runtime_get_sync(iommu->dev);
+
 	spin_lock_irqsave(&qcom_domain->pgtbl_lock, flags);
 	ret = ops->unmap_pages(ops, iova, pgsize, pgcount, gather);
 	spin_unlock_irqrestore(&qcom_domain->pgtbl_lock, flags);
-	pm_runtime_put_sync(qcom_domain->iommu->dev);
+
+	if (!iommu->wrapper_clk_sel)
+		pm_runtime_put_sync(iommu->dev);
 
 	return ret;
 }
 
-static void qcom_iommu_flush_iotlb_all(struct iommu_domain *domain)
+static void qcom_iommu_sync_domain(struct iommu_domain *domain, bool invalidate)
 {
 	struct qcom_iommu_domain *qcom_domain = to_qcom_iommu_domain(domain);
-	struct io_pgtable *pgtable = container_of(qcom_domain->pgtbl_ops,
-						  struct io_pgtable, ops);
+	struct qcom_iommu_dev *iommu = qcom_domain->iommu;
+
 	if (!qcom_domain->pgtbl_ops)
 		return;
 
-	pm_runtime_get_sync(qcom_domain->iommu->dev);
-	qcom_iommu_tlb_sync(pgtable->cookie);
-	pm_runtime_put_sync(qcom_domain->iommu->dev);
+	if (!iommu->wrapper_clk_sel)
+		pm_runtime_get_sync(iommu->dev);
+
+	if (invalidate)
+		qcom_iommu_tlb_inv_context(qcom_domain);
+	else
+		qcom_iommu_tlb_sync_online(qcom_domain);
+
+	if (!iommu->wrapper_clk_sel)
+		pm_runtime_put_sync(iommu->dev);
+}
+
+static void qcom_iommu_flush_iotlb_all(struct iommu_domain *domain)
+{
+	qcom_iommu_sync_domain(domain, true);
 }
 
 static void qcom_iommu_iotlb_sync(struct iommu_domain *domain,
 				  struct iommu_iotlb_gather *gather)
 {
-	qcom_iommu_flush_iotlb_all(domain);
+	qcom_iommu_sync_domain(domain, false);
 }
 
 static phys_addr_t qcom_iommu_iova_to_phys(struct iommu_domain *domain,
@@ -951,6 +1132,7 @@ static int qcom_iommu_ctx_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
+	ctx->irq = irq;
 
 	if (of_device_is_compatible(dev->of_node, "qcom,msm-iommu-v2-sec"))
 		ctx->secured_ctx = true;
@@ -1056,6 +1238,7 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	qcom_iommu->max_asid = max_asid;
 	qcom_iommu->dev = dev;
 	qcom_iommu->cfg = of_device_get_match_data(dev);
+	spin_lock_init(&qcom_iommu->ctx_lock);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (res) {
@@ -1074,6 +1257,15 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	}
 
 	if (qcom_iommu->cfg && qcom_iommu->cfg->has_wrapper_clk_sel) {
+		if (max_asid || of_get_available_child_count(dev->of_node) != 1)
+			return dev_err_probe(dev, -EINVAL, "Venus requires context bank 0\n");
+
+		for_each_available_child_of_node_scoped(dev->of_node, child) {
+			if (!of_device_is_compatible(child, "qcom,msm-iommu-v1-ns") ||
+			    get_asid(child))
+				return dev_err_probe(dev, -EINVAL, "invalid Venus context bank\n");
+		}
+
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "clock-select");
 		if (!res || resource_size(res) != sizeof(u32))
 			return dev_err_probe(dev, -EINVAL, "invalid wrapper clock register\n");
@@ -1197,6 +1389,23 @@ static int qcom_iommu_select_wrapper_clk(struct qcom_iommu_dev *qcom_iommu)
 	return 0;
 }
 
+static int qcom_iommu_resume_venus(struct qcom_iommu_dev *iommu)
+{
+	struct qcom_iommu_ctx *ctx;
+	unsigned long flags;
+	int ret = 0;
+
+	spin_lock_irqsave(&iommu->ctx_lock, flags);
+	ctx = iommu->ctxs[0];
+	if (ctx)
+		ret = qcom_iommu_rearm_venus_ctx(iommu, ctx, ctx->domain ? &ctx->state : NULL);
+	if (!ret)
+		iommu->ctx_online = true;
+	spin_unlock_irqrestore(&iommu->ctx_lock, flags);
+
+	return ret;
+}
+
 static int __maybe_unused qcom_iommu_resume(struct device *dev)
 {
 	struct qcom_iommu_dev *qcom_iommu = dev_get_drvdata(dev);
@@ -1205,7 +1414,7 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 
 	ret = clk_bulk_prepare_enable(CLK_NUM, qcom_iommu->clks);
 	if (ret < 0)
-		return ret;
+		goto out_error;
 
 	ret = qcom_iommu_select_wrapper_clk(qcom_iommu);
 	if (ret)
@@ -1223,7 +1432,11 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 
 	qcom_iommu_bfb_setup(qcom_iommu);
 
-	if (qcom_iommu->cfg && qcom_iommu->cfg->ctx_restore) {
+	if (qcom_iommu->wrapper_clk_sel) {
+		ret = qcom_iommu_resume_venus(qcom_iommu);
+		if (ret)
+			goto err_disable_clks;
+	} else if (qcom_iommu->cfg && qcom_iommu->cfg->ctx_restore) {
 		/* Restore context banks lost over power collapse */
 		for (i = 0; i <= qcom_iommu->max_asid; i++) {
 			struct qcom_iommu_ctx *ctx = qcom_iommu->ctxs[i];
@@ -1237,12 +1450,31 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 
 err_disable_clks:
 	clk_bulk_disable_unprepare(CLK_NUM, qcom_iommu->clks);
+out_error:
+	/* Device links reserve -EACCES for a supplier with PM disabled. */
+	if (qcom_iommu->wrapper_clk_sel && ret == -EACCES)
+		ret = -EIO;
 	return ret;
 }
 
 static int __maybe_unused qcom_iommu_suspend(struct device *dev)
 {
 	struct qcom_iommu_dev *qcom_iommu = dev_get_drvdata(dev);
+	struct qcom_iommu_ctx *ctx;
+	unsigned long flags;
+	int ret = 0;
+
+	if (qcom_iommu->wrapper_clk_sel) {
+		spin_lock_irqsave(&qcom_iommu->ctx_lock, flags);
+		ctx = qcom_iommu->ctxs[0];
+		if (ctx && qcom_iommu->ctx_online)
+			ret = qcom_iommu_rearm_venus_ctx(qcom_iommu, ctx, NULL);
+		if (!ret)
+			qcom_iommu->ctx_online = false;
+		spin_unlock_irqrestore(&qcom_iommu->ctx_lock, flags);
+		if (ret)
+			return ret;
+	}
 
 	clk_bulk_disable_unprepare(CLK_NUM, qcom_iommu->clks);
 
