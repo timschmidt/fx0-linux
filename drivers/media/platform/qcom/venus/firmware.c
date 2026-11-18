@@ -236,10 +236,9 @@ int venus_boot(struct venus_core *core)
 		fwpath = core->res->fwname;
 
 	ret = venus_load_fw(core, fwpath, &mem_phys, &mem_size);
-	if (ret) {
-		dev_err(dev, "fail to load video firmware\n");
-		return -EINVAL;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret < 0 ? ret : -EIO,
+				     "failed to load %s (status %d)\n", fwpath, ret);
 
 	core->fw.mem_size = mem_size;
 	core->fw.mem_phys = mem_phys;
@@ -250,7 +249,8 @@ int venus_boot(struct venus_core *core)
 		ret = venus_boot_no_tz(core, mem_phys, mem_size);
 
 	if (ret)
-		return ret;
+		return dev_err_probe(dev, ret < 0 ? ret : -EIO,
+				     "failed to start %s (status %d)\n", fwpath, ret);
 
 	if (core->use_tz && res->cp_size) {
 		/*
@@ -271,7 +271,7 @@ int venus_boot(struct venus_core *core)
 			qcom_scm_pas_shutdown(VENUS_PAS_ID);
 			dev_err(dev, "set virtual address ranges fail (%d)\n",
 				ret);
-			return ret;
+			return ret < 0 ? ret : -EIO;
 		}
 	}
 

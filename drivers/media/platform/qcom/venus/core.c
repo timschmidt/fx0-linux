@@ -798,6 +798,8 @@ static const struct bw_tbl msm8226_bw_dec[] = {
 	{  36000, 103000, 134000 },
 };
 
+#define MSM8226_VENUS_FIRMWARE "qcom/msm8226/venus"
+
 static const struct venus_resources msm8226_res = {
 	.freq_tbl = msm8226_freq_table,
 	.freq_tbl_size = ARRAY_SIZE(msm8226_freq_table),
@@ -813,7 +815,7 @@ static const struct venus_resources msm8226_res = {
 	.hfi_version = HFI_VERSION_1XX,
 	.vmem_id = VIDC_RESOURCE_NONE,
 	.dma_mask = DMA_BIT_MASK(31),
-	.fwname = "qcom/msm8226/venus.mdt",
+	.fwname = MSM8226_VENUS_FIRMWARE ".mdt",
 	.dec_nodename = "video-decoder",
 	.enc_nodename = "video-encoder",
 	.split_reg_banks = true,
@@ -1316,5 +1318,9 @@ static struct platform_driver qcom_venus_driver = {
 module_platform_driver(qcom_venus_driver);
 
 MODULE_ALIAS("platform:qcom-venus");
+MODULE_FIRMWARE(MSM8226_VENUS_FIRMWARE ".mdt");
+MODULE_FIRMWARE(MSM8226_VENUS_FIRMWARE ".b02");
+MODULE_FIRMWARE(MSM8226_VENUS_FIRMWARE ".b03");
+MODULE_FIRMWARE(MSM8226_VENUS_FIRMWARE ".b04");
 MODULE_DESCRIPTION("Qualcomm Venus video encoder and decoder driver");
 MODULE_LICENSE("GPL v2");
