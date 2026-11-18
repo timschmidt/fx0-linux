@@ -44,6 +44,7 @@ struct rpm_clk_resource {
  * @type: the ICC provider type
  * @regmap: regmap for QoS registers read/write access
  * @qos_offset: offset to QoS registers
+ * @noc_qos_stride: spacing between ports in the legacy NoC register block
  * @ab_coeff: a percentage-based coefficient for compensating the AB calculations
  * @ib_coeff: an inverse-percentage-based coefficient for compensating the IB calculations
  * @bus_clk_rate: bus clock rate in Hz
@@ -59,6 +60,7 @@ struct qcom_icc_provider {
 	enum qcom_icc_type type;
 	struct regmap *regmap;
 	unsigned int qos_offset;
+	unsigned int noc_qos_stride;
 	u16 ab_coeff;
 	u16 ib_coeff;
 	u32 bus_clk_rate[QCOM_SMD_RPM_STATE_NUM];
@@ -135,6 +137,7 @@ struct qcom_icc_desc {
 	enum qcom_icc_type type;
 	const struct regmap_config *regmap_cfg;
 	unsigned int qos_offset;
+	unsigned int noc_qos_stride;
 	u16 ab_coeff;
 	u16 ib_coeff;
 };
