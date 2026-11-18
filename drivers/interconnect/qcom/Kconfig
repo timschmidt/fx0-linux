@@ -17,6 +17,17 @@ config INTERCONNECT_QCOM_GLYMUR
          This is a driver for the Qualcomm Network-on-Chip on glymur-based
          platforms.
 
+config INTERCONNECT_QCOM_MSM8226
+	tristate "Qualcomm MSM8226 multimedia interconnect preview"
+	depends on INTERCONNECT_QCOM
+	depends on QCOM_SMD_RPM
+	select INTERCONNECT_QCOM_SMD_RPM
+	help
+	  Support the MSM8226 multimedia-to-memory route used by Venus.
+	  The multimedia NoC uses the multimedia clock controller and
+	  votes on the memory bus go through the Qualcomm RPM.
+	  This diagnostic option describes the Venus data path.
+
 config INTERCONNECT_QCOM_MSM8909
 	tristate "Qualcomm MSM8909 interconnect driver"
 	depends on INTERCONNECT_QCOM
