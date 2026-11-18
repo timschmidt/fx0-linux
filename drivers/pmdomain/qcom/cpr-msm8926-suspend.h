@@ -5,6 +5,7 @@
 #include <linux/bits.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
+#include <linux/printk.h>
 #include <linux/regmap.h>
 
 #include "cpr-voltage.h"
@@ -150,6 +151,8 @@ static inline int cpr_suspend_prepare(struct cpr_msm8926_suspend *sleep,
 				      int max_apc_uV)
 {
 	struct cpr_voltage *rails = sleep->rails;
+	unsigned int pll_enabled;
+	bool pll_prepared;
 	int ret;
 
 	if (sleep->active || sleep->exclusive || !rails || !rails->apc || !rails->mx ||
@@ -198,14 +201,18 @@ static inline int cpr_suspend_prepare(struct cpr_msm8926_suspend *sleep,
 	if (ret)
 		goto restore;
 	ret = clk_set_rate(sleep->clock, CPR_SUSPEND_SAFE_RATE);
+	pr_info("CPR suspend 300 MHz clock switch returned %d\n", ret);
 	if (ret)
 		goto restore;
 	ret = cpr_suspend_check_clock(sleep, CPR_SUSPEND_SAFE_RATE, 4 << 8 | 3);
 	if (ret)
 		goto restore;
 	/* CCF must re-enable the PLL on reparent, even if its context was lost. */
-	if (__clk_get_enable_count(sleep->pll) ||
-	    clk_hw_is_prepared(__clk_get_hw(sleep->pll))) {
+	pll_enabled = __clk_get_enable_count(sleep->pll);
+	pll_prepared = clk_hw_is_prepared(__clk_get_hw(sleep->pll));
+	if (pll_enabled || pll_prepared) {
+		pr_info("CPR suspend PLL guard: enable_count=%u prepared=%u\n",
+			pll_enabled, pll_prepared);
 		ret = -EBUSY;
 		goto restore;
 	}

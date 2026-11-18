@@ -85,6 +85,28 @@ DEFINE_EVENT(clk, clk_unprepare_complete,
 	TP_ARGS(core)
 );
 
+TRACE_EVENT(clk_prepare_ref,
+
+	TP_PROTO(struct clk_core *core, bool acquire),
+
+	TP_ARGS(core, acquire),
+
+	TP_STRUCT__entry(
+		__string(name, core->name)
+		__field(bool, acquire)
+		__field(unsigned int, count)
+	),
+
+	TP_fast_assign(
+		__assign_str(name);
+		__entry->acquire = acquire;
+		__entry->count = core->prepare_count;
+	),
+
+	TP_printk("%s %s count=%u", __get_str(name),
+		  __entry->acquire ? "get" : "put", __entry->count)
+);
+
 DECLARE_EVENT_CLASS(clk_rate,
 
 	TP_PROTO(struct clk_core *core, unsigned long rate),

@@ -1055,7 +1055,9 @@ static void clk_core_unprepare(struct clk_core *core)
 	if (core->flags & CLK_SET_RATE_GATE)
 		clk_core_rate_unprotect(core);
 
-	if (--core->prepare_count > 0)
+	core->prepare_count--;
+	trace_clk_prepare_ref(core, false);
+	if (core->prepare_count > 0)
 		return;
 
 	WARN(core->enable_count > 0, "Unpreparing enabled %s\n", core->name);
@@ -1127,6 +1129,7 @@ static int clk_core_prepare(struct clk_core *core)
 	}
 
 	core->prepare_count++;
+	trace_clk_prepare_ref(core, true);
 
 	/*
 	 * CLK_SET_RATE_GATE is a special case of clock protection
