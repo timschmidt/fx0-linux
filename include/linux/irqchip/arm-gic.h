@@ -135,6 +135,7 @@ struct gic_chip_data;
 void gic_cascade_irq(unsigned int gic_nr, unsigned int irq);
 int gic_cpu_if_down(unsigned int gic_nr);
 int gic_cpu_quiesce_ppis(unsigned int gic_nr);
+int gic_send_cpu_wakeup_sgi(unsigned int cpu, unsigned int sgi);
 void gic_cpu_save(struct gic_chip_data *gic);
 void gic_cpu_restore(struct gic_chip_data *gic);
 void gic_dist_save(struct gic_chip_data *gic);
