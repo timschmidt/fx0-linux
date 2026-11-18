@@ -46,6 +46,7 @@
 #define QCOM_IOMMU_MICRO_MMU_CTRL	(QCOM_IOMMU_IMPL_DEF + 0x000)
 #define MICRO_MMU_CTRL_HALT_REQ		BIT(2)
 #define MICRO_MMU_CTRL_IDLE		BIT(3)
+#define QCOM_IOMMU_WRAPPER_CLK_SEL	BIT(0)
 
 /* Redirect all cacheable requests to the L2 slave port */
 #define QCOM_IOMMU_ACTLR_BPRC		(BIT(28) | BIT(29) | BIT(30))
@@ -85,6 +86,7 @@ struct qcom_iommu_cfg {
 	bool				 halt;
 	/* faulting transactions must terminate rather than stall */
 	bool				 no_stall;
+	bool				 has_wrapper_clk_sel;
 	const struct qcom_iommu_bfb_reg	*bfb;
 	unsigned int			 num_bfb;
 	const struct qcom_iommu_sid	*sids;	/* one SMR slot per entry */
@@ -99,6 +101,7 @@ struct qcom_iommu_dev {
 	struct clk_bulk_data clks[CLK_NUM];
 	void __iomem		*local_base;
 	void __iomem		*global_base;
+	void __iomem		*wrapper_clk_sel;
 	u32			 sec_id;
 	bool			 non_secure;
 	u8			 max_asid;
@@ -1063,6 +1066,15 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 				     "missing global register space\n");
 	}
 
+	if (qcom_iommu->cfg && qcom_iommu->cfg->has_wrapper_clk_sel) {
+		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "clock-select");
+		if (!res || resource_size(res) != sizeof(u32))
+			return dev_err_probe(dev, -EINVAL, "invalid wrapper clock register\n");
+		qcom_iommu->wrapper_clk_sel = devm_ioremap_resource(dev, res);
+		if (IS_ERR(qcom_iommu->wrapper_clk_sel))
+			return PTR_ERR(qcom_iommu->wrapper_clk_sel);
+	}
+
 	clk = devm_clk_get(dev, "iface");
 	if (IS_ERR(clk)) {
 		dev_err(dev, "failed to get iface clock\n");
@@ -1082,17 +1094,21 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		dev_err(dev, "failed to get tbu clock\n");
 		return PTR_ERR(clk);
 	}
+	if (!clk && qcom_iommu->wrapper_clk_sel)
+		return dev_err_probe(dev, -EINVAL, "missing Venus TBU clock\n");
 	qcom_iommu->clks[CLK_TBU].clk = clk;
 
 	if (of_property_read_u32(dev->of_node, "qcom,iommu-secure-id",
 				 &qcom_iommu->sec_id)) {
-		if (!qcom_iommu->cfg) {
+		if (!qcom_iommu->cfg || qcom_iommu->cfg->has_wrapper_clk_sel) {
 			dev_err(dev, "missing qcom,iommu-secure-id property\n");
 			return -ENODEV;
 		}
 		/* The secure world does not manage this instance at all */
 		qcom_iommu->non_secure = true;
 	}
+	if (qcom_iommu->wrapper_clk_sel && qcom_iommu->sec_id)
+		return dev_err_probe(dev, -EINVAL, "invalid secure ID for Venus IOMMU\n");
 
 	if (qcom_iommu_has_secure_context(qcom_iommu)) {
 		ret = qcom_iommu_sec_ptbl_init(dev);
@@ -1158,6 +1174,22 @@ static void qcom_iommu_device_remove(struct platform_device *pdev)
 	platform_set_drvdata(pdev, NULL);
 }
 
+static int qcom_iommu_select_wrapper_clk(struct qcom_iommu_dev *qcom_iommu)
+{
+	void __iomem *select = qcom_iommu->wrapper_clk_sel;
+	u32 value;
+
+	if (!select)
+		return 0;
+
+	value = readl(select);
+	writel(value & ~QCOM_IOMMU_WRAPPER_CLK_SEL, select);
+	if (readl(select) & QCOM_IOMMU_WRAPPER_CLK_SEL)
+		return -EIO;
+
+	return 0;
+}
+
 static int __maybe_unused qcom_iommu_resume(struct device *dev)
 {
 	struct qcom_iommu_dev *qcom_iommu = dev_get_drvdata(dev);
@@ -1167,6 +1199,10 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 	ret = clk_bulk_prepare_enable(CLK_NUM, qcom_iommu->clks);
 	if (ret < 0)
 		return ret;
+
+	ret = qcom_iommu_select_wrapper_clk(qcom_iommu);
+	if (ret)
+		goto err_disable_clks;
 
 	if (qcom_iommu->non_secure) {
 		ret = qcom_iommu_reset_ns(qcom_iommu);
@@ -1411,12 +1447,52 @@ static const struct qcom_iommu_cfg msm8974_venus_cfg = {
 	.num_bfb = ARRAY_SIZE(msm8974_venus_bfb),
 };
 
+/* Qualcomm MSM8226 downstream Venus bandwidth-fetch programming. */
+static const struct qcom_iommu_bfb_reg msm8226_venus_bfb[] = {
+	{ 0x04c, 0xffffffff },
+	{ 0x050, 0xffffffff },
+	{ 0x514, 0x00000004 },
+	{ 0x540, 0x00000008 },
+	{ 0x56c, 0x00000000 },
+	{ 0x0ac, 0x00000000 },
+	{ 0x15c, 0x00000094 },
+	{ 0x20c, 0x000000b4 },
+	{ 0x314, 0x00000000 },
+	{ 0x394, 0x00000094 },
+	{ 0x414, 0x00000114 },
+	{ 0x008, 0x00000000 },
+	{ 0x00c, 0x00000000 },
+	{ 0x010, 0x00000000 },
+	{ 0x014, 0x00000000 },
+	{ 0x018, 0x00000000 },
+	{ 0x01c, 0x00000000 },
+	{ 0x020, 0x00000000 },
+	{ 0x024, 0x00000000 },
+	{ 0x028, 0x00000000 },
+	{ 0x02c, 0x00000000 },
+	{ 0x030, 0x00000000 },
+	{ 0x034, 0x00000000 },
+	{ 0x038, 0x00000000 },
+};
+
+static const struct qcom_iommu_cfg msm8226_venus_cfg = {
+	.halt = true,
+	.no_stall = true,
+	.has_wrapper_clk_sel = true,
+	.fmt = ARM_V7S,
+	.no_afe = true,
+	.ctx_restore = true,
+	.bfb = msm8226_venus_bfb,
+	.num_bfb = ARRAY_SIZE(msm8226_venus_bfb),
+};
+
 static const struct of_device_id qcom_iommu_of_match[] = {
 	{ .compatible = "qcom,msm-iommu-v1" },
 	{ .compatible = "qcom,msm-iommu-v2" },
 	{ .compatible = "qcom,msm8974-gpu-iommu", .data = &msm8974_gpu_cfg },
 	{ .compatible = "qcom,msm8226-gpu-iommu", .data = &msm8226_gpu_cfg },
 	{ .compatible = "qcom,msm8226-mdp-iommu", .data = &msm8226_mdp_cfg },
+	{ .compatible = "qcom,msm8226-venus-iommu", .data = &msm8226_venus_cfg },
 	{ .compatible = "qcom,msm8226-vfe-iommu", .data = &msm8226_vfe_cfg },
 	{ .compatible = "qcom,msm8974-mdp-iommu", .data = &msm8974_mdp_cfg },
 	{ .compatible = "qcom,msm8974-venus-iommu", .data = &msm8974_venus_cfg },

@@ -282,6 +282,34 @@ static void venus_assign_register_offsets(struct venus_core *core)
 	}
 }
 
+static int venus_map_registers(struct platform_device *pdev, struct venus_core *core)
+{
+	if (!core->res->split_reg_banks) {
+		core->base = devm_platform_ioremap_resource(pdev, 0);
+		if (IS_ERR(core->base))
+			return PTR_ERR(core->base);
+		venus_assign_register_offsets(core);
+		return 0;
+	}
+
+	core->vbif_base = devm_platform_ioremap_resource_byname(pdev, "vbif");
+	if (IS_ERR(core->vbif_base))
+		return PTR_ERR(core->vbif_base);
+	core->cpu_base = devm_platform_ioremap_resource_byname(pdev, "cpu");
+	if (IS_ERR(core->cpu_base))
+		return PTR_ERR(core->cpu_base);
+	core->wrapper_version = devm_platform_ioremap_resource_byname(pdev, "wrapper-version");
+	if (IS_ERR(core->wrapper_version))
+		return PTR_ERR(core->wrapper_version);
+	core->wrapper_base = devm_platform_ioremap_resource_byname(pdev, "wrapper");
+	if (IS_ERR(core->wrapper_base))
+		return PTR_ERR(core->wrapper_base);
+
+	core->cpu_cs_base = core->cpu_base + (CPU_CS_BASE - CPU_BASE);
+	core->cpu_ic_base = core->cpu_base + (CPU_IC_BASE - CPU_BASE);
+	return 0;
+}
+
 static irqreturn_t venus_isr_thread(int irq, void *dev_id)
 {
 	struct venus_core *core = dev_id;
@@ -458,10 +486,13 @@ static int venus_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	core->dev = dev;
+	core->res = of_device_get_match_data(dev);
+	if (!core->res)
+		return -ENODEV;
 
-	core->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(core->base))
-		return PTR_ERR(core->base);
+	ret = venus_map_registers(pdev, core);
+	if (ret)
+		return ret;
 
 	core->video_path = devm_of_icc_get(dev, "video-mem");
 	if (IS_ERR(core->video_path))
@@ -470,14 +501,13 @@ static int venus_probe(struct platform_device *pdev)
 	core->cpucfg_path = devm_of_icc_get(dev, "cpu-cfg");
 	if (IS_ERR(core->cpucfg_path))
 		return PTR_ERR(core->cpucfg_path);
+	if (core->res->require_interconnects && (!core->video_path || !core->cpucfg_path))
+		return dev_err_probe(dev, -ENODEV,
+				     "video-mem and cpu-cfg interconnects required\n");
 
 	core->irq = platform_get_irq(pdev, 0);
 	if (core->irq < 0)
 		return core->irq;
-
-	core->res = of_device_get_match_data(dev);
-	if (!core->res)
-		return -ENODEV;
 
 	mutex_init(&core->pm_lock);
 
@@ -515,8 +545,6 @@ static int venus_probe(struct platform_device *pdev)
 					"venus", core);
 	if (ret)
 		goto err_unresv_iova_region;
-
-	venus_assign_register_offsets(core);
 
 	ret = v4l2_device_register(dev, &core->v4l2_dev);
 	if (ret)
@@ -737,6 +765,61 @@ static const struct dev_pm_ops venus_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
 				pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(venus_runtime_suspend, venus_runtime_resume, NULL)
+};
+
+static const struct freq_tbl msm8226_freq_table[] = {
+	{ 352800, 160000000 },
+	{ 244800, 133330000 },
+	{ 108000,  66700000 },
+};
+
+static const struct reg_val msm8226_reg_preset[] = {
+	{ 0xe0024, 0x00000000 },
+	{ 0x80124, 0x00000003 },
+	{ 0xe0020, 0x05555556 },
+	{ 0x800b0, 0x10101001 },
+	{ 0x800b4, 0x00101010 },
+	{ 0x800c0, 0x1010100f },
+	{ 0x800c4, 0x00101010 },
+	{ 0x800d0, 0x00000010 },
+	{ 0x800d4, 0x00000010 },
+	{ 0x800d8, 0x00000707 },
+};
+
+/* Downstream DDR usecases, capped at the last available vector. */
+static const struct bw_tbl msm8226_bw_enc[] = {
+	{ 352800, 866000, 953000 },
+	{ 110400, 384000, 422000 },
+	{  36000, 129000, 142000 },
+};
+
+static const struct bw_tbl msm8226_bw_dec[] = {
+	{ 352800, 505000, 657000 },
+	{ 110400, 268000, 348000 },
+	{  36000, 103000, 134000 },
+};
+
+static const struct venus_resources msm8226_res = {
+	.freq_tbl = msm8226_freq_table,
+	.freq_tbl_size = ARRAY_SIZE(msm8226_freq_table),
+	.reg_tbl = msm8226_reg_preset,
+	.reg_tbl_size = ARRAY_SIZE(msm8226_reg_preset),
+	.bw_tbl_enc = msm8226_bw_enc,
+	.bw_tbl_enc_size = ARRAY_SIZE(msm8226_bw_enc),
+	.bw_tbl_dec = msm8226_bw_dec,
+	.bw_tbl_dec_size = ARRAY_SIZE(msm8226_bw_dec),
+	.clks = { "core", "iface", "bus" },
+	.clks_num = 3,
+	.max_load = 352800,
+	.hfi_version = HFI_VERSION_1XX,
+	.vmem_id = VIDC_RESOURCE_NONE,
+	.dma_mask = DMA_BIT_MASK(31),
+	.fwname = "qcom/msm8226/venus.mdt",
+	.dec_nodename = "video-decoder",
+	.enc_nodename = "video-encoder",
+	.split_reg_banks = true,
+	.require_interconnects = true,
+	.bw_per_direction = true,
 };
 
 static const struct freq_tbl msm8916_freq_table[] = {
@@ -1206,6 +1289,7 @@ static const struct venus_resources qcm2290_res = {
 };
 
 static const struct of_device_id venus_dt_match[] = {
+	{ .compatible = "qcom,msm8226-venus", .data = &msm8226_res, },
 	{ .compatible = "qcom,msm8916-venus", .data = &msm8916_res, },
 	{ .compatible = "qcom,msm8996-venus", .data = &msm8996_res, },
 	{ .compatible = "qcom,msm8998-venus", .data = &msm8998_res, },

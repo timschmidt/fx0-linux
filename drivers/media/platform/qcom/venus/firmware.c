@@ -25,32 +25,33 @@
 #define VENUS_FW_MEM_SIZE		(6 * SZ_1M)
 #define VENUS_FW_START_ADDR		0x0
 
+static void __iomem *venus_fw_wrapper_addr(struct venus_core *core, u32 reg)
+{
+	if (IS_IRIS2(core) || IS_IRIS2_1(core))
+		return core->wrapper_tz_base + reg;
+	return venus_wrapper_addr(core, reg);
+}
+
 static void venus_reset_cpu(struct venus_core *core)
 {
 	u32 fw_size = core->fw.mapped_mem_size;
-	void __iomem *wrapper_base;
 
-	if (IS_IRIS2(core) || IS_IRIS2_1(core))
-		wrapper_base = core->wrapper_tz_base;
-	else
-		wrapper_base = core->wrapper_base;
-
-	writel(0, wrapper_base + WRAPPER_FW_START_ADDR);
-	writel(fw_size, wrapper_base + WRAPPER_FW_END_ADDR);
-	writel(0, wrapper_base + WRAPPER_CPA_START_ADDR);
-	writel(fw_size, wrapper_base + WRAPPER_CPA_END_ADDR);
-	writel(fw_size, wrapper_base + WRAPPER_NONPIX_START_ADDR);
-	writel(fw_size, wrapper_base + WRAPPER_NONPIX_END_ADDR);
+	writel(0, venus_fw_wrapper_addr(core, WRAPPER_FW_START_ADDR));
+	writel(fw_size, venus_fw_wrapper_addr(core, WRAPPER_FW_END_ADDR));
+	writel(0, venus_fw_wrapper_addr(core, WRAPPER_CPA_START_ADDR));
+	writel(fw_size, venus_fw_wrapper_addr(core, WRAPPER_CPA_END_ADDR));
+	writel(fw_size, venus_fw_wrapper_addr(core, WRAPPER_NONPIX_START_ADDR));
+	writel(fw_size, venus_fw_wrapper_addr(core, WRAPPER_NONPIX_END_ADDR));
 
 	if (IS_IRIS2(core) || IS_IRIS2_1(core)) {
 		/* Bring XTSS out of reset */
-		writel(0, wrapper_base + WRAPPER_TZ_XTSS_SW_RESET);
+		writel(0, core->wrapper_tz_base + WRAPPER_TZ_XTSS_SW_RESET);
 	} else {
-		writel(0x0, wrapper_base + WRAPPER_CPU_CGC_DIS);
-		writel(0x0, wrapper_base + WRAPPER_CPU_CLOCK_CONFIG);
+		writel(0x0, venus_wrapper_addr(core, WRAPPER_CPU_CGC_DIS));
+		writel(0x0, venus_wrapper_addr(core, WRAPPER_CPU_CLOCK_CONFIG));
 
 		/* Bring ARM9 out of reset */
-		writel(0, wrapper_base + WRAPPER_A9SS_SW_RESET);
+		writel(0, venus_wrapper_addr(core, WRAPPER_A9SS_SW_RESET));
 	}
 }
 
@@ -73,7 +74,7 @@ int venus_set_hw_state(struct venus_core *core, bool resume)
 			       core->wrapper_tz_base + WRAPPER_TZ_XTSS_SW_RESET);
 		else
 			writel(WRAPPER_A9SS_SW_RESET_BIT,
-			       core->wrapper_base + WRAPPER_A9SS_SW_RESET);
+			       venus_wrapper_addr(core, WRAPPER_A9SS_SW_RESET));
 	}
 
 	return 0;
@@ -178,7 +179,6 @@ static int venus_shutdown_no_tz(struct venus_core *core)
 	size_t unmapped;
 	u32 reg;
 	struct device *dev = core->fw.dev;
-	void __iomem *wrapper_base = core->wrapper_base;
 	void __iomem *wrapper_tz_base = core->wrapper_tz_base;
 
 	if (IS_IRIS2(core) || IS_IRIS2_1(core)) {
@@ -188,9 +188,9 @@ static int venus_shutdown_no_tz(struct venus_core *core)
 		writel(reg, wrapper_tz_base + WRAPPER_TZ_XTSS_SW_RESET);
 	} else {
 		/* Assert the reset to ARM9 */
-		reg = readl(wrapper_base + WRAPPER_A9SS_SW_RESET);
+		reg = readl(venus_wrapper_addr(core, WRAPPER_A9SS_SW_RESET));
 		reg |= WRAPPER_A9SS_SW_RESET_BIT;
-		writel(reg, wrapper_base + WRAPPER_A9SS_SW_RESET);
+		writel(reg, venus_wrapper_addr(core, WRAPPER_A9SS_SW_RESET));
 	}
 
 	iommu = core->fw.iommu_domain;

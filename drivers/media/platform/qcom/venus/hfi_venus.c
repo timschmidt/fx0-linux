@@ -366,13 +366,24 @@ static void venus_free(struct venus_hfi_device *hdev, struct mem_desc *mem)
 
 static void venus_set_registers(struct venus_hfi_device *hdev)
 {
-	const struct venus_resources *res = hdev->core->res;
+	struct venus_core *core = hdev->core;
+	const struct venus_resources *res = core->res;
 	const struct reg_val *tbl = res->reg_tbl;
 	unsigned int count = res->reg_tbl_size;
+	void __iomem *addr;
 	unsigned int i;
+	u32 reg;
 
-	for (i = 0; i < count; i++)
-		writel(tbl[i].value, hdev->core->base + tbl[i].reg);
+	for (i = 0; i < count; i++) {
+		reg = tbl[i].reg;
+		if (!res->split_reg_banks)
+			addr = core->base + reg;
+		else if (reg >= WRAPPER_BASE)
+			addr = venus_wrapper_addr(core, reg - WRAPPER_BASE);
+		else
+			addr = core->vbif_base + (reg - VBIF_BASE);
+		writel(tbl[i].value, addr);
+	}
 }
 
 static void venus_soft_int(struct venus_hfi_device *hdev)
@@ -470,18 +481,17 @@ static int venus_boot_core(struct venus_hfi_device *hdev)
 	u32 ctrl_status = 0, mask_val = 0;
 	unsigned int count = 0;
 	void __iomem *cpu_cs_base = hdev->core->cpu_cs_base;
-	void __iomem *wrapper_base = hdev->core->wrapper_base;
 	int ret = 0;
 
 	if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core)) {
-		mask_val = readl(wrapper_base + WRAPPER_INTR_MASK);
+		mask_val = readl(venus_wrapper_addr(hdev->core, WRAPPER_INTR_MASK));
 		mask_val &= ~(WRAPPER_INTR_MASK_A2HWD_BASK_V6 |
 			      WRAPPER_INTR_MASK_A2HCPU_MASK);
 	} else {
 		mask_val = WRAPPER_INTR_MASK_A2HVCODEC_MASK;
 	}
 
-	writel(mask_val, wrapper_base + WRAPPER_INTR_MASK);
+	writel(mask_val, venus_wrapper_addr(hdev->core, WRAPPER_INTR_MASK));
 	if (IS_V1(hdev->core))
 		writel(1, cpu_cs_base + CPU_CS_SCIACMDARG3);
 
@@ -514,11 +524,10 @@ static int venus_boot_core(struct venus_hfi_device *hdev)
 static u32 venus_hwversion(struct venus_hfi_device *hdev)
 {
 	struct device *dev = hdev->core->dev;
-	void __iomem *wrapper_base = hdev->core->wrapper_base;
 	u32 ver;
 	u32 major, minor, step;
 
-	ver = readl(wrapper_base + WRAPPER_HW_VERSION);
+	ver = readl(venus_wrapper_addr(hdev->core, WRAPPER_HW_VERSION));
 	major = ver & WRAPPER_HW_VERSION_MAJOR_VERSION_MASK;
 	major = major >> WRAPPER_HW_VERSION_MAJOR_VERSION_SHIFT;
 	minor = ver & WRAPPER_HW_VERSION_MINOR_VERSION_MASK;
@@ -562,22 +571,23 @@ static int venus_run(struct venus_hfi_device *hdev)
 
 static int venus_halt_axi(struct venus_hfi_device *hdev)
 {
-	void __iomem *wrapper_base = hdev->core->wrapper_base;
-	void __iomem *vbif_base = hdev->core->vbif_base;
-	void __iomem *cpu_cs_base = hdev->core->cpu_cs_base;
-	void __iomem *aon_base = hdev->core->aon_base;
-	struct device *dev = hdev->core->dev;
+	struct venus_core *core = hdev->core;
+	void __iomem *vbif_base = core->vbif_base;
+	void __iomem *cpu_cs_base = core->cpu_cs_base;
+	void __iomem *aon_base = core->aon_base;
+	struct device *dev = core->dev;
+	void __iomem *control, *status;
 	u32 val;
 	u32 mask_val;
 	int ret;
 
-	if (IS_AR50_LITE(hdev->core))
+	if (IS_AR50_LITE(core))
 		return 0;
 
-	if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core)) {
+	if (IS_IRIS2(core) || IS_IRIS2_1(core)) {
 		writel(0x3, cpu_cs_base + CPU_CS_X2RPMH_V6);
 
-		if (IS_IRIS2_1(hdev->core))
+		if (IS_IRIS2_1(core))
 			goto skip_aon_mvp_noc;
 
 		writel(0x1, aon_base + AON_WRAPPER_MVP_NOC_LPI_CONTROL);
@@ -591,10 +601,12 @@ static int venus_halt_axi(struct venus_hfi_device *hdev)
 
 skip_aon_mvp_noc:
 		mask_val = (BIT(2) | BIT(1) | BIT(0));
-		writel(mask_val, wrapper_base + WRAPPER_DEBUG_BRIDGE_LPI_CONTROL_V6);
+		control = venus_wrapper_addr(core, WRAPPER_DEBUG_BRIDGE_LPI_CONTROL_V6);
+		status = venus_wrapper_addr(core, WRAPPER_DEBUG_BRIDGE_LPI_STATUS_V6);
+		writel(mask_val, control);
 
-		writel(0x00, wrapper_base + WRAPPER_DEBUG_BRIDGE_LPI_CONTROL_V6);
-		ret = readl_poll_timeout(wrapper_base + WRAPPER_DEBUG_BRIDGE_LPI_STATUS_V6,
+		writel(0x00, control);
+		ret = readl_poll_timeout(status,
 					 val,
 					 val == 0,
 					 POLL_INTERVAL_US,
@@ -607,12 +619,14 @@ skip_aon_mvp_noc:
 		return 0;
 	}
 
-	if (IS_V4(hdev->core)) {
-		val = readl(wrapper_base + WRAPPER_CPU_AXI_HALT);
+	if (IS_V4(core)) {
+		control = venus_wrapper_addr(core, WRAPPER_CPU_AXI_HALT);
+		status = venus_wrapper_addr(core, WRAPPER_CPU_AXI_HALT_STATUS);
+		val = readl(control);
 		val |= WRAPPER_CPU_AXI_HALT_HALT;
-		writel(val, wrapper_base + WRAPPER_CPU_AXI_HALT);
+		writel(val, control);
 
-		ret = readl_poll_timeout(wrapper_base + WRAPPER_CPU_AXI_HALT_STATUS,
+		ret = readl_poll_timeout(status,
 					 val,
 					 val & WRAPPER_CPU_AXI_HALT_STATUS_IDLE,
 					 POLL_INTERVAL_US,
@@ -1134,15 +1148,13 @@ static irqreturn_t venus_isr(struct venus_core *core)
 	struct venus_hfi_device *hdev = to_hfi_priv(core);
 	u32 status;
 	void __iomem *cpu_cs_base;
-	void __iomem *wrapper_base;
 
 	if (!hdev)
 		return IRQ_NONE;
 
 	cpu_cs_base = hdev->core->cpu_cs_base;
-	wrapper_base = hdev->core->wrapper_base;
 
-	status = readl(wrapper_base + WRAPPER_INTR_STATUS);
+	status = readl(venus_wrapper_addr(hdev->core, WRAPPER_INTR_STATUS));
 
 	if (IS_AR50_LITE(core)) {
 		if (status & WRAPPER_INTR_STATUS_A2H_MASK ||
@@ -1162,7 +1174,7 @@ static irqreturn_t venus_isr(struct venus_core *core)
 	}
 	writel(1, cpu_cs_base + CPU_CS_A2HSOFTINTCLR);
 	if (!(IS_IRIS2(core) || IS_IRIS2_1(core) || IS_AR50_LITE(core)))
-		writel(status, wrapper_base + WRAPPER_INTR_CLEAR);
+		writel(status, venus_wrapper_addr(hdev->core, WRAPPER_INTR_CLEAR));
 
 	return IRQ_WAKE_THREAD;
 }
@@ -1541,7 +1553,6 @@ static int venus_suspend_1xx(struct venus_core *core)
 
 static bool venus_cpu_and_video_core_idle(struct venus_hfi_device *hdev)
 {
-	void __iomem *wrapper_base = hdev->core->wrapper_base;
 	void __iomem *wrapper_tz_base = hdev->core->wrapper_tz_base;
 	void __iomem *cpu_cs_base = hdev->core->cpu_cs_base;
 	u32 ctrl_status, cpu_status;
@@ -1549,7 +1560,7 @@ static bool venus_cpu_and_video_core_idle(struct venus_hfi_device *hdev)
 	if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core) || IS_AR50_LITE(hdev->core))
 		cpu_status = readl(wrapper_tz_base + WRAPPER_TZ_CPU_STATUS_V6);
 	else
-		cpu_status = readl(wrapper_base + WRAPPER_CPU_STATUS);
+		cpu_status = readl(venus_wrapper_addr(hdev->core, WRAPPER_CPU_STATUS));
 	ctrl_status = readl(cpu_cs_base + CPU_CS_SCIACMDARG0);
 
 	if (cpu_status & WRAPPER_CPU_STATUS_WFI &&
@@ -1561,7 +1572,6 @@ static bool venus_cpu_and_video_core_idle(struct venus_hfi_device *hdev)
 
 static bool venus_cpu_idle_and_pc_ready(struct venus_hfi_device *hdev)
 {
-	void __iomem *wrapper_base = hdev->core->wrapper_base;
 	void __iomem *wrapper_tz_base = hdev->core->wrapper_tz_base;
 	void __iomem *cpu_cs_base = hdev->core->cpu_cs_base;
 	u32 ctrl_status, cpu_status;
@@ -1569,7 +1579,7 @@ static bool venus_cpu_idle_and_pc_ready(struct venus_hfi_device *hdev)
 	if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core) || IS_AR50_LITE(hdev->core))
 		cpu_status = readl(wrapper_tz_base + WRAPPER_TZ_CPU_STATUS_V6);
 	else
-		cpu_status = readl(wrapper_base + WRAPPER_CPU_STATUS);
+		cpu_status = readl(venus_wrapper_addr(hdev->core, WRAPPER_CPU_STATUS));
 	ctrl_status = readl(cpu_cs_base + CPU_CS_SCIACMDARG0);
 
 	if (cpu_status & WRAPPER_CPU_STATUS_WFI &&

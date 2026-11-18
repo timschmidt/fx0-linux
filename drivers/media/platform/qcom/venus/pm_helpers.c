@@ -179,9 +179,9 @@ static u32 load_per_type(struct venus_core *core, u32 session_type)
 	return mbs_per_sec;
 }
 
-static void mbs_to_bw(struct venus_inst *inst, u32 mbs, u32 *avg, u32 *peak)
+static void mbs_to_bw(const struct venus_resources *res, u32 direction,
+		      bool ten_bit, u32 mbs, u32 *avg, u32 *peak)
 {
-	const struct venus_resources *res = inst->core->res;
 	const struct bw_tbl *bw_tbl;
 	unsigned int num_rows, i;
 
@@ -191,10 +191,10 @@ static void mbs_to_bw(struct venus_inst *inst, u32 mbs, u32 *avg, u32 *peak)
 	if (mbs == 0)
 		return;
 
-	if (inst->session_type == VIDC_SESSION_TYPE_ENC) {
+	if (direction == VIDC_SESSION_TYPE_ENC) {
 		num_rows = res->bw_tbl_enc_size;
 		bw_tbl = res->bw_tbl_enc;
-	} else if (inst->session_type == VIDC_SESSION_TYPE_DEC) {
+	} else if (direction == VIDC_SESSION_TYPE_DEC) {
 		num_rows = res->bw_tbl_dec_size;
 		bw_tbl = res->bw_tbl_dec;
 	} else {
@@ -208,7 +208,7 @@ static void mbs_to_bw(struct venus_inst *inst, u32 mbs, u32 *avg, u32 *peak)
 		if (i != 0 && mbs > bw_tbl[i].mbs_per_sec)
 			break;
 
-		if (inst->dpb_fmt & HFI_COLOR_FORMAT_10_BIT_BASE) {
+		if (ten_bit) {
 			*avg = bw_tbl[i].avg_10bit;
 			*peak = bw_tbl[i].peak_10bit;
 		} else {
@@ -220,14 +220,26 @@ static void mbs_to_bw(struct venus_inst *inst, u32 mbs, u32 *avg, u32 *peak)
 
 static int load_scale_bw(struct venus_core *core)
 {
+	const struct venus_resources *res = core->res;
 	struct venus_inst *inst = NULL;
 	u32 mbs_per_sec, avg, peak, total_avg = 0, total_peak = 0;
 
-	list_for_each_entry(inst, &core->instances, list) {
-		mbs_per_sec = load_per_instance(inst);
-		mbs_to_bw(inst, mbs_per_sec, &avg, &peak);
+	if (res->bw_per_direction) {
+		mbs_per_sec = load_per_type(core, VIDC_SESSION_TYPE_ENC);
+		mbs_to_bw(res, VIDC_SESSION_TYPE_ENC, false, mbs_per_sec, &total_avg, &total_peak);
+		mbs_per_sec = load_per_type(core, VIDC_SESSION_TYPE_DEC);
+		mbs_to_bw(res, VIDC_SESSION_TYPE_DEC, false, mbs_per_sec, &avg, &peak);
 		total_avg += avg;
-		total_peak += peak;
+		total_peak = max(total_peak, peak);
+	} else {
+		list_for_each_entry(inst, &core->instances, list) {
+			bool ten_bit = inst->dpb_fmt & HFI_COLOR_FORMAT_10_BIT_BASE;
+
+			mbs_per_sec = load_per_instance(inst);
+			mbs_to_bw(res, inst->session_type, ten_bit, mbs_per_sec, &avg, &peak);
+			total_avg += avg;
+			total_peak += peak;
+		}
 	}
 
 	/*
@@ -341,9 +353,9 @@ vcodec_control_v3(struct venus_core *core, u32 session_type, bool enable)
 	void __iomem *ctrl;
 
 	if (session_type == VIDC_SESSION_TYPE_DEC)
-		ctrl = core->wrapper_base + WRAPPER_VDEC_VCODEC_POWER_CONTROL;
+		ctrl = venus_wrapper_addr(core, WRAPPER_VDEC_VCODEC_POWER_CONTROL);
 	else
-		ctrl = core->wrapper_base + WRAPPER_VENC_VCODEC_POWER_CONTROL;
+		ctrl = venus_wrapper_addr(core, WRAPPER_VENC_VCODEC_POWER_CONTROL);
 
 	if (enable)
 		writel(0, ctrl);
@@ -429,11 +441,11 @@ static int vcodec_control_v4(struct venus_core *core, u32 coreid, bool enable)
 
 legacy:
 	if (coreid == VIDC_CORE_ID_1) {
-		ctrl = core->wrapper_base + WRAPPER_VCODEC0_MMCC_POWER_CONTROL;
-		stat = core->wrapper_base + WRAPPER_VCODEC0_MMCC_POWER_STATUS;
+		ctrl = venus_wrapper_addr(core, WRAPPER_VCODEC0_MMCC_POWER_CONTROL);
+		stat = venus_wrapper_addr(core, WRAPPER_VCODEC0_MMCC_POWER_STATUS);
 	} else {
-		ctrl = core->wrapper_base + WRAPPER_VCODEC1_MMCC_POWER_CONTROL;
-		stat = core->wrapper_base + WRAPPER_VCODEC1_MMCC_POWER_STATUS;
+		ctrl = venus_wrapper_addr(core, WRAPPER_VCODEC1_MMCC_POWER_CONTROL);
+		stat = venus_wrapper_addr(core, WRAPPER_VCODEC1_MMCC_POWER_STATUS);
 	}
 
 	if (enable) {
