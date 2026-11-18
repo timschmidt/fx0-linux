@@ -237,16 +237,16 @@ static void qcom_iommu_tlb_inv_range_nosync(unsigned long iova, size_t size,
 	unsigned i, reg;
 
 	reg = leaf ? ARM_SMMU_CB_S1_TLBIVAL : ARM_SMMU_CB_S1_TLBIVA;
+	iova = (iova >> 12) << 12;
 
 	for (i = 0; i < fwspec->num_ids; i++) {
 		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
+		unsigned long addr = iova | ctx->asid;
 		size_t s = size;
 
-		iova = (iova >> 12) << 12;
-		iova |= ctx->asid;
 		do {
-			iommu_writel(ctx, reg, iova);
-			iova += granule;
+			iommu_writel(ctx, reg, addr);
+			addr += granule;
 		} while (s -= granule);
 	}
 }
@@ -646,6 +646,7 @@ static int qcom_iommu_identity_attach(struct iommu_domain *identity_domain,
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
 	struct qcom_iommu_dev *qcom_iommu = dev_iommu_priv_get(dev);
 	unsigned int i;
+	int ret;
 
 	if (old == identity_domain || !old)
 		return 0;
@@ -654,7 +655,10 @@ static int qcom_iommu_identity_attach(struct iommu_domain *identity_domain,
 	if (WARN_ON(!qcom_domain->iommu))
 		return -EINVAL;
 
-	pm_runtime_get_sync(qcom_iommu->dev);
+	ret = pm_runtime_resume_and_get(qcom_iommu->dev);
+	if (ret < 0)
+		return ret;
+
 	for (i = 0; i < fwspec->num_ids; i++) {
 		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
 
