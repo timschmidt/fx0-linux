@@ -6,6 +6,7 @@
 #include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
@@ -744,13 +745,17 @@ static int vdec_set_work_route(struct venus_inst *inst)
 				 HFI_COLOR_FORMAT_UBWC_BASE))
 
 
-static int vdec_output_conf(struct venus_inst *inst)
+static int vdec_output_conf(struct venus_inst *inst, bool reconfigure)
 {
 	struct venus_core *core = inst->core;
 	struct hfi_enable en = { .enable = 1 };
 	struct hfi_buffer_requirements bufreq;
+	bool legacy_reconfigure = reconfigure &&
+		of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus");
 	u32 width = inst->width;
 	u32 height = inst->height;
+	u32 old_opb_fmt = inst->opb_fmt;
+	u32 old_opb_type = inst->opb_buftype;
 	u32 out_fmt, out2_fmt;
 	bool ubwc = false;
 	u32 ptype;
@@ -760,7 +765,8 @@ static int vdec_output_conf(struct venus_inst *inst)
 	if (ret)
 		return ret;
 
-	if (core->res->hfi_version == HFI_VERSION_1XX) {
+	/* MSM8226 firmware retains these session properties across a DRC. */
+	if (core->res->hfi_version == HFI_VERSION_1XX && !legacy_reconfigure) {
 		ptype = HFI_PROPERTY_PARAM_VDEC_CONTINUE_DATA_TRANSFER;
 		ret = hfi_session_set_property(inst, ptype, &en);
 		dev_dbg(core->dev_dec, "decoder continue-data-transfer: %d\n", ret);
@@ -803,12 +809,15 @@ static int vdec_output_conf(struct venus_inst *inst)
 		inst->dpb_fmt = 0;
 	}
 
-	ret = venus_helper_set_raw_format(inst, inst->opb_fmt,
-					  inst->opb_buftype);
-	dev_dbg(core->dev_dec, "decoder raw format %#x type %u: %d\n",
-		inst->opb_fmt, inst->opb_buftype, ret);
-	if (ret)
-		return ret;
+	if (!legacy_reconfigure || inst->opb_fmt != old_opb_fmt ||
+	    inst->opb_buftype != old_opb_type) {
+		ret = venus_helper_set_raw_format(inst, inst->opb_fmt,
+						  inst->opb_buftype);
+		dev_dbg(core->dev_dec, "decoder raw format %#x type %u: %d\n",
+			inst->opb_fmt, inst->opb_buftype, ret);
+		if (ret)
+			return ret;
+	}
 
 	ret = venus_helper_set_format_constraints(inst);
 	if (ret)
@@ -865,10 +874,12 @@ static int vdec_output_conf(struct venus_inst *inst)
 		}
 	}
 
-	ret = venus_helper_set_dyn_bufmode(inst);
-	dev_dbg(core->dev_dec, "decoder dynamic buffer mode: %d\n", ret);
-	if (ret)
-		return ret;
+	if (!legacy_reconfigure) {
+		ret = venus_helper_set_dyn_bufmode(inst);
+		dev_dbg(core->dev_dec, "decoder dynamic buffer mode: %d\n", ret);
+		if (ret)
+			return ret;
+	}
 
 	return 0;
 }
@@ -1066,7 +1077,7 @@ static int vdec_start_capture(struct venus_inst *inst)
 		return 0;
 
 reconfigure:
-	ret = vdec_output_conf(inst);
+	ret = vdec_output_conf(inst, true);
 	if (ret)
 		return ret;
 
@@ -1164,7 +1175,7 @@ static int vdec_start_output(struct venus_inst *inst)
 	if (ret)
 		return ret;
 
-	ret = vdec_output_conf(inst);
+	ret = vdec_output_conf(inst, false);
 	dev_dbg(dev, "decoder output configuration: %d\n", ret);
 	if (ret)
 		return ret;
