@@ -16,12 +16,14 @@
 #define PON_SOFT_RB_SPARE		0x8f
 #define PON_REVISION			0x01
 #define PON_PERIPHERAL_TYPE		0x04
+#define PON_POWER_ON_REASON		0x08
+#define PON_WARM_RESET_REASON1		0x0a
 #define PON_WATCHDOG_S1_TIMER		0x54
 #define PON_S3_SOURCE			0x74
 
 static bool fx0_watchdog_inventory;
 module_param(fx0_watchdog_inventory, bool, 0400);
-MODULE_PARM_DESC(fx0_watchdog_inventory, "Expose read-only PM8226 watchdog registers on the Fx0");
+MODULE_PARM_DESC(fx0_watchdog_inventory, "Expose read-only PM8226 reset and watchdog registers on the Fx0");
 
 #define GEN1_REASON_SHIFT		2
 #define GEN2_REASON_SHIFT		1
@@ -80,9 +82,35 @@ static ssize_t s3_inventory_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(s3_inventory);
 
+static ssize_t reset_reason_inventory_show(struct device *dev,
+					   struct device_attribute *attr,
+					   char *buf)
+{
+	struct qcom_pon *pon = dev_get_drvdata(dev);
+	unsigned int power_on;
+	u8 reset[4];
+	int ret;
+
+	ret = regmap_read(pon->regmap, pon->baseaddr + PON_POWER_ON_REASON,
+			  &power_on);
+	if (ret)
+		return ret;
+
+	/* Two warm-reset bytes followed by two power-off bytes. */
+	ret = regmap_bulk_read(pon->regmap, pon->baseaddr + PON_WARM_RESET_REASON1,
+			       reset, ARRAY_SIZE(reset));
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "%02x %02x %02x %02x %02x\n",
+			  power_on, reset[0], reset[1], reset[2], reset[3]);
+}
+static DEVICE_ATTR_RO(reset_reason_inventory);
+
 static struct attribute *inventory_attrs[] = {
 	&dev_attr_watchdog_inventory.attr,
 	&dev_attr_s3_inventory.attr,
+	&dev_attr_reset_reason_inventory.attr,
 	NULL,
 };
 static const struct attribute_group inventory_group = {
