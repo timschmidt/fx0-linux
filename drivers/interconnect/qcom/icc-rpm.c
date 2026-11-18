@@ -37,12 +37,13 @@
 #define M_BKE_EN_EN_BMASK		0x1
 
 /* NoC QoS */
-#define NOC_QOS_PRIORITYn_ADDR(n)	(0x8 + (n * 0x1000))
+#define NOC_QOS_PORT_STRIDE		0x1000
+#define NOC_QOS_PRIORITYn_ADDR(n, stride)	(0x8 + (n) * (stride))
 #define NOC_QOS_PRIORITY_P1_MASK	0xc
 #define NOC_QOS_PRIORITY_P0_MASK	0x3
 #define NOC_QOS_PRIORITY_P1_SHIFT	0x2
 
-#define NOC_QOS_MODEn_ADDR(n)		(0xc + (n * 0x1000))
+#define NOC_QOS_MODEn_ADDR(n, stride)	(0xc + (n) * (stride))
 #define NOC_QOS_MODEn_MASK		0x3
 
 #define NOC_QOS_MODE_FIXED_VAL		0x0
@@ -134,19 +135,18 @@ static int qcom_icc_set_bimc_qos(struct icc_node *src)
 static int qcom_icc_noc_set_qos_priority(struct qcom_icc_provider *qp,
 					 struct qcom_icc_qos *qos)
 {
+	unsigned int reg = qp->qos_offset +
+		NOC_QOS_PRIORITYn_ADDR(qos->qos_port, qp->noc_qos_stride);
 	u32 val;
 	int rc;
 
 	/* Must be updated one at a time, P1 first, P0 last */
 	val = qos->areq_prio << NOC_QOS_PRIORITY_P1_SHIFT;
-	rc = regmap_update_bits(qp->regmap,
-				qp->qos_offset + NOC_QOS_PRIORITYn_ADDR(qos->qos_port),
-				NOC_QOS_PRIORITY_P1_MASK, val);
+	rc = regmap_update_bits(qp->regmap, reg, NOC_QOS_PRIORITY_P1_MASK, val);
 	if (rc)
 		return rc;
 
-	return regmap_update_bits(qp->regmap,
-				  qp->qos_offset + NOC_QOS_PRIORITYn_ADDR(qos->qos_port),
+	return regmap_update_bits(qp->regmap, reg,
 				  NOC_QOS_PRIORITY_P0_MASK, qos->prio_level);
 }
 
@@ -155,6 +155,7 @@ static int qcom_icc_set_noc_qos(struct icc_node *src)
 	struct qcom_icc_provider *qp;
 	struct qcom_icc_node *qn;
 	struct icc_provider *provider;
+	unsigned int reg;
 	u32 mode = NOC_QOS_MODE_BYPASS_VAL;
 	int rc = 0;
 
@@ -182,9 +183,9 @@ static int qcom_icc_set_noc_qos(struct icc_node *src)
 		/* How did we get here? */
 	}
 
-	return regmap_update_bits(qp->regmap,
-				  qp->qos_offset + NOC_QOS_MODEn_ADDR(qn->qos.qos_port),
-				  NOC_QOS_MODEn_MASK, mode);
+	reg = qp->qos_offset + NOC_QOS_MODEn_ADDR(qn->qos.qos_port, qp->noc_qos_stride);
+
+	return regmap_update_bits(qp->regmap, reg, NOC_QOS_MODEn_MASK, mode);
 }
 
 static int qcom_icc_qos_set(struct icc_node *node)
@@ -512,6 +513,7 @@ int qnoc_probe(struct platform_device *pdev)
 	qp->keep_alive = desc->keep_alive;
 	qp->type = desc->type;
 	qp->qos_offset = desc->qos_offset;
+	qp->noc_qos_stride = desc->noc_qos_stride ?: NOC_QOS_PORT_STRIDE;
 
 	if (desc->regmap_cfg) {
 		struct resource *res;
