@@ -1260,6 +1260,38 @@ static unsigned long cpr_get_opp_hz_for_req(struct dev_pm_opp *ref,
 	return 0;
 }
 
+static struct regmap *cpr_msm8926_get_apcs(struct device *dev)
+{
+	struct device_node *node __free(device_node) =
+		of_parse_phandle(dev->of_node, "qcom,apcs-syscon", 0);
+	struct regmap *map = ERR_PTR(-EPROBE_DEFER);
+	struct platform_device *apcs;
+
+	if (!node || !of_device_is_compatible(node, "qcom,msm8226-apcs-kpss-global"))
+		return ERR_PTR(-EINVAL);
+
+	apcs = of_find_device_by_node(node);
+	if (!apcs)
+		return map;
+
+	/*
+	 * The APCS driver owns the MMIO mapping. A generic syscon lookup
+	 * would prepare the first clock, which is the CPU PLL on MSM8226.
+	 */
+	device_lock(&apcs->dev);
+	if (device_is_bound(&apcs->dev)) {
+		map = dev_get_regmap(&apcs->dev, NULL);
+		if (!map)
+			map = ERR_PTR(-ENODEV);
+		else if (!device_link_add(dev, &apcs->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
+			map = ERR_PTR(-EINVAL);
+	}
+	device_unlock(&apcs->dev);
+	put_device(&apcs->dev);
+
+	return map;
+}
+
 static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 {
 	struct cpr_msm8926_data *data;
@@ -1278,8 +1310,7 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 	if (ret)
 		return dev_err_probe(drv->dev, ret,
 				     "MSM8926 calibration acquisition failed\n");
-	data->apcs = syscon_regmap_lookup_by_phandle(drv->dev->of_node,
-						     "qcom,apcs-syscon");
+	data->apcs = cpr_msm8926_get_apcs(drv->dev);
 	if (IS_ERR(data->apcs))
 		return dev_err_probe(drv->dev, PTR_ERR(data->apcs),
 				     "APCS reference register map unavailable\n");
