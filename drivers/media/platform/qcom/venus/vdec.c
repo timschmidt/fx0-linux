@@ -1062,6 +1062,24 @@ static int vdec_verify_conf(struct venus_inst *inst)
 	return 0;
 }
 
+static int vdec_set_buffer_counts(struct venus_inst *inst)
+{
+	struct venus_core *core = inst->core;
+	unsigned int output2 = VB2_MAX_FRAME;
+	int ret;
+
+	if (inst->opb_buftype == HFI_BUFFER_OUTPUT && !inst->dpb_buftype &&
+	    of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus"))
+		output2 = 0;
+
+	ret = venus_helper_set_num_bufs(inst, inst->num_input_bufs,
+				       VB2_MAX_FRAME, output2);
+	dev_dbg(core->dev_dec, "decoder buffer counts %u/%d/%u: %d\n",
+		inst->num_input_bufs, VB2_MAX_FRAME, output2, ret);
+
+	return ret;
+}
+
 static int vdec_start_capture(struct venus_inst *inst)
 {
 	int ret;
@@ -1087,8 +1105,7 @@ reconfigure:
 	if (ret)
 		return ret;
 
-	ret = venus_helper_set_num_bufs(inst, inst->num_input_bufs,
-					VB2_MAX_FRAME, VB2_MAX_FRAME);
+	ret = vdec_set_buffer_counts(inst);
 	if (ret)
 		return ret;
 
@@ -1190,9 +1207,7 @@ static int vdec_start_output(struct venus_inst *inst)
 	if (ret)
 		return ret;
 
-	ret = venus_helper_set_num_bufs(inst, inst->num_input_bufs,
-					VB2_MAX_FRAME, VB2_MAX_FRAME);
-	dev_dbg(dev, "decoder buffer counts: %d\n", ret);
+	ret = vdec_set_buffer_counts(inst);
 	if (ret)
 		return ret;
 
