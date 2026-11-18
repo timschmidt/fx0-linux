@@ -763,6 +763,7 @@ static int vdec_output_conf(struct venus_inst *inst)
 	if (core->res->hfi_version == HFI_VERSION_1XX) {
 		ptype = HFI_PROPERTY_PARAM_VDEC_CONTINUE_DATA_TRANSFER;
 		ret = hfi_session_set_property(inst, ptype, &en);
+		dev_dbg(core->dev_dec, "decoder continue-data-transfer: %d\n", ret);
 		if (ret)
 			return ret;
 	}
@@ -804,6 +805,8 @@ static int vdec_output_conf(struct venus_inst *inst)
 
 	ret = venus_helper_set_raw_format(inst, inst->opb_fmt,
 					  inst->opb_buftype);
+	dev_dbg(core->dev_dec, "decoder raw format %#x type %u: %d\n",
+		inst->opb_fmt, inst->opb_buftype, ret);
 	if (ret)
 		return ret;
 
@@ -863,6 +866,7 @@ static int vdec_output_conf(struct venus_inst *inst)
 	}
 
 	ret = venus_helper_set_dyn_bufmode(inst);
+	dev_dbg(core->dev_dec, "decoder dynamic buffer mode: %d\n", ret);
 	if (ret)
 		return ret;
 
@@ -871,9 +875,11 @@ static int vdec_output_conf(struct venus_inst *inst)
 
 static int vdec_session_init(struct venus_inst *inst)
 {
+	struct device *dev = inst->core->dev_dec;
 	int ret;
 
 	ret = venus_helper_session_init(inst);
+	dev_dbg(dev, "decoder session init: %d\n", ret);
 	if (ret == -EALREADY)
 		return 0;
 	else if (ret)
@@ -881,6 +887,9 @@ static int vdec_session_init(struct venus_inst *inst)
 
 	ret = venus_helper_set_input_resolution(inst, frame_width_min(inst),
 						frame_height_min(inst));
+	dev_dbg(dev, "decoder initial resolution %ux%u from format %ux%u: %d\n",
+		frame_width_min(inst), frame_height_min(inst), inst->out_width,
+		inst->out_height, ret);
 	if (ret)
 		goto deinit;
 
@@ -1110,6 +1119,7 @@ err:
 
 static int vdec_start_output(struct venus_inst *inst)
 {
+	struct device *dev = inst->core->dev_dec;
 	int ret;
 
 	if (inst->codec_state == VENUS_DEC_STATE_SEEK) {
@@ -1146,6 +1156,7 @@ static int vdec_start_output(struct venus_inst *inst)
 	inst->next_buf_last = false;
 
 	ret = vdec_set_properties(inst);
+	dev_dbg(dev, "decoder startup properties: %d\n", ret);
 	if (ret)
 		return ret;
 
@@ -1154,6 +1165,7 @@ static int vdec_start_output(struct venus_inst *inst)
 		return ret;
 
 	ret = vdec_output_conf(inst);
+	dev_dbg(dev, "decoder output configuration: %d\n", ret);
 	if (ret)
 		return ret;
 
@@ -1163,14 +1175,17 @@ static int vdec_start_output(struct venus_inst *inst)
 
 	ret = venus_helper_set_num_bufs(inst, inst->num_input_bufs,
 					VB2_MAX_FRAME, VB2_MAX_FRAME);
+	dev_dbg(dev, "decoder buffer counts: %d\n", ret);
 	if (ret)
 		return ret;
 
 	ret = venus_helper_vb2_start_streaming(inst);
+	dev_dbg(dev, "decoder HFI start: %d\n", ret);
 	if (ret)
 		return ret;
 
 	ret = venus_helper_process_initial_out_bufs(inst);
+	dev_dbg(dev, "decoder initial coded buffers: %d\n", ret);
 	if (ret)
 		return ret;
 
