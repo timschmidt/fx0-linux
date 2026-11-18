@@ -11,8 +11,9 @@ maintainers:
 
 description: |
   The MMSS NoC connects the multimedia masters to the Bus Interconnect and
-  Memory Controller (BIMC). BIMC clock votes go to the RPM. The multimedia
-  fabric uses clocks from the multimedia clock controller.
+  Memory Controller (BIMC). BIMC clocks are managed through the RPM.
+  The multimedia fabric shares an AXI rate with display and camera clients
+  of the multimedia clock controller.
 
 properties:
   compatible:
