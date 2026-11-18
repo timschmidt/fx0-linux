@@ -21,6 +21,7 @@ struct cpr_msm8926_suspend {
 	struct clk *aux;
 	struct clk *pll;
 	struct regmap *apcs;
+	int cover_apc_uv;
 	unsigned long saved_rate;
 	u32 saved_cfg;
 	int saved_apc_uv;
@@ -98,7 +99,7 @@ static inline int cpr_suspend_cover(struct cpr_msm8926_suspend *sleep)
 	ret = cpr_suspend_sync(sleep->sleep_mx);
 	if (ret)
 		return ret;
-	ret = regulator_set_voltage(rails->apc, rails->mx_max_uV, rails->mx_max_uV);
+	ret = regulator_set_voltage(rails->apc, sleep->cover_apc_uv, sleep->cover_apc_uv);
 	if (ret)
 		return ret;
 	return cpr_suspend_sync(rails->apc);
@@ -155,9 +156,14 @@ static inline int cpr_suspend_prepare(struct cpr_msm8926_suspend *sleep,
 	    !rails->mx_enabled || !sleep->sleep_mx || !sleep->clock ||
 	    !sleep->aux || !sleep->pll || !sleep->apcs ||
 	    rails->mx_min_uV <= 0 || rails->mx_min_uV > rails->mx_max_uV ||
-	    min_apc_uV <= 0 || max_apc_uV < min_apc_uV || max_apc_uV > rails->mx_max_uV ||
+	    min_apc_uV <= 0 || max_apc_uV < min_apc_uV ||
+	    sleep->cover_apc_uv < max_apc_uV || sleep->cover_apc_uv > rails->mx_max_uV ||
 	    rate < CPR_SUSPEND_SAFE_RATE)
 		return -EINVAL;
+	ret = regulator_is_supported_voltage(rails->apc, sleep->cover_apc_uv,
+					     sleep->cover_apc_uv);
+	if (ret <= 0)
+		return ret ?: -ERANGE;
 	ret = clk_rate_exclusive_get(sleep->clock);
 	if (ret)
 		return ret;
