@@ -17,6 +17,7 @@
 #define PON_REVISION			0x01
 #define PON_PERIPHERAL_TYPE		0x04
 #define PON_WATCHDOG_S1_TIMER		0x54
+#define PON_S3_SOURCE			0x74
 
 static bool fx0_watchdog_inventory;
 module_param(fx0_watchdog_inventory, bool, 0400);
@@ -62,8 +63,26 @@ static ssize_t watchdog_inventory_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(watchdog_inventory);
 
+static ssize_t s3_inventory_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct qcom_pon *pon = dev_get_drvdata(dev);
+	u8 s3[2];
+	int ret;
+
+	/* Read only the S3 source and the adjacent debounce setting. */
+	ret = regmap_bulk_read(pon->regmap, pon->baseaddr + PON_S3_SOURCE,
+			       s3, ARRAY_SIZE(s3));
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "%02x %02x\n", s3[0], s3[1]);
+}
+static DEVICE_ATTR_RO(s3_inventory);
+
 static struct attribute *inventory_attrs[] = {
 	&dev_attr_watchdog_inventory.attr,
+	&dev_attr_s3_inventory.attr,
 	NULL,
 };
 static const struct attribute_group inventory_group = {
