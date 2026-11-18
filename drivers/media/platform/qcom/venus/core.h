@@ -108,6 +108,7 @@ struct venus_resources {
 	const struct firmware_version *min_fw;
 	bool split_reg_banks;
 	bool require_video_path;
+	bool optional_cpu_cfg_path;
 	bool bw_per_direction;
 };
 
