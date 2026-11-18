@@ -236,14 +236,19 @@ struct corner {
 	struct fuse_corner *fuse_corner;
 };
 
+struct cpr_suspend_observation {
+	bool loop_was_enabled;
+	bool ack_sent;
+	bool nack_sent;
+	u8 busy_steps;
+};
+
 struct cpr_msm8926_data {
 	struct cpr_msm8926_suspend sleep;
 	struct device *suspend_owner;
 	bool suspend_irq_disabled;
 	bool suspend_was_applied;
-	bool suspend_loop_was_enabled;
-	bool suspend_nack_sent;
-	u8 suspend_busy_steps;
+	struct cpr_suspend_observation quiesce;
 	struct cpr_msm8926_calibration calibration;
 	struct cpr_msm8926_voltage_plan plan;
 	bool apc_enabled;
@@ -372,9 +377,10 @@ static void cpr_record_busy(struct cpr_drv *drv, u8 *steps, unsigned int step)
 		*steps |= BIT(step);
 }
 
-static bool cpr_ctl_disable(struct cpr_drv *drv, u8 *busy_steps)
+static void cpr_ctl_disable(struct cpr_drv *drv, struct cpr_suspend_observation *observation)
 {
-	bool nack;
+	u8 *busy_steps = observation ? &observation->busy_steps : NULL;
+	bool ack, nack;
 
 	cpr_record_busy(drv, busy_steps, 0);
 	cpr_irq_set(drv, 0);
@@ -388,7 +394,10 @@ static bool cpr_ctl_disable(struct cpr_drv *drv, u8 *busy_steps)
 	cpr_record_busy(drv, busy_steps, 3);
 	cpr_irq_clr(drv);
 	cpr_record_busy(drv, busy_steps, 4);
-	cpr_write(drv, REG_RBIF_CONT_ACK_CMD, 1);
+	/* Leave an idle controller idle during this deep-suspend diagnostic. */
+	ack = !busy_steps || (*busy_steps & BIT(4));
+	if (ack)
+		cpr_write(drv, REG_RBIF_CONT_ACK_CMD, 1);
 	cpr_record_busy(drv, busy_steps, 5);
 	/*
 	 * Test whether the extra NACK reasserts BUSY after a completed
@@ -401,8 +410,10 @@ static bool cpr_ctl_disable(struct cpr_drv *drv, u8 *busy_steps)
 	cpr_record_busy(drv, busy_steps, 6);
 	cpr_ctl_modify(drv, RBCPR_CTL_LOOP_EN, 0);
 	cpr_record_busy(drv, busy_steps, 7);
-
-	return nack;
+	if (observation) {
+		observation->ack_sent = ack;
+		observation->nack_sent = nack;
+	}
 }
 
 static bool cpr_ctl_is_enabled(struct cpr_drv *drv)
@@ -2309,6 +2320,7 @@ int qcom_cpr_msm8926_suspend_prepare(struct device *dev, struct device *owner)
 	struct cpr_drv *drv = dev_get_drvdata(dev);
 	struct cpr_msm8926_data *data = drv->msm8926;
 	unsigned int timeout_us = 2 * drv->desc->timer_delay_us;
+	const struct cpr_suspend_observation *quiesce = &data->quiesce;
 	bool busy_on_entry;
 	ktime_t start;
 	u32 value;
@@ -2334,17 +2346,18 @@ int qcom_cpr_msm8926_suspend_prepare(struct device *dev, struct device *owner)
 				 !(value & RBCPR_RESULT0_BUSY_MASK), 1, timeout_us);
 	dev_info(drv->dev,
 		 "CPR suspend drain: loop=%u busy before_disable=%u after_disable=%u late_entry=%u late_exit=%u elapsed_us=%lld limit_us=%u ret=%d\n",
-		 data->suspend_loop_was_enabled, !!(data->suspend_busy_steps & BIT(0)),
-		 !!(data->suspend_busy_steps & BIT(7)), busy_on_entry,
+		 quiesce->loop_was_enabled, !!(quiesce->busy_steps & BIT(0)),
+		 !!(quiesce->busy_steps & BIT(7)), busy_on_entry,
 		 !!(value & RBCPR_RESULT0_BUSY_MASK),
 		 ktime_us_delta(ktime_get(), start), timeout_us, ret);
 	dev_info(drv->dev,
 		 "CPR disable busy: entry=%u mask_irq=%u auto_ack_off=%u timer_adjust=%u clear_irq=%u ack=%u nack=%u loop_off=%u\n",
-		 !!(data->suspend_busy_steps & BIT(0)), !!(data->suspend_busy_steps & BIT(1)),
-		 !!(data->suspend_busy_steps & BIT(2)), !!(data->suspend_busy_steps & BIT(3)),
-		 !!(data->suspend_busy_steps & BIT(4)), !!(data->suspend_busy_steps & BIT(5)),
-		 !!(data->suspend_busy_steps & BIT(6)), !!(data->suspend_busy_steps & BIT(7)));
-	dev_info(drv->dev, "CPR suspend NACK sent=%u\n", data->suspend_nack_sent);
+		 !!(quiesce->busy_steps & BIT(0)), !!(quiesce->busy_steps & BIT(1)),
+		 !!(quiesce->busy_steps & BIT(2)), !!(quiesce->busy_steps & BIT(3)),
+		 !!(quiesce->busy_steps & BIT(4)), !!(quiesce->busy_steps & BIT(5)),
+		 !!(quiesce->busy_steps & BIT(6)), !!(quiesce->busy_steps & BIT(7)));
+	dev_info(drv->dev, "CPR suspend ACK sent=%u\n", quiesce->ack_sent);
+	dev_info(drv->dev, "CPR suspend NACK sent=%u\n", quiesce->nack_sent);
 	if (ret)
 		goto out;
 	ret = cpr_msm8926_check_cpu_rate(drv, drv->corner->freq);
@@ -2414,18 +2427,20 @@ static int cpr_pm_prepare(struct device *dev)
 static int cpr_pm_suspend(struct device *dev)
 {
 	struct cpr_drv *drv = dev_get_drvdata(dev);
-	bool deep = pm_suspend_target_state == PM_SUSPEND_MEM;
+	struct cpr_suspend_observation *quiesce = NULL;
 
 	if (!drv->msm8926)
 		return 0;
 	guard(mutex)(&drv->lock);
 	if (drv->corner && cpr_is_allowed(drv))
 		cpr_corner_save(drv, drv->corner);
-	if (deep)
-		drv->msm8926->suspend_loop_was_enabled = cpr_ctl_is_enabled(drv);
-	drv->msm8926->suspend_busy_steps = 0;
-	drv->msm8926->suspend_nack_sent =
-		cpr_ctl_disable(drv, deep ? &drv->msm8926->suspend_busy_steps : NULL);
+	if (pm_suspend_target_state == PM_SUSPEND_MEM) {
+		quiesce = &drv->msm8926->quiesce;
+		*quiesce = (struct cpr_suspend_observation) {
+			.loop_was_enabled = cpr_ctl_is_enabled(drv),
+		};
+	}
+	cpr_ctl_disable(drv, quiesce);
 	drv->msm8926->suspend_was_applied = drv->msm8926->applied;
 	drv->suspended = true;
 	/* Do not run feedback on assumed boot/resume voltage. */
