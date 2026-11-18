@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#include "qcom-msm8926-lg-madai.dts"
+
+&{/reserved-memory} {
+	venus_mem: memory@f500000 {
+		reg = <0x0f500000 0x00500000>;
+		no-map;
+	};
+};
+
+&soc {
+	venus_iommu: iommu@fdc84000 {
+		compatible = "qcom,msm8226-venus-iommu";
+		reg = <0xfdc84000 0x2600>, <0xfdce0004 0x4>;
+		reg-names = "global", "clock-select";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		#iommu-cells = <1>;
+		ranges = <0 0xfdc8c000 0x1000>;
+
+		clocks = <&mmcc VENUS0_AHB_CLK>,
+			 <&mmcc VENUS0_AXI_CLK>,
+			 <&mmcc VENUS0_VCODEC0_CLK>;
+		clock-names = "iface", "bus", "tbu";
+		power-domains = <&mmcc VENUS0_GDSC>;
+		qcom,iommu-secure-id = <0>;
+		status = "disabled";
+
+		/* Content-protection and firmware contexts belong to secure world. */
+		iommu-ctx@0 {
+			compatible = "qcom,msm-iommu-v1-ns";
+			reg = <0 0x1000>;
+			interrupts = <GIC_SPI 42 IRQ_TYPE_LEVEL_HIGH>;
+		};
+	};
+
+	venus-bus {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+		dma-ranges = <0x40000000 0x40000000 0x40000000>;
+
+		video-codec@fdc80000 {
+			compatible = "qcom,msm8226-venus";
+			reg = <0xfdc80000 0x400>,
+			      <0xfdcc0000 0x20000>,
+			      <0xfdce0000 0x4>,
+			      <0xfdce0008 0x3ff8>;
+			reg-names = "vbif", "cpu", "wrapper-version", "wrapper";
+			interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&mmcc VENUS0_VCODEC0_CLK>,
+				 <&mmcc VENUS0_AHB_CLK>,
+				 <&mmcc VENUS0_AXI_CLK>;
+			clock-names = "core", "iface", "bus";
+			power-domains = <&mmcc VENUS0_GDSC>;
+			iommus = <&venus_iommu 0>;
+			memory-region = <&venus_mem>;
+			status = "disabled";
+		};
+	};
+};
