@@ -163,14 +163,24 @@ module_param(fx0_hold_mmss_iface, bool, 0400);
 MODULE_PARM_DESC(fx0_hold_mmss_iface,
 		 "Keep an S0 AXI clock reference for the Fx0 MMSS probe diagnostic");
 
+static bool fx0_skip_mmss_qos;
+module_param(fx0_skip_mmss_qos, bool, 0400);
+MODULE_PARM_DESC(fx0_skip_mmss_qos,
+		 "Skip the Fx0 MMSS Video P0 probe QoS register setup");
+
 static int msm8226_icc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct clk *iface;
 	int ret;
 
-	if (!fx0_hold_mmss_iface || !of_machine_is_compatible("lg,madai") ||
+	if (!of_machine_is_compatible("lg,madai") ||
 	    !of_device_is_compatible(dev->of_node, "qcom,msm8226-mmssnoc"))
+		return qnoc_probe(pdev);
+
+	if (fx0_skip_mmss_qos)
+		dev_info(dev, "Fx0 MMSS Video P0 probe QoS setup skipped\n");
+	if (!fx0_hold_mmss_iface)
 		return qnoc_probe(pdev);
 
 	/*
@@ -197,7 +207,21 @@ static struct platform_driver msm8226_icc_driver = {
 		.of_match_table = msm8226_icc_of_match,
 	},
 };
-module_platform_driver(msm8226_icc_driver);
+
+static int __init msm8226_icc_driver_init(void)
+{
+	if (fx0_skip_mmss_qos && of_machine_is_compatible("lg,madai"))
+		mas_video_p0.qos.qos_mode = NOC_QOS_MODE_INVALID;
+
+	return platform_driver_register(&msm8226_icc_driver);
+}
+module_init(msm8226_icc_driver_init);
+
+static void __exit msm8226_icc_driver_exit(void)
+{
+	platform_driver_unregister(&msm8226_icc_driver);
+}
+module_exit(msm8226_icc_driver_exit);
 
 MODULE_DESCRIPTION("Qualcomm MSM8226 multimedia interconnect preview");
 MODULE_LICENSE("GPL");
