@@ -242,8 +242,7 @@ struct cpr_msm8926_data {
 	bool suspend_irq_disabled;
 	bool suspend_was_applied;
 	bool suspend_loop_was_enabled;
-	bool suspend_busy_before_disable;
-	bool suspend_busy_after_disable;
+	u8 suspend_busy_steps;
 	struct cpr_msm8926_calibration calibration;
 	struct cpr_msm8926_voltage_plan plan;
 	bool apc_enabled;
@@ -366,18 +365,32 @@ static void cpr_ctl_enable(struct cpr_drv *drv, struct corner *corner)
 	cpr_ctl_modify(drv, RBCPR_CTL_LOOP_EN, val);
 }
 
-static void cpr_ctl_disable(struct cpr_drv *drv)
+static void cpr_record_busy(struct cpr_drv *drv, u8 *steps, unsigned int step)
 {
+	if (steps && (readl(drv->base + REG_RBCPR_RESULT_0) & RBCPR_RESULT0_BUSY_MASK))
+		*steps |= BIT(step);
+}
+
+static void cpr_ctl_disable(struct cpr_drv *drv, u8 *busy_steps)
+{
+	cpr_record_busy(drv, busy_steps, 0);
 	cpr_irq_set(drv, 0);
+	cpr_record_busy(drv, busy_steps, 1);
 	cpr_ctl_modify(drv, RBCPR_CTL_SW_AUTO_CONT_NACK_DN_EN |
 		       RBCPR_CTL_SW_AUTO_CONT_ACK_EN, 0);
+	cpr_record_busy(drv, busy_steps, 2);
 	cpr_masked_write(drv, REG_RBIF_TIMER_ADJUST,
 			 RBIF_TIMER_ADJ_CONS_UP_MASK |
 			 RBIF_TIMER_ADJ_CONS_DOWN_MASK, 0);
+	cpr_record_busy(drv, busy_steps, 3);
 	cpr_irq_clr(drv);
+	cpr_record_busy(drv, busy_steps, 4);
 	cpr_write(drv, REG_RBIF_CONT_ACK_CMD, 1);
+	cpr_record_busy(drv, busy_steps, 5);
 	cpr_write(drv, REG_RBIF_CONT_NACK_CMD, 1);
+	cpr_record_busy(drv, busy_steps, 6);
 	cpr_ctl_modify(drv, RBCPR_CTL_LOOP_EN, 0);
+	cpr_record_busy(drv, busy_steps, 7);
 }
 
 static bool cpr_ctl_is_enabled(struct cpr_drv *drv)
@@ -748,7 +761,7 @@ static int cpr_disable(struct cpr_drv *drv)
 	mutex_lock(&drv->lock);
 
 	if (cpr_is_allowed(drv)) {
-		cpr_ctl_disable(drv);
+		cpr_ctl_disable(drv, NULL);
 		cpr_irq_clr(drv);
 	}
 
@@ -929,7 +942,7 @@ static int cpr_set_performance_state(struct generic_pm_domain *domain,
 		new_uV = corner->uV;
 
 	if (restore_feedback)
-		cpr_ctl_disable(drv);
+		cpr_ctl_disable(drv, NULL);
 
 	ret = cpr_scale_voltage(drv, corner, new_uV, dir);
 	if (ret) {
@@ -2186,7 +2199,7 @@ static int cpr_probe(struct platform_device *pdev)
 
 	mutex_init(&drv->lock);
 	if (drv->msm8926)
-		cpr_ctl_disable(drv);
+		cpr_ctl_disable(drv, NULL);
 
 	drv->irq = irq;
 	ret = devm_request_threaded_irq(dev, irq, NULL,
@@ -2224,7 +2237,7 @@ static void cpr_remove(struct platform_device *pdev)
 	struct cpr_drv *drv = platform_get_drvdata(pdev);
 
 	if (cpr_is_allowed(drv)) {
-		cpr_ctl_disable(drv);
+		cpr_ctl_disable(drv, NULL);
 		cpr_irq_set(drv, 0);
 	}
 
@@ -2309,10 +2322,16 @@ int qcom_cpr_msm8926_suspend_prepare(struct device *dev, struct device *owner)
 				 !(value & RBCPR_RESULT0_BUSY_MASK), 1, timeout_us);
 	dev_info(drv->dev,
 		 "CPR suspend drain: loop=%u busy before_disable=%u after_disable=%u late_entry=%u late_exit=%u elapsed_us=%lld limit_us=%u ret=%d\n",
-		 data->suspend_loop_was_enabled, data->suspend_busy_before_disable,
-		 data->suspend_busy_after_disable, busy_on_entry,
+		 data->suspend_loop_was_enabled, !!(data->suspend_busy_steps & BIT(0)),
+		 !!(data->suspend_busy_steps & BIT(7)), busy_on_entry,
 		 !!(value & RBCPR_RESULT0_BUSY_MASK),
 		 ktime_us_delta(ktime_get(), start), timeout_us, ret);
+	dev_info(drv->dev,
+		 "CPR disable busy: entry=%u mask_irq=%u auto_ack_off=%u timer_adjust=%u clear_irq=%u ack=%u nack=%u loop_off=%u\n",
+		 !!(data->suspend_busy_steps & BIT(0)), !!(data->suspend_busy_steps & BIT(1)),
+		 !!(data->suspend_busy_steps & BIT(2)), !!(data->suspend_busy_steps & BIT(3)),
+		 !!(data->suspend_busy_steps & BIT(4)), !!(data->suspend_busy_steps & BIT(5)),
+		 !!(data->suspend_busy_steps & BIT(6)), !!(data->suspend_busy_steps & BIT(7)));
 	if (ret)
 		goto out;
 	ret = cpr_msm8926_check_cpu_rate(drv, drv->corner->freq);
@@ -2389,13 +2408,10 @@ static int cpr_pm_suspend(struct device *dev)
 	guard(mutex)(&drv->lock);
 	if (drv->corner && cpr_is_allowed(drv))
 		cpr_corner_save(drv, drv->corner);
-	if (deep) {
-		drv->msm8926->suspend_loop_was_enabled = cpr_ctl_is_enabled(drv);
-		drv->msm8926->suspend_busy_before_disable = cpr_ctl_is_busy(drv);
-	}
-	cpr_ctl_disable(drv);
 	if (deep)
-		drv->msm8926->suspend_busy_after_disable = cpr_ctl_is_busy(drv);
+		drv->msm8926->suspend_loop_was_enabled = cpr_ctl_is_enabled(drv);
+	drv->msm8926->suspend_busy_steps = 0;
+	cpr_ctl_disable(drv, deep ? &drv->msm8926->suspend_busy_steps : NULL);
 	drv->msm8926->suspend_was_applied = drv->msm8926->applied;
 	drv->suspended = true;
 	/* Do not run feedback on assumed boot/resume voltage. */
