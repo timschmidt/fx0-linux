@@ -354,7 +354,7 @@ static int __maybe_unused qcom_wdt_suspend(struct device *dev)
 			if (ret)
 				return ret;
 			ret = readl_poll_timeout(wdt_addr(wdt, WDT_STS), status,
-						 FIELD_GET(MSM8226_WDT_COUNT, status) >= 4096,
+						 FIELD_GET(MSM8226_WDT_COUNT, status) >= 2048,
 						 500, 250000);
 			dev_info(dev, "Fx0 watchdog late sample: raw=0x%08x ticks=%lu ret=%d\n",
 				 status, FIELD_GET(MSM8226_WDT_COUNT, status), ret);
