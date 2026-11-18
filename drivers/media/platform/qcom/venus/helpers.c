@@ -5,6 +5,7 @@
  */
 #include <linux/idr.h>
 #include <linux/list.h>
+#include <linux/log2.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
@@ -237,12 +238,23 @@ static int intbufs_set_buffer(struct venus_inst *inst, u32 type)
 	struct hfi_buffer_requirements bufreq;
 	struct hfi_buffer_desc bd;
 	struct intbuf *buf;
+	bool trace_decoder = IS_V1(core) && inst->session_type == VIDC_SESSION_TYPE_DEC;
 	unsigned int i;
 	int ret;
 
 	ret = venus_helper_get_bufreq(inst, type, &bufreq);
-	if (ret)
+	if (ret) {
+		if (trace_decoder)
+			dev_dbg(dev, "decoder internal buffer %#x query failed: %d\n",
+				type, ret);
 		return 0;
+	}
+
+	if (trace_decoder)
+		dev_dbg(dev,
+			"decoder internal buffer %#x: size %u region %u count %u min %u alignment %u contiguous %u\n",
+			type, bufreq.size, bufreq.region_size, bufreq.count_actual,
+			bufreq.count_min, bufreq.alignment, bufreq.contiguous);
 
 	if (!bufreq.size)
 		return 0;
@@ -272,6 +284,13 @@ static int intbufs_set_buffer(struct venus_inst *inst, u32 type)
 		bd.device_addr = buf->da;
 
 		ret = hfi_session_set_buffers(inst, &bd);
+		if (trace_decoder)
+			dev_dbg(dev, "decoder internal buffer %#x index %u aligned %d register %d\n",
+				type, i,
+				!bufreq.alignment ||
+				(is_power_of_2(bufreq.alignment) &&
+				 IS_ALIGNED(buf->da, bufreq.alignment)),
+				ret);
 		if (ret) {
 			dev_err(dev, "set session buffers failed\n");
 			goto dma_free;
@@ -521,6 +540,12 @@ session_process_buf(struct venus_inst *inst, struct vb2_v4l2_buffer *vbuf)
 
 		if (inst->session_type == VIDC_SESSION_TYPE_DEC)
 			put_ts_metadata(inst, vbuf);
+
+		if (IS_V1(inst->core) && inst->session_type == VIDC_SESSION_TYPE_DEC)
+			dev_dbg(inst->core->dev,
+				"decoder input buffer: alloc %u payload %u offset %u flags %#x\n",
+				fdata.alloc_len, fdata.filled_len, fdata.offset,
+				fdata.flags);
 
 		venus_pm_load_scale(inst);
 	} else if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
