@@ -1309,13 +1309,14 @@ static int __maybe_unused cpr_msm8926_init(struct cpr_drv *drv)
 			data->calibration.ring_osc[i] : 0;
 		fuse->step_quot = 30;
 	}
-	ret = cpr_sleep_vote_init(drv->dev, 1337500, &data->mx_sleep);
+	ret = cpr_sleep_vote_init(drv->dev, data->plan.bootstrap_mx_uV,
+				  &data->mx_sleep);
 	if (ret)
 		return dev_err_probe(drv->dev, ret, "MX sleep guard unavailable\n");
 
 	drv->cpu_clk = cpu_clk;
 	drv->rails.mx = mx;
-	drv->rails.mx_max_uV = 1337500;
+	drv->rails.mx_max_uV = data->plan.bootstrap_mx_uV;
 	drv->msm8926 = data;
 	return 0;
 }
