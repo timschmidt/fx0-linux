@@ -64,6 +64,10 @@ extern void secondary_startup_arm(void);
 
 extern int __cpu_disable(void);
 
+#ifdef CONFIG_HOTPLUG_CPU
+void __noreturn arm_secondary_restart(void);
+#endif
+
 static inline void __cpu_die(unsigned int cpu) { }
 
 extern void arch_send_call_function_single_ipi(int cpu);
@@ -92,6 +96,12 @@ struct smp_operations {
 	 * This also gives us the initial stack to use for this CPU.
 	 */
 	int  (*smp_boot_secondary)(unsigned int cpu, struct task_struct *idle);
+	/*
+	 * Cancel a timed-out secondary boot before ARM retires its boot data.
+	 * Return false if the secondary already accepted the request and
+	 * must finish startup.
+	 */
+	bool (*smp_cancel_secondary_boot)(unsigned int cpu);
 #ifdef CONFIG_HOTPLUG_CPU
 	int  (*cpu_kill)(unsigned int cpu);
 	void (*cpu_die)(unsigned int cpu);

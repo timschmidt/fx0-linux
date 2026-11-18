@@ -6,6 +6,7 @@
  *  Copyright (c) 2014 The Linux Foundation. All rights reserved.
  */
 
+#include <linux/atomic.h>
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
@@ -379,57 +380,85 @@ static const struct smp_operations smp_msm8660_ops __initconst = {
 CPU_METHOD_OF_DECLARE(qcom_smp, "qcom,gcc-msm8660", &smp_msm8660_ops);
 
 #ifdef CONFIG_HOTPLUG_CPU
-#define MSM8226_CPU3_WAKE_SGI	1
+#define MSM8226_WAKE_SGI	1
 
-static DEFINE_PER_CPU(bool, msm8226_boot_requested);
+enum msm8226_restart_state {
+	MSM8226_RESTART_UNMANAGED,
+	MSM8226_RESTART_OFFLINE,
+	MSM8226_RESTART_REQUESTED,
+	MSM8226_RESTART_ACCEPTED,
+};
+
+static DEFINE_PER_CPU(atomic_t, msm8226_restart);
 
 static int msm8226_cpu_disable(unsigned int cpu)
 {
-	if (qcom_msm8226_hotplug_probe_active() &&
-	    cpu != QCOM_MSM8226_HOTPLUG_PROBE_CPU)
+	bool managed = qcom_msm8226_pm_active();
+
+	if (managed && !cpu)
 		return -EPERM;
-	if (qcom_msm8226_pm_active() && !cpu)
-		return -EPERM;
-	/* Publish a fresh offline interval before waiting for a new boot request. */
-	smp_store_release(&per_cpu(msm8226_boot_requested, cpu), false);
+	atomic_set(this_cpu_ptr(&msm8226_restart),
+		   managed ? MSM8226_RESTART_OFFLINE : MSM8226_RESTART_UNMANAGED);
 	return 0;
+}
+
+static bool msm8226_cancel_secondary_boot(unsigned int cpu)
+{
+	atomic_t *restart = per_cpu_ptr(&msm8226_restart, cpu);
+
+	return atomic_cmpxchg(restart, MSM8226_RESTART_REQUESTED, MSM8226_RESTART_OFFLINE) !=
+	       MSM8226_RESTART_ACCEPTED;
 }
 
 static void msm8226_cpu_die(unsigned int cpu)
 {
-	bool quiesced;
+	atomic_t *restart = this_cpu_ptr(&msm8226_restart);
+	bool collapse;
 	int ret;
 
-	if (!qcom_msm8226_pm_active()) {
+	if (atomic_read(restart) == MSM8226_RESTART_UNMANAGED) {
 		wfi();
 		return;
 	}
-	quiesced = !gic_cpu_quiesce_ppis(0);
-	if (cpu == QCOM_MSM8226_HOTPLUG_PROBE_CPU &&
-	    qcom_msm8226_hotplug_probe_active()) {
-		/* The architecture's IPI teardown may have masked this SGI. */
-		if (quiesced)
-			quiesced = !gic_cpu_enable_wake_sgi(0, MSM8226_CPU3_WAKE_SGI);
-		qcom_msm8226_hotplug_probe(quiesced);
-	}
-	/* Recheck after SGI cleanup so a concurrent boot request cannot be lost. */
-	while (!smp_load_acquire(&per_cpu(msm8226_boot_requested, cpu))) {
-		ret = quiesced ? qcom_msm8226_cpu_collapse(cpu) : -EIO;
-		if (ret)
+	/* ARM's IPI teardown masked the firmware wake interrupt. */
+	ret = gic_cpu_quiesce_ppis(0);
+	if (!ret)
+		ret = gic_cpu_enable_wake_sgi(0, MSM8226_WAKE_SGI);
+	collapse = !ret;
+
+	for (;;) {
+		if (atomic_cmpxchg(restart, MSM8226_RESTART_REQUESTED, MSM8226_RESTART_ACCEPTED) ==
+		    MSM8226_RESTART_REQUESTED)
+			arm_secondary_restart();
+
+		ret = collapse ? qcom_msm8226_cpu_collapse(cpu) : -EIO;
+		if (ret && atomic_read(restart) != MSM8226_RESTART_REQUESTED)
 			wfi();
 	}
+}
+
+static int msm8226_restart_secondary(unsigned int cpu, atomic_t *restart)
+{
+	int ret;
+
+	if (atomic_cmpxchg(restart, MSM8226_RESTART_OFFLINE, MSM8226_RESTART_REQUESTED) !=
+	    MSM8226_RESTART_OFFLINE)
+		return -EBUSY;
+
+	ret = gic_send_cpu_wakeup_sgi(cpu, MSM8226_WAKE_SGI);
+	if (ret && !msm8226_cancel_secondary_boot(cpu))
+		return 0;
+	return ret;
 }
 #endif
 
 static int msm8226_boot_secondary(unsigned int cpu, struct task_struct *idle)
 {
 #ifdef CONFIG_HOTPLUG_CPU
-	/* Publish the request before the bring-up path sends its boot SGI. */
-	smp_store_release(&per_cpu(msm8226_boot_requested, cpu), true);
-	/* The downstream firmware wake path uses hardware SGI 1. */
-	if (cpu == QCOM_MSM8226_HOTPLUG_PROBE_CPU &&
-	    per_cpu(cold_boot_done, cpu) && qcom_msm8226_hotplug_probe_active())
-		return gic_send_cpu_wakeup_sgi(cpu, MSM8226_CPU3_WAKE_SGI);
+	atomic_t *restart = per_cpu_ptr(&msm8226_restart, cpu);
+
+	if (atomic_read(restart) != MSM8226_RESTART_UNMANAGED)
+		return msm8226_restart_secondary(cpu, restart);
 #endif
 	return cortex_a7_boot_secondary(cpu, idle);
 }
@@ -438,6 +467,7 @@ static const struct smp_operations qcom_smp_msm8226_ops __initconst = {
 	.smp_prepare_cpus = qcom_smp_prepare_cpus,
 	.smp_boot_secondary = msm8226_boot_secondary,
 #ifdef CONFIG_HOTPLUG_CPU
+	.smp_cancel_secondary_boot = msm8226_cancel_secondary_boot,
 	.cpu_disable = msm8226_cpu_disable,
 	.cpu_die = msm8226_cpu_die,
 	.cpu_kill = qcom_msm8226_cpu_kill,
