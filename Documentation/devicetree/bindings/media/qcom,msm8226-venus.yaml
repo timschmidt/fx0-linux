@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/qcom,msm8226-venus.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm MSM8226 Venus video accelerator
+
+maintainers:
+  - Stanimir Varbanov <stanimir.k.varbanov@gmail.com>
+  - Vikash Garodia <quic_vgarodia@quicinc.com>
+
+description: |
+  The MSM8226 Venus IP provides video encoding and decoding. The codec
+  register ranges exclude the associated IOMMU and its wrapper clock
+  selector. The IOMMU supplies a non-secure context for video buffers.
+
+properties:
+  compatible:
+    const: qcom,msm8226-venus
+
+  reg:
+    items:
+      - description: Video bus interface (VBIF)
+      - description: CPU register block, including control status and interrupts
+      - description: Version register at wrapper offset 0
+      - description: Wrapper registers starting at offset 8
+
+  reg-names:
+    items:
+      - const: vbif
+      - const: cpu
+      - const: wrapper-version
+      - const: wrapper
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: Codec core clock
+      - description: Register interface clock
+      - description: Video AXI clock
+
+  clock-names:
+    items:
+      - const: core
+      - const: iface
+      - const: bus
+
+  power-domains:
+    maxItems: 1
+
+  iommus:
+    maxItems: 1
+
+  memory-region:
+    maxItems: 1
+    description: Reserved memory for the Venus firmware image
+
+  firmware-name:
+    maxItems: 1
+
+  interconnects:
+    items:
+      - description: Venus video data path to main memory
+      - description: CPU access path to the Venus configuration registers
+
+  interconnect-names:
+    items:
+      - const: video-mem
+      - const: cpu-cfg
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - clocks
+  - clock-names
+  - power-domains
+  - iommus
+  - memory-region
+
+allOf:
+  - if:
+      not:
+        properties:
+          status:
+            const: disabled
+        required:
+          - status
+    then:
+      required:
+        - interconnects
+        - interconnect-names
+
+additionalProperties: false
