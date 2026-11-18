@@ -887,6 +887,8 @@ static int vdec_output_conf(struct venus_inst *inst, bool reconfigure)
 static int vdec_session_init(struct venus_inst *inst)
 {
 	struct device *dev = inst->core->dev_dec;
+	u32 width = frame_width_min(inst);
+	u32 height = frame_height_min(inst);
 	int ret;
 
 	ret = venus_helper_session_init(inst);
@@ -896,11 +898,15 @@ static int vdec_session_init(struct venus_inst *inst)
 	else if (ret)
 		return ret;
 
-	ret = venus_helper_set_input_resolution(inst, frame_width_min(inst),
-						frame_height_min(inst));
+	/* Start MSM8226 at the negotiated coded size, as its vendor driver does. */
+	if (of_device_is_compatible(inst->core->dev->of_node, "qcom,msm8226-venus")) {
+		width = inst->out_width;
+		height = inst->out_height;
+	}
+
+	ret = venus_helper_set_input_resolution(inst, width, height);
 	dev_dbg(dev, "decoder initial resolution %ux%u from format %ux%u: %d\n",
-		frame_width_min(inst), frame_height_min(inst), inst->out_width,
-		inst->out_height, ret);
+		width, height, inst->out_width, inst->out_height, ret);
 	if (ret)
 		goto deinit;
 
