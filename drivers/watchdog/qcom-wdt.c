@@ -331,12 +331,28 @@ static int __maybe_unused qcom_wdt_suspend(struct device *dev)
 	if (wdt->suspend_recovery) {
 		if (!qcom_wdt_is_running(&wdt->wdd))
 			return -EIO;
+		if (msm8226_suspend_counter_sample) {
+			ret = readl_poll_timeout(wdt_addr(wdt, WDT_STS), status,
+						 FIELD_GET(MSM8226_WDT_COUNT, status) >= 2048,
+						 500, 150000);
+			dev_info(dev, "Fx0 watchdog before ping: raw=0x%08x ticks=%lu ret=%d\n",
+				 status, FIELD_GET(MSM8226_WDT_COUNT, status), ret);
+			if (ret)
+				return ret;
+		}
 		qcom_wdt_ping(&wdt->wdd);
 		/*
 		 * Take a nonzero sample before entering system sleep. A lower
 		 * sample at early resume identifies a counter discontinuity.
 		 */
 		if (msm8226_suspend_counter_sample) {
+			ret = readl_poll_timeout(wdt_addr(wdt, WDT_STS), status,
+						 FIELD_GET(MSM8226_WDT_COUNT, status) < 512,
+						 50, 30000);
+			dev_info(dev, "Fx0 watchdog ping observed: raw=0x%08x ticks=%lu ret=%d\n",
+				 status, FIELD_GET(MSM8226_WDT_COUNT, status), ret);
+			if (ret)
+				return ret;
 			ret = readl_poll_timeout(wdt_addr(wdt, WDT_STS), status,
 						 FIELD_GET(MSM8226_WDT_COUNT, status) >= 4096,
 						 500, 250000);
