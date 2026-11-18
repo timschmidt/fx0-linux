@@ -72,7 +72,8 @@ static int rpm_reg_send_vote(struct qcom_rpm_reg *vreg, int state,
 			     const struct rpm_reg_vote *vote)
 {
 	struct rpm_regulator_req req[3];
-	int count = 1;
+	bool trace = vreg->pair && vreg->type == QCOM_SMD_RPM_LDOA && vreg->id == 3;
+	int count = 1, ret;
 
 	req[0].key = cpu_to_le32(RPM_KEY_SWEN);
 	req[0].nbytes = cpu_to_le32(sizeof(u32));
@@ -88,8 +89,14 @@ static int rpm_reg_send_vote(struct qcom_rpm_reg *vreg, int state,
 		req[count++].value = cpu_to_le32(vote->load / 1000);
 	}
 
-	return qcom_rpm_smd_write(smd_vreg_rpm, state, vreg->type, vreg->id,
-				 req, sizeof(req[0]) * count);
+	if (trace)
+		dev_info(vreg->dev, "FX0_MX_VOTE_BEGIN set=%d enabled=%u uV=%d\n",
+			 state, vote->enabled, vote->uV);
+	ret = qcom_rpm_smd_write(smd_vreg_rpm, state, vreg->type, vreg->id,
+				req, sizeof(req[0]) * count);
+	if (trace)
+		dev_info(vreg->dev, "FX0_MX_VOTE_END set=%d ret=%d\n", state, ret);
+	return ret;
 }
 
 static struct rpm_reg_vote rpm_reg_pair_sleep_vote(struct rpm_reg_pair *pair,
