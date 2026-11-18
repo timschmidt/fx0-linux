@@ -1462,18 +1462,22 @@ static int __maybe_unused qcom_iommu_suspend(struct device *dev)
 	struct qcom_iommu_dev *qcom_iommu = dev_get_drvdata(dev);
 	struct qcom_iommu_ctx *ctx;
 	unsigned long flags;
-	int ret = 0;
 
 	if (qcom_iommu->wrapper_clk_sel) {
 		spin_lock_irqsave(&qcom_iommu->ctx_lock, flags);
 		ctx = qcom_iommu->ctxs[0];
-		if (ctx && qcom_iommu->ctx_online)
-			ret = qcom_iommu_rearm_venus_ctx(qcom_iommu, ctx, NULL);
-		if (!ret)
-			qcom_iommu->ctx_online = false;
+		if (ctx && qcom_iommu->ctx_online) {
+			/*
+			 * The device link orders this after the Venus engine
+			 * quiesces. Disable the context before offline page
+			 * table cleanup. Resume invalidates the ASID before
+			 * restoring the context and releasing the consumer.
+			 */
+			iommu_writel(ctx, ARM_SMMU_CB_SCTLR, 0);
+			iommu_readl(ctx, ARM_SMMU_CB_SCTLR);
+		}
+		qcom_iommu->ctx_online = false;
 		spin_unlock_irqrestore(&qcom_iommu->ctx_lock, flags);
-		if (ret)
-			return ret;
 	}
 
 	clk_bulk_disable_unprepare(CLK_NUM, qcom_iommu->clks);
