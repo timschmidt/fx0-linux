@@ -1531,6 +1531,36 @@ static const struct dma_map_ops iommu_ops = {
 };
 
 /**
+ * arm_iommu_dma_aperture_within - Check the configured legacy DMA aperture
+ * @dev: device whose driver owns the configured DMA mapping
+ * @start: first permitted DMA address
+ * @end: exclusive upper bound of the permitted DMA addresses
+ *
+ * Check the whole allocator, including bitmap extensions that have yet to be
+ * allocated. An IOMMU firmware description alone does not establish a mapping.
+ *
+ * Return: true when the active legacy IOMMU allocator can only allocate within
+ * the requested interval.
+ */
+bool arm_iommu_dma_aperture_within(struct device *dev, u64 start, u64 end)
+{
+	struct dma_iommu_mapping *mapping = to_dma_iommu_mapping(dev);
+	u64 size;
+
+	if (!mapping || get_dma_ops(dev) != &iommu_ops ||
+	    !mapping->domain || iommu_get_domain_for_dev(dev) != mapping->domain)
+		return false;
+
+	if (end > DMA_BIT_MASK(32) + 1 || start >= end ||
+	    mapping->base < start || mapping->base >= end)
+		return false;
+
+	size = (u64)mapping->bits * mapping->extensions << PAGE_SHIFT;
+	return size && size <= end - mapping->base;
+}
+EXPORT_SYMBOL_GPL(arm_iommu_dma_aperture_within);
+
+/**
  * arm_iommu_create_mapping
  * @dev: pointer to the client device (for IOMMU calls)
  * @base: start address of the valid IO address space

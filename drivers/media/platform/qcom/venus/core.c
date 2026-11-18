@@ -23,6 +23,10 @@
 #include <media/v4l2-mem2mem.h>
 #include <media/v4l2-ioctl.h>
 
+#ifdef CONFIG_ARM_DMA_USE_IOMMU
+#include <asm/dma-iommu.h>
+#endif
+
 #include "core.h"
 #include "firmware.h"
 #include "pm_helpers.h"
@@ -378,19 +382,36 @@ static void venus_unreserve_iova_region(struct device *dev, struct dma_iova_stat
 {
 	unsigned int i;
 
+	if (!state)
+		return;
+
 	for (i = 0; dma_iova_size(&state[i]); i++)
 		dma_iova_free(dev, &state[i]);
 }
 
-static int venus_reserve_iova_region(struct device *dev, struct dma_iova_state **iova_state,
-				     unsigned long start, unsigned long size)
+static int venus_reserve_iova_region(struct venus_core *core)
 {
+	struct device *dev = core->dev;
+	unsigned long start = VENUS_NP_RESERVE_IOVA_START;
+	unsigned long size = VENUS_NP_RESERVE_IOVA_SIZE;
+#ifdef CONFIG_ARM_DMA_USE_IOMMU
+	u64 limit = min_t(u64, core->res->dma_mask, DMA_BIT_MASK(32));
+
+	if (dev->bus_dma_limit)
+		limit = min(limit, dev->bus_dma_limit);
+
+	/* The legacy allocator has no dynamic IOVA reservation interface. */
+	if (!arm_iommu_dma_aperture_within(dev, start + size, limit + 1))
+		return dev_err_probe(dev, -EOPNOTSUPP,
+				     "legacy DMA aperture includes reserved or unreachable addresses\n");
+
+	return 0;
+#else
 	unsigned long dma_limit = dev->bus_dma_limit;
 	unsigned long end, rem, chunk;
 	struct dma_iova_state *state;
 	unsigned int count = 0;
 	int ret = -ENOMEM;
-
 	state = devm_kcalloc(dev, BITS_PER_TYPE(dma_addr_t) + 1, sizeof(*state), GFP_KERNEL);
 	if (!state)
 		return ret;
@@ -413,7 +434,7 @@ static int venus_reserve_iova_region(struct device *dev, struct dma_iova_state *
 		count++;
 	}
 
-	*iova_state = state;
+	core->iova_state = state;
 	dev->bus_dma_limit = dma_limit;
 
 	return 0;
@@ -423,6 +444,7 @@ err_free_iova:
 	dev->bus_dma_limit = dma_limit;
 
 	return ret;
+#endif
 }
 
 static int venus_probe(struct platform_device *pdev)
@@ -469,8 +491,7 @@ static int venus_probe(struct platform_device *pdev)
 			return ret;
 	}
 
-	ret = venus_reserve_iova_region(dev, &core->iova_state, VENUS_NP_RESERVE_IOVA_START,
-					VENUS_NP_RESERVE_IOVA_SIZE);
+	ret = venus_reserve_iova_region(core);
 	if (ret)
 		goto err_core_put;
 
