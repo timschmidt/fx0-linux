@@ -619,7 +619,10 @@ static int qcom_iommu_attach_dev(struct iommu_domain *domain,
 	}
 
 	/* Ensure that the domain is finalized */
-	pm_runtime_get_sync(qcom_iommu->dev);
+	ret = pm_runtime_resume_and_get(qcom_iommu->dev);
+	if (ret < 0)
+		return ret;
+
 	ret = qcom_iommu_init_domain(domain, qcom_iommu, dev);
 	pm_runtime_put_sync(qcom_iommu->dev);
 	if (ret < 0)
