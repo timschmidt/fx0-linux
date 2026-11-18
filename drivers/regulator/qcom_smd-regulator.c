@@ -93,7 +93,7 @@ static int rpm_reg_send_vote(struct qcom_rpm_reg *vreg, int state,
 		dev_info(vreg->dev, "FX0_MX_VOTE_BEGIN set=%d enabled=%u uV=%d\n",
 			 state, vote->enabled, vote->uV);
 	ret = qcom_rpm_smd_write(smd_vreg_rpm, state, vreg->type, vreg->id,
-				req, sizeof(req[0]) * count);
+				 req, sizeof(req[0]) * count);
 	if (trace)
 		dev_info(vreg->dev, "FX0_MX_VOTE_END set=%d ret=%d\n", state, ret);
 	return ret;
