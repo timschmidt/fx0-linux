@@ -14,7 +14,7 @@
 		compatible = "qcom,msm8226-bimc";
 		reg = <0xfc380000 0x6a000>;
 		#interconnect-cells = <1>;
-		status = "disabled";
+		status = "okay";
 	};
 
 	mmss_noc: interconnect@fc478000 {
@@ -23,7 +23,7 @@
 		#interconnect-cells = <1>;
 		clocks = <&mmcc MMSS_AXI_CLK_SRC>, <&mmcc MMSS_S0_AXI_CLK>;
 		clock-names = "bus", "iface";
-		status = "disabled";
+		status = "okay";
 	};
 
 	venus_iommu: iommu@fdc84000 {
@@ -41,7 +41,7 @@
 		clock-names = "iface", "bus", "tbu";
 		power-domains = <&mmcc VENUS0_GDSC>;
 		qcom,iommu-secure-id = <0>;
-		status = "disabled";
+		status = "okay";
 
 		/* Content-protection and firmware contexts belong to secure world. */
 		iommu-ctx@0 {
@@ -76,7 +76,7 @@
 			interconnects = <&mmss_noc MSM8226_MMSS_MASTER_VIDEO_P0
 					 &bimc MSM8226_BIMC_SLAVE_EBI_CH0>;
 			interconnect-names = "video-mem";
-			status = "disabled";
+			status = "okay";
 		};
 	};
 };
