@@ -2,6 +2,7 @@
 /* Copyright (c) 2014, The Linux Foundation. All rights reserved.
  */
 #include <linux/bits.h>
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -21,6 +22,11 @@ enum wdt_reg {
 };
 
 #define QCOM_WDT_ENABLE		BIT(0)
+#define MSM8226_WDT_COUNT	GENMASK(20, 1)
+
+static bool msm8226_suspend_recovery;
+module_param(msm8226_suspend_recovery, bool, 0400);
+MODULE_PARM_DESC(msm8226_suspend_recovery, "Keep the Fx0 hardware watchdog armed during suspend for recovery tests");
 
 static const u32 reg_offset_data_apcs_tmr[] = {
 	[WDT_RST] = 0x38,
@@ -49,6 +55,7 @@ struct qcom_wdt {
 	unsigned long		rate;
 	void __iomem		*base;
 	const u32		*layout;
+	bool			suspend_recovery;
 };
 
 static void __iomem *wdt_addr(struct qcom_wdt *wdt, enum wdt_reg reg)
@@ -214,6 +221,10 @@ static int qcom_wdt_probe(struct platform_device *pdev)
 	if (!wdt)
 		return -ENOMEM;
 
+	wdt->suspend_recovery = msm8226_suspend_recovery &&
+		of_machine_is_compatible("lg,madai") &&
+		of_device_is_compatible(np, "qcom,apss-wdt-msm8226");
+
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
 		return -ENOMEM;
@@ -307,8 +318,18 @@ static int __maybe_unused qcom_wdt_suspend(struct device *dev)
 {
 	struct qcom_wdt *wdt = dev_get_drvdata(dev);
 
-	if (watchdog_active(&wdt->wdd))
-		qcom_wdt_stop(&wdt->wdd);
+	if (!watchdog_active(&wdt->wdd))
+		return 0;
+	if (wdt->suspend_recovery) {
+		if (!qcom_wdt_is_running(&wdt->wdd))
+			return -EIO;
+		qcom_wdt_ping(&wdt->wdd);
+		dev_info(dev, "suspend recovery watchdog armed: rate=%lu timeout=%u\n",
+			 wdt->rate, wdt->wdd.timeout);
+		return 0;
+	}
+
+	qcom_wdt_stop(&wdt->wdd);
 
 	return 0;
 }
@@ -316,9 +337,17 @@ static int __maybe_unused qcom_wdt_suspend(struct device *dev)
 static int __maybe_unused qcom_wdt_resume(struct device *dev)
 {
 	struct qcom_wdt *wdt = dev_get_drvdata(dev);
+	u32 status;
 
-	if (watchdog_active(&wdt->wdd))
-		qcom_wdt_start(&wdt->wdd);
+	if (!watchdog_active(&wdt->wdd))
+		return 0;
+	if (wdt->suspend_recovery) {
+		status = readl(wdt_addr(wdt, WDT_STS));
+		dev_info(dev, "suspend recovery watchdog resume: running=%d ticks=%lu\n",
+			 qcom_wdt_is_running(&wdt->wdd), FIELD_GET(MSM8226_WDT_COUNT, status));
+	}
+
+	qcom_wdt_start(&wdt->wdd);
 
 	return 0;
 }
