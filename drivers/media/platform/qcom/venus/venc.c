@@ -1025,9 +1025,11 @@ static int venc_set_properties(struct venus_inst *inst)
 
 static int venc_init_session(struct venus_inst *inst)
 {
+	struct device *dev = inst->core->dev;
 	int ret;
 
 	ret = venus_helper_session_init(inst);
+	dev_dbg(dev, "encoder session init: %d\n", ret);
 	if (ret == -EALREADY)
 		return 0;
 	else if (ret)
@@ -1035,25 +1037,30 @@ static int venc_init_session(struct venus_inst *inst)
 
 	ret = venus_helper_set_stride(inst, inst->out_width,
 				      inst->out_height);
+	dev_dbg(dev, "encoder input stride: %d\n", ret);
 	if (ret)
 		goto deinit;
 
 	ret = venus_helper_set_input_resolution(inst, inst->width,
 						inst->height);
+	dev_dbg(dev, "encoder input resolution: %d\n", ret);
 	if (ret)
 		goto deinit;
 
 	ret = venus_helper_set_output_resolution(inst, inst->width,
 						 inst->height,
 						 HFI_BUFFER_OUTPUT);
+	dev_dbg(dev, "encoder output resolution: %d\n", ret);
 	if (ret)
 		goto deinit;
 
 	ret = venus_helper_set_color_format(inst, inst->fmt_out->pixfmt);
+	dev_dbg(dev, "encoder input color format: %d\n", ret);
 	if (ret)
 		goto deinit;
 
 	ret = venc_set_properties(inst);
+	dev_dbg(dev, "encoder session properties: %d\n", ret);
 	if (ret)
 		goto deinit;
 
@@ -1117,6 +1124,7 @@ static int venc_queue_setup(struct vb2_queue *q,
 	}
 
 	ret = venc_pm_get(inst);
+	dev_dbg(core->dev, "encoder queue setup PM get: %d\n", ret);
 	if (ret)
 		return ret;
 
@@ -1128,6 +1136,7 @@ static int venc_queue_setup(struct vb2_queue *q,
 		goto put_power;
 
 	ret = venc_pm_put(inst, false);
+	dev_dbg(core->dev, "encoder queue setup PM put: %d\n", ret);
 	if (ret)
 		return ret;
 
@@ -1136,6 +1145,7 @@ static int venc_queue_setup(struct vb2_queue *q,
 		*num_planes = inst->fmt_out->num_planes;
 
 		ret = venc_out_num_buffers(inst, &num);
+		dev_dbg(core->dev, "encoder input buffer requirements: %d\n", ret);
 		if (ret)
 			break;
 
