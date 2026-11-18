@@ -50,6 +50,7 @@ struct rpm_clk_resource {
  * @bus_clk_rate: bus clock rate in Hz
  * @bus_clk_desc: a pointer to a rpm_clk_resource description of bus clocks
  * @bus_clk: a pointer to a HLOS-owned bus clock
+ * @set_bus_clk_rate: apply a HLOS bus clock request in Hz
  * @intf_clks: a clk_bulk_data array of interface clocks
  * @keep_alive: whether to always keep a minimum vote on the bus clocks
  * @is_on: whether the bus is powered on
@@ -66,6 +67,7 @@ struct qcom_icc_provider {
 	u32 bus_clk_rate[QCOM_SMD_RPM_STATE_NUM];
 	const struct rpm_clk_resource *bus_clk_desc;
 	struct clk *bus_clk;
+	int (*set_bus_clk_rate)(struct clk *clk, unsigned long rate);
 	struct clk_bulk_data *intf_clks;
 	bool keep_alive;
 	bool is_on;
@@ -131,6 +133,8 @@ struct qcom_icc_desc {
 	struct qcom_icc_node * const *nodes;
 	size_t num_nodes;
 	const struct rpm_clk_resource *bus_clk_desc;
+	int (*set_bus_clk_rate)(struct clk *clk, unsigned long rate);
+	int (*get_bw)(struct icc_node *node, u32 *avg, u32 *peak);
 	const char * const *intf_clocks;
 	size_t num_intf_clocks;
 	bool keep_alive;

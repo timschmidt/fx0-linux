@@ -388,7 +388,7 @@ static int qcom_icc_set(struct icc_node *src, struct icc_node *dst)
 		active_rate = max_t(u64, active_rate, sleep_rate);
 		/* ARM32 caps clk_set_rate arg to u32.. Nothing we can do about that! */
 		active_rate = min_t(u64, 1000ULL * active_rate, ULONG_MAX);
-		return clk_set_rate(qp->bus_clk, active_rate);
+		return qp->set_bus_clk_rate(qp->bus_clk, active_rate);
 	}
 
 	/* RPM only accepts <=INT_MAX rates */
@@ -498,7 +498,10 @@ int qnoc_probe(struct platform_device *pdev)
 		qp->bus_clk = devm_clk_get_optional(dev, "bus");
 		if (IS_ERR(qp->bus_clk))
 			return PTR_ERR(qp->bus_clk);
+		if (desc->set_bus_clk_rate && !qp->bus_clk)
+			return dev_err_probe(dev, -ENOENT, "missing bus clock\n");
 	}
+	qp->set_bus_clk_rate = desc->set_bus_clk_rate ?: clk_set_rate;
 
 	data = devm_kzalloc(dev, struct_size(data, nodes, num_nodes),
 			    GFP_KERNEL);
@@ -551,6 +554,7 @@ regmap_done:
 	provider = &qp->provider;
 	provider->dev = dev;
 	provider->set = qcom_icc_set;
+	provider->get_bw = desc->get_bw;
 	provider->pre_aggregate = qcom_icc_pre_bw_aggregate;
 	provider->aggregate = qcom_icc_bw_aggregate;
 	provider->xlate_extended = qcom_icc_xlate_extended;

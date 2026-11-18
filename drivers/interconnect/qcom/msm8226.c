@@ -81,6 +81,31 @@ static struct qcom_icc_node * const msm8226_mmss_nodes[] = {
 
 static const char * const msm8226_mmss_intf_clocks[] = { "iface" };
 
+static int msm8226_get_bw(struct icc_node *node, u32 *avg, u32 *peak)
+{
+	/* These endpoints only account for video requests made after probe. */
+	*avg = 0;
+	*peak = 0;
+
+	return 0;
+}
+
+static int msm8226_set_mmss_rate(struct clk *clk, unsigned long rate)
+{
+	long actual;
+
+	if (rate) {
+		actual = clk_round_rate(clk, rate);
+		if (actual < 0)
+			return actual;
+		if ((unsigned long)actual < rate)
+			return -ERANGE;
+	}
+
+	/* Display and camera clocks can also propagate rates to this root. */
+	return clk_set_min_rate(clk, rate);
+}
+
 static const struct regmap_config msm8226_mmss_regmap_config = {
 	.reg_bits = 32,
 	.val_bits = 32,
@@ -93,6 +118,8 @@ static const struct qcom_icc_desc msm8226_mmss = {
 	.type = QCOM_ICC_NOC,
 	.nodes = msm8226_mmss_nodes,
 	.num_nodes = ARRAY_SIZE(msm8226_mmss_nodes),
+	.get_bw = msm8226_get_bw,
+	.set_bus_clk_rate = msm8226_set_mmss_rate,
 	.intf_clocks = msm8226_mmss_intf_clocks,
 	.num_intf_clocks = ARRAY_SIZE(msm8226_mmss_intf_clocks),
 	.regmap_cfg = &msm8226_mmss_regmap_config,
@@ -117,8 +144,8 @@ static const struct qcom_icc_desc msm8226_bimc = {
 	.type = QCOM_ICC_BIMC,
 	.nodes = msm8226_bimc_nodes,
 	.num_nodes = ARRAY_SIZE(msm8226_bimc_nodes),
-	.bus_clk_desc = &bimc_clk,
-	.keep_alive = true,
+	.get_bw = msm8226_get_bw,
+	/* Keep the RPM clock controller's vote until all DDR users are modelled. */
 	.regmap_cfg = &msm8226_bimc_regmap_config,
 	.qos_offset = 0x8000,
 };
