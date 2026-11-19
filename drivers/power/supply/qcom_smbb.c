@@ -155,6 +155,8 @@ struct smbb_charger {
 	bool dc_disabled;
 	bool jeita_ext_temp;
 	unsigned long status;
+	bool defer_charge_phase;
+	bool charge_phase_pending;
 	struct mutex statlock;
 	/* Serializes charger-enable votes and battery and USB limits. */
 	struct mutex charge_lock;
@@ -528,12 +530,23 @@ static irqreturn_t smbb_chg_gone_handler(int irq, void *_data)
 	return IRQ_HANDLED;
 }
 
+/* Charge phase changes report status. Other IRQs retain their wake handling. */
+static void smbb_charge_phase_changed(struct smbb_charger *chg)
+{
+	mutex_lock(&chg->statlock);
+	if (chg->defer_charge_phase)
+		chg->charge_phase_pending = true;
+	else
+		power_supply_changed(chg->bat_psy);
+	mutex_unlock(&chg->statlock);
+}
+
 static irqreturn_t smbb_chg_fast_handler(int irq, void *_data)
 {
 	struct smbb_charger *chg = _data;
 
 	smbb_set_line_flag(chg, irq, STATUS_CHG_FAST);
-	power_supply_changed(chg->bat_psy);
+	smbb_charge_phase_changed(chg);
 
 	return IRQ_HANDLED;
 }
@@ -543,7 +556,7 @@ static irqreturn_t smbb_chg_trkl_handler(int irq, void *_data)
 	struct smbb_charger *chg = _data;
 
 	smbb_set_line_flag(chg, irq, STATUS_CHG_TRKL);
-	power_supply_changed(chg->bat_psy);
+	smbb_charge_phase_changed(chg);
 
 	return IRQ_HANDLED;
 }
@@ -1885,7 +1898,37 @@ static int smbb_policy_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(smbb_policy_pm_ops, smbb_policy_suspend, smbb_policy_resume);
+static int smbb_policy_prepare(struct device *dev)
+{
+	struct smbb_policy *policy = dev_get_drvdata(dev);
+	struct smbb_charger *chg = policy->chg;
+
+	/* The suspend callback will intentionally transition out of fast charge. */
+	mutex_lock(&chg->statlock);
+	chg->defer_charge_phase = true;
+	mutex_unlock(&chg->statlock);
+	return 0;
+}
+
+static void smbb_policy_complete(struct device *dev)
+{
+	struct smbb_policy *policy = dev_get_drvdata(dev);
+	struct smbb_charger *chg = policy->chg;
+
+	mutex_lock(&chg->statlock);
+	chg->defer_charge_phase = false;
+	if (chg->charge_phase_pending) {
+		chg->charge_phase_pending = false;
+		power_supply_changed(chg->bat_psy);
+	}
+	mutex_unlock(&chg->statlock);
+}
+
+static const struct dev_pm_ops smbb_policy_pm_ops __maybe_unused = {
+	.prepare = smbb_policy_prepare,
+	.complete = smbb_policy_complete,
+	SYSTEM_SLEEP_PM_OPS(smbb_policy_suspend, smbb_policy_resume)
+};
 
 static void smbb_policy_shutdown(struct platform_device *pdev)
 {
