@@ -4,17 +4,20 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_wakeirq.h>
 #include <linux/usb/chipidea.h>
 #include <linux/clk.h>
 #include <linux/reset.h>
 #include <linux/mfd/syscon.h>
 #include <linux/regmap.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/reset-controller.h>
 #include <linux/extcon.h>
 #include <linux/of.h>
 
 #include "ci.h"
+#include "bits.h"
 
 #define HS_PHY_AHB_MODE			0x0098
 
@@ -23,9 +26,12 @@
 
 #define HS_PHY_GENCONFIG_2		0x00a0
 #define HS_PHY_SESS_VLD_CTRL_EN		BIT(7)
+#define HS_PHY_LINESTATE_WAKE_EN	BIT(12)
 #define HS_PHY_ULPI_TX_PKT_EN_CLR_FIX	BIT(19)
 
 #define HSPHY_SESS_VLD_CTRL		BIT(25)
+#define HS_PHY_ASYNC_INTR_CTRL		BIT(29)
+#define HS_PHY_ULPI_STP_CTRL		BIT(30)
 
 /* Vendor base starts at 0x200 beyond CI base */
 #define HS_PHY_CTRL			0x0040
@@ -42,6 +48,10 @@ struct ci_hdrc_msm {
 	struct reset_controller_dev rcdev;
 	bool secondary_phy;
 	bool hsic;
+	int wake_irq;
+	bool async_wake_active;
+	u32 saved_async_cmd;
+	u32 saved_linestate_wake;
 	void __iomem *base;
 };
 
@@ -136,6 +146,56 @@ static int ci_hdrc_msm_notify_event(struct ci_hdrc *ci, unsigned event)
 	return 0;
 }
 
+static void ci_hdrc_msm_enter_lpm(struct ci_hdrc *ci, bool enable)
+{
+	struct ci_hdrc_msm *msm_ci = dev_get_drvdata(ci->dev->parent);
+	const u32 async_cmd = HS_PHY_ASYNC_INTR_CTRL | HS_PHY_ULPI_STP_CTRL;
+	enum ci_hw_regs reg = ci->hw_bank.lpm ? OP_DEVLC : OP_PORTSC;
+	u32 phcd = PORTSC_PHCD(ci->hw_bank.lpm);
+	bool arm;
+	u32 val;
+	int ret;
+
+	/* The host must suspend an attached peripheral bus before system sleep. */
+	arm = enable && !msm_ci->async_wake_active &&
+	      device_may_wakeup(ci->dev) && ci->role == CI_ROLE_GADGET &&
+	      ci->gadget.connected && ci->suspended;
+
+	if (!enable && msm_ci->async_wake_active) {
+		hw_write(ci, OP_USBCMD, async_cmd, msm_ci->saved_async_cmd);
+		hw_write_id_reg(ci, HS_PHY_GENCONFIG_2, HS_PHY_LINESTATE_WAKE_EN,
+				msm_ci->saved_linestate_wake);
+		msm_ci->async_wake_active = false;
+	}
+
+	if (arm) {
+		msm_ci->saved_async_cmd = hw_read(ci, OP_USBCMD, async_cmd);
+		msm_ci->saved_linestate_wake = hw_read_id_reg(ci,
+				HS_PHY_GENCONFIG_2, HS_PHY_LINESTATE_WAKE_EN);
+		hw_write_id_reg(ci, HS_PHY_GENCONFIG_2, HS_PHY_LINESTATE_WAKE_EN,
+				HS_PHY_LINESTATE_WAKE_EN);
+	}
+
+	if (!!hw_read(ci, reg, phcd) != enable)
+		hw_write(ci, reg, phcd, enable ? phcd : 0);
+
+	if (!arm)
+		return;
+
+	/* Enable the asynchronous output after the PHY has entered LPM. */
+	ret = read_poll_timeout(hw_read, val, val, 1, 500000, false,
+				ci, reg, phcd);
+	if (ret) {
+		hw_write_id_reg(ci, HS_PHY_GENCONFIG_2, HS_PHY_LINESTATE_WAKE_EN,
+				msm_ci->saved_linestate_wake);
+		dev_warn(ci->dev, "PHY did not enter LPM for asynchronous wake\n");
+		return;
+	}
+
+	hw_write(ci, OP_USBCMD, async_cmd, async_cmd);
+	msm_ci->async_wake_active = true;
+}
+
 static int ci_hdrc_msm_mux_phy(struct ci_hdrc_msm *ci,
 			       struct platform_device *pdev)
 {
@@ -191,6 +251,20 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 			  CI_HDRC_OVERRIDE_AHB_BURST |
 			  CI_HDRC_OVERRIDE_PHY_CONTROL;
 	ci->pdata.notify_event = ci_hdrc_msm_notify_event;
+
+	if (of_device_is_compatible(pdev->dev.of_node, "qcom,msm8226-ci-hdrc")) {
+		ci->wake_irq = platform_get_irq_byname(pdev, "wakeup");
+		if (ci->wake_irq < 0)
+			return ci->wake_irq;
+
+		ret = platform_get_irq(pdev, 0);
+		if (ret < 0)
+			return ret;
+		if (ci->wake_irq == ret)
+			return dev_err_probe(&pdev->dev, -EINVAL,
+					     "wakeup IRQ must differ from core IRQ\n");
+		ci->pdata.enter_lpm = ci_hdrc_msm_enter_lpm;
+	}
 
 	reset = devm_reset_control_get(&pdev->dev, "core");
 	if (IS_ERR(reset))
@@ -259,6 +333,15 @@ static int ci_hdrc_msm_probe(struct platform_device *pdev)
 		goto err_mux;
 	}
 
+	if (ci->wake_irq) {
+		ret = dev_pm_set_dedicated_wake_irq(&plat_ci->dev, ci->wake_irq);
+		if (ret) {
+			dev_err_probe(&pdev->dev, ret, "failed to attach wakeup IRQ\n");
+			ci_hdrc_remove_device(plat_ci);
+			goto err_mux;
+		}
+	}
+
 	ci->ci = plat_ci;
 
 	pm_runtime_set_active(&pdev->dev);
@@ -279,6 +362,8 @@ static void ci_hdrc_msm_remove(struct platform_device *pdev)
 	struct ci_hdrc_msm *ci = platform_get_drvdata(pdev);
 
 	pm_runtime_disable(&pdev->dev);
+	if (ci->wake_irq)
+		dev_pm_clear_wake_irq(&ci->ci->dev);
 	ci_hdrc_remove_device(ci->ci);
 	clk_disable_unprepare(ci->iface_clk);
 	clk_disable_unprepare(ci->core_clk);
