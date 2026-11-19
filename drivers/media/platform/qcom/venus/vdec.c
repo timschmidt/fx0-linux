@@ -28,6 +28,11 @@ module_param(fx0_decoder_fw_capture_size, bool, 0400);
 MODULE_PARM_DESC(fx0_decoder_fw_capture_size,
 		 "Use the firmware buffer size for primary MSM8226 NV12 capture allocation");
 
+static bool fx0_decoder_pause_initial;
+module_param(fx0_decoder_pause_initial, bool, 0400);
+MODULE_PARM_DESC(fx0_decoder_pause_initial,
+		 "Disable continued data transfer on the MSM8226 decoder");
+
 /*
  * Three resons to keep MPLANE formats (despite that the number of planes
  * currently is one):
@@ -772,9 +777,13 @@ static int vdec_output_conf(struct venus_inst *inst, bool reconfigure)
 
 	/* MSM8226 firmware retains these session properties across a DRC. */
 	if (core->res->hfi_version == HFI_VERSION_1XX && !legacy_reconfigure) {
+		if (fx0_decoder_pause_initial &&
+		    of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus"))
+			en.enable = 0;
 		ptype = HFI_PROPERTY_PARAM_VDEC_CONTINUE_DATA_TRANSFER;
 		ret = hfi_session_set_property(inst, ptype, &en);
-		dev_dbg(core->dev_dec, "decoder continue-data-transfer: %d\n", ret);
+		dev_dbg(core->dev_dec, "decoder continue-data-transfer enabled %u: %d\n",
+			en.enable, ret);
 		if (ret)
 			return ret;
 	}
