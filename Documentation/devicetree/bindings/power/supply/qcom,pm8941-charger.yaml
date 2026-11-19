@@ -59,6 +59,13 @@ properties:
 
   monitored-battery: true
 
+  io-channels:
+    maxItems: 1
+    description: Battery sense voltage ADC input.
+
+  io-channel-names:
+    const: battery-voltage
+
   interrupts:
     items:
       - description: charge done
@@ -177,6 +184,10 @@ properties:
       this regulator comes from usb_otg_in-supply.
 
 dependencies:
+  io-channels:
+    - io-channel-names
+  io-channel-names:
+    - io-channels
   charge-policy:
     - qcom,software-charge-control
   qcom,boot-charge-inhibited:
