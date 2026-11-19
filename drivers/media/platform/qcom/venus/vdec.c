@@ -38,6 +38,11 @@ module_param(fx0_decoder_skip_source_flush, bool, 0400);
 MODULE_PARM_DESC(fx0_decoder_skip_source_flush,
 		 "Skip immediate output flush on a sufficient MSM8226 H.264 downshift");
 
+static bool fx0_decoder_retain_capture;
+module_param(fx0_decoder_retain_capture, bool, 0400);
+MODULE_PARM_DESC(fx0_decoder_retain_capture,
+		 "Keep the queued capture buffers during a sufficient MSM8226 H.264 downshift");
+
 /*
  * Three resons to keep MPLANE formats (despite that the number of planes
  * currently is one):
@@ -1669,11 +1674,12 @@ static void vdec_event_change(struct venus_inst *inst,
 		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION };
 	struct device *dev = inst->core->dev_dec;
 	struct v4l2_format format = {};
-	bool retain_resources, skip_flush;
+	bool retain_resources, skip_flush, keep_capture;
 
 	mutex_lock(&inst->lock);
 
 	skip_flush = vdec_skip_source_flush(inst, ev_data, sufficient);
+	keep_capture = fx0_decoder_retain_capture && skip_flush;
 
 	/* Continue-data-transfer is active and the registered geometry still matches. */
 	retain_resources = sufficient && inst->codec_state == VENUS_DEC_STATE_INIT &&
@@ -1738,7 +1744,8 @@ static void vdec_event_change(struct venus_inst *inst,
 		break;
 	case VENUS_DEC_STATE_DECODING:
 	case VENUS_DEC_STATE_DRAIN:
-		inst->codec_state = VENUS_DEC_STATE_DRC;
+		if (!keep_capture)
+			inst->codec_state = VENUS_DEC_STATE_DRC;
 		break;
 	default:
 		break;
@@ -1764,8 +1771,11 @@ static void vdec_event_change(struct venus_inst *inst,
 		}
 	}
 
-	inst->next_buf_last = !retain_resources;
-	inst->reconfig = !retain_resources;
+	/* Diagnostic only. The V4L2 source-change event remains visible. */
+	if (keep_capture)
+		dev_dbg(dev, "decoder control: continuing with the active capture queue\n");
+	inst->next_buf_last = !retain_resources && !keep_capture;
+	inst->reconfig = !retain_resources && !keep_capture;
 	v4l2_event_queue_fh(&inst->fh, &ev);
 	wake_up(&inst->reconf_wait);
 
