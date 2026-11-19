@@ -162,7 +162,8 @@ struct smbb_charger {
 	bool software_control;
 	bool battery_present_sampled;
 	unsigned int board_current, board_voltage;
-	unsigned int user_current, user_voltage;
+	unsigned int board_recharge_voltage;
+	unsigned int user_current;
 	unsigned int thermal_current;
 	u64 policy_valid_until_ns;
 
@@ -934,6 +935,49 @@ static int smbb_set_charge_behaviour(struct smbb_charger *chg, int behaviour)
 	return smbb_charge_vote(chg, SMBB_INHIBIT_USER, inhibit);
 }
 
+/* Caller holds charge_lock. Program and verify the pair with charging off. */
+static int smbb_set_managed_voltage(struct smbb_charger *chg, unsigned int value)
+{
+	unsigned int old_voltage = chg->attr[ATTR_BAT_VMAX];
+	unsigned int old_recharge = chg->attr[ATTR_CHG_VDET];
+	unsigned int minimum = smbb_charger_attrs[ATTR_CHG_VDET].min;
+	unsigned int gap = chg->board_voltage - chg->board_recharge_voltage;
+	unsigned int ceiling, recharge;
+	int ret, voltage_ret, recharge_ret;
+
+	ret = smbb_charge_verify(chg, false);
+	if (ret)
+		return ret;
+
+	ret = smbb_charger_attr_write(chg, ATTR_BAT_VMAX, value);
+	if (ret)
+		goto restore;
+
+	/* Derive the threshold from the actual, possibly clamped ceiling. */
+	ceiling = chg->attr[ATTR_BAT_VMAX];
+	if (ceiling <= minimum) {
+		ret = -ERANGE;
+		goto restore;
+	}
+	recharge = ceiling - min(gap, ceiling - minimum);
+	ret = smbb_charger_attr_write(chg, ATTR_CHG_VDET, recharge);
+	if (ret)
+		goto restore;
+
+	/* Let the next valid policy sample decide whether to resume. */
+	chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
+	return 0;
+
+restore:
+	/* Keep the original error even if restoring a register also fails. */
+	voltage_ret = smbb_charger_attr_write(chg, ATTR_BAT_VMAX, old_voltage);
+	recharge_ret = smbb_charger_attr_write(chg, ATTR_CHG_VDET, old_recharge);
+	if (voltage_ret || recharge_ret || chg->attr[ATTR_BAT_VMAX] != old_voltage ||
+	    chg->attr[ATTR_CHG_VDET] != old_recharge)
+		dev_err(chg->dev, "unable to restore charge voltage limits\n");
+	return ret;
+}
+
 static int smbb_set_battery_limit(struct smbb_charger *chg,
 				  enum smbb_attr which, int value)
 {
@@ -943,8 +987,21 @@ static int smbb_set_battery_limit(struct smbb_charger *chg,
 	if (value < 0 || value < prop->min || value > prop->max)
 		return -EINVAL;
 
+	if (chg->software_control && which == ATTR_BAT_VMAX) {
+		if (chg->board_recharge_voltage < smbb_charger_attrs[ATTR_CHG_VDET].min ||
+		    chg->board_recharge_voltage >= chg->board_voltage)
+			return -EINVAL;
+		if (value < smbb_vmax_fn(1))
+			return -ERANGE;
+	}
+
 	mutex_lock(&chg->charge_lock);
-	if (chg->software_control) {
+	if (!chg->software_control) {
+		ret = smbb_charger_attr_write(chg, which, value);
+	} else if (which == ATTR_BAT_VMAX) {
+		ret = smbb_set_managed_voltage(chg,
+					       min_t(unsigned int, value, chg->board_voltage));
+	} else {
 		unsigned int effective;
 
 		if (ktime_get_boottime_ns() >= chg->policy_valid_until_ns) {
@@ -953,20 +1010,11 @@ static int smbb_set_battery_limit(struct smbb_charger *chg,
 			if (ret)
 				goto out;
 		}
-		if (which == ATTR_BAT_IMAX)
-			effective = min3((unsigned int)value, chg->board_current,
-					 chg->thermal_current);
-		else
-			effective = min((unsigned int)value, chg->board_voltage);
+		effective = min3((unsigned int)value, chg->board_current,
+				 chg->thermal_current);
 		ret = smbb_charger_attr_write(chg, which, effective);
-		if (!ret) {
-			if (which == ATTR_BAT_IMAX)
-				chg->user_current = min((unsigned int)value, chg->board_current);
-			else
-				chg->user_voltage = min((unsigned int)value, chg->board_voltage);
-		}
-	} else {
-		ret = smbb_charger_attr_write(chg, which, value);
+		if (!ret)
+			chg->user_current = min((unsigned int)value, chg->board_current);
 	}
 out:
 	if (ret)
@@ -1421,7 +1469,7 @@ static int smbb_charger_probe(struct platform_device *pdev)
 	chg->user_current = chg->board_current;
 	chg->thermal_current = chg->board_current;
 	chg->board_voltage = chg->attr[ATTR_BAT_VMAX];
-	chg->user_voltage = chg->board_voltage;
+	chg->board_recharge_voltage = chg->attr[ATTR_CHG_VDET];
 
 	bat_cfg.drv_data = chg;
 	bat_cfg.fwnode = dev_fwnode(&pdev->dev);
@@ -1576,7 +1624,7 @@ static int smbb_policy_apply(struct smbb_policy *policy, int error,
 			     int temperature, int microvolts, u64 started)
 {
 	struct smbb_charger *chg = policy->chg;
-	unsigned int present, charge_current, voltage;
+	unsigned int present, charge_current;
 	int ret;
 
 	if (!policy->running)
@@ -1607,15 +1655,11 @@ static int smbb_policy_apply(struct smbb_policy *policy, int error,
 	chg->thermal_current = policy->state == SMBB_POLICY_NORMAL ?
 			       chg->board_current : min(chg->board_current, 450000U);
 	charge_current = min(chg->user_current, chg->thermal_current);
-	voltage = min(chg->user_voltage, chg->board_voltage);
-	if (charge_current != chg->attr[ATTR_BAT_IMAX] || voltage != chg->attr[ATTR_BAT_VMAX]) {
+	if (charge_current != chg->attr[ATTR_BAT_IMAX]) {
 		ret = smbb_charge_verify(chg, false);
 		if (ret)
 			goto fault;
 		ret = smbb_charger_attr_write(chg, ATTR_BAT_IMAX, charge_current);
-		if (ret)
-			goto fault;
-		ret = smbb_charger_attr_write(chg, ATTR_BAT_VMAX, voltage);
 		if (ret)
 			goto fault;
 	}
@@ -1760,7 +1804,9 @@ static int smbb_policy_probe(struct platform_device *pdev)
 	info = chg->bat_psy->battery_info;
 	if (!info || info->constant_charge_voltage_max_uv != 4350000 ||
 	    info->charge_full_design_uah != 2370000 ||
-	    chg->board_voltage > 4350000 || chg->board_current > 1200000)
+	    chg->board_voltage > 4350000 || chg->board_current > 1200000 ||
+	    chg->board_recharge_voltage < smbb_charger_attrs[ATTR_CHG_VDET].min ||
+	    chg->board_recharge_voltage >= chg->board_voltage)
 		return -EINVAL;
 	policy = devm_kzalloc(dev, sizeof(*policy), GFP_KERNEL);
 	if (!policy)
