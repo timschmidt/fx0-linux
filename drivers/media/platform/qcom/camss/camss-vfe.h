@@ -69,7 +69,9 @@ struct vfe_output {
 	union {
 		struct {
 			int active_buf;
-			int wait_sof;
+			bool wait_sof;
+			bool disabling;
+			bool rearm_pending;
 		} gen1;
 		struct {
 			int active_num;
@@ -136,6 +138,7 @@ struct vfe_subdev_resources {
 	bool is_lite;
 	u8 line_num;
 	bool has_pd;
+	bool rdi_rearm_at_sof;
 	char *pd_name;
 	const struct vfe_hw_ops *hw_ops;
 	const struct camss_formats *formats_rdi;
