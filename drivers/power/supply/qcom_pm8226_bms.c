@@ -55,7 +55,9 @@ struct pm8226_bms {
 	int voltage_uv, current_ua, average_ua, temperature_decic;
 	int present_error, voltage_error, current_error, average_error;
 	int temperature_error, charge_error;
+	unsigned int saved_channel, saved_sense;
 	bool present, configured, calibration_valid;
+	bool sense_owned, stopping;
 };
 
 /* BEGIN TESTED BMS MATH */
@@ -175,16 +177,30 @@ restore:
 	return release_ret;
 }
 
+static int bms_check_counter_idle(struct pm8226_bms *bms)
+{
+	unsigned int control;
+	int ret;
+
+	ret = regmap_read(bms->regmap, bms->base + 0x42, &control);
+	if (ret)
+		return ret;
+	if (control & BMS_HOLD)
+		return -EBUSY;
+	ret = regmap_read(bms->regmap, bms->base + 0x43, &control);
+	if (ret)
+		return ret;
+	return control & BMS_CLEAR_MASK ? -EBUSY : 0;
+}
+
 static int bms_restart_counter(struct pm8226_bms *bms)
 {
 	unsigned int control;
 	int ret, release_ret = -EIO, attempt;
 
-	ret = regmap_read(bms->regmap, bms->base + 0x43, &control);
+	ret = bms_check_counter_idle(bms);
 	if (ret)
 		return ret;
-	if (control & BMS_CLEAR_MASK)
-		return -EBUSY;
 	ret = regmap_write_bits(bms->regmap, bms->base + 0x43,
 				BMS_CLEAR_MASK, BMS_CLEAR_MASK);
 	if (!ret)
@@ -286,26 +302,58 @@ static int bms_restore_sense(struct pm8226_bms *bms, unsigned int channel,
 	return ret ?: -EIO;
 }
 
+static int bms_release_sense(struct pm8226_bms *bms)
+{
+	int ret;
+
+	if (!bms->sense_owned)
+		return 0;
+	ret = bms_restore_sense(bms, bms->saved_channel, bms->saved_sense);
+	if (!ret)
+		bms->sense_owned = false;
+	return ret;
+}
+
 static int bms_configure(struct pm8226_bms *bms)
 {
-	unsigned int channel, sense;
+	unsigned int after;
 	int ret, restore_ret;
 
-	ret = regmap_read(bms->regmap, bms->iadc_base + 0x48, &channel);
+	/* An existing hold or clear command blocks changes to the gauge setup. */
+	ret = bms_check_counter_idle(bms);
 	if (ret)
 		return ret;
-	ret = regmap_read(bms->regmap, bms->iadc_base + 0x49, &sense);
+
+	/* Do not take a partially restored setting as the next baseline. */
+	ret = bms_release_sense(bms);
+	if (ret)
+		return ret;
+	ret = regmap_read(bms->regmap, bms->iadc_base + 0x48, &bms->saved_channel);
+	if (ret)
+		return ret;
+	ret = regmap_read(bms->regmap, bms->iadc_base + 0x49, &bms->saved_sense);
 	if (ret)
 		return ret;
 	ret = bms_calibrate(bms);
 	if (ret)
 		return ret;
+	bms->sense_owned = true;
 	ret = regmap_update_bits(bms->regmap, bms->iadc_base + 0x49, 3, 2);
 	if (ret)
 		goto restore;
 	ret = regmap_update_bits(bms->regmap, bms->iadc_base + 0x48, 7, 1);
 	if (ret)
 		goto restore;
+	ret = regmap_read(bms->regmap, bms->iadc_base + 0x49, &after);
+	if (ret || (after & 3) != 2) {
+		ret = ret ?: -EIO;
+		goto restore;
+	}
+	ret = regmap_read(bms->regmap, bms->iadc_base + 0x48, &after);
+	if (ret || (after & 7) != 1) {
+		ret = ret ?: -EIO;
+		goto restore;
+	}
 	/* A new driver/pack epoch cannot inherit an uncalibrated counter history. */
 	ret = bms_restart_counter(bms);
 	if (ret)
@@ -314,7 +362,7 @@ static int bms_configure(struct pm8226_bms *bms)
 	bms->configured = true;
 	return 0;
 restore:
-	restore_ret = bms_restore_sense(bms, channel, sense);
+	restore_ret = bms_release_sense(bms);
 	return restore_ret ? restore_ret : ret;
 }
 
@@ -396,6 +444,10 @@ static int bms_get_property(struct power_supply *psy, enum power_supply_property
 	int ret = 0;
 
 	mutex_lock(&bms->lock);
+	if (bms->stopping) {
+		ret = -ENODEV;
+		goto unlock;
+	}
 	if (ktime_get_boottime_ns() - bms->last_sample_ns > NSEC_PER_SEC)
 		bms_sample(bms);
 	if (bms->present_error) {
@@ -474,6 +526,20 @@ static void bms_stop(void *data)
 	struct pm8226_bms *bms = data;
 
 	cancel_delayed_work_sync(&bms->work);
+}
+
+static void bms_cleanup(void *data)
+{
+	struct pm8226_bms *bms = data;
+	int ret;
+
+	mutex_lock(&bms->lock);
+	bms->stopping = true;
+	ret = bms_release_sense(bms);
+	mutex_unlock(&bms->lock);
+	if (ret)
+		dev_warn(bms->dev, "Failed to restore companion IADC sense settings: %pe\n",
+			 ERR_PTR(ret));
 }
 
 static int bms_link_channel(struct device *dev, struct iio_channel *channel)
@@ -575,6 +641,10 @@ static int bms_probe(struct platform_device *pdev)
 			calibration_found = true;
 	if (!calibration_found)
 		return dev_err_probe(dev, -EOPNOTSUPP, "IADC calibration unavailable\n");
+	/* Release sense settings after the worker and power supply are removed. */
+	ret = devm_add_action_or_reset(dev, bms_cleanup, bms);
+	if (ret)
+		return ret;
 	bms_sample(bms);
 	if (bms->present_error || (bms->present && !bms->configured))
 		return dev_err_probe(dev, bms->present_error ?: bms->charge_error,
@@ -600,7 +670,10 @@ static int bms_probe(struct platform_device *pdev)
 
 static void bms_shutdown(struct platform_device *pdev)
 {
-	bms_stop(platform_get_drvdata(pdev));
+	struct pm8226_bms *bms = platform_get_drvdata(pdev);
+
+	bms_stop(bms);
+	bms_cleanup(bms);
 }
 
 static const struct of_device_id bms_match[] = {
