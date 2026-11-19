@@ -1330,7 +1330,14 @@ static int venus_session_etb(struct venus_inst *inst,
 		if (ret)
 			return ret;
 
+		if (IS_V1(inst->core))
+			dev_dbg(inst->core->dev,
+				"encoder HFI queue input: tag %#x size %u allocation %u flags %#x\n",
+				pkt.input_tag, pkt.filled_len, pkt.alloc_len, pkt.flags);
 		ret = venus_iface_cmdq_write(hdev, &pkt, false);
+		if (ret && IS_V1(inst->core))
+			dev_dbg(inst->core->dev, "encoder HFI input queue error: tag %#x errno %d\n",
+				pkt.input_tag, ret);
 	} else {
 		ret = -EINVAL;
 	}
@@ -1342,6 +1349,7 @@ static int venus_session_ftb(struct venus_inst *inst,
 			     struct hfi_frame_data *out_frame)
 {
 	struct venus_hfi_device *hdev = to_hfi_priv(inst->core);
+	bool trace = IS_V1(inst->core) && inst->session_type == VIDC_SESSION_TYPE_ENC;
 	struct hfi_session_fill_buffer_pkt pkt;
 	int ret;
 
@@ -1349,7 +1357,14 @@ static int venus_session_ftb(struct venus_inst *inst,
 	if (ret)
 		return ret;
 
-	return venus_iface_cmdq_write(hdev, &pkt, false);
+	if (trace)
+		dev_dbg(inst->core->dev, "encoder HFI queue capture: tag %#x allocation %u\n",
+			pkt.output_tag, pkt.alloc_len);
+	ret = venus_iface_cmdq_write(hdev, &pkt, false);
+	if (ret && trace)
+		dev_dbg(inst->core->dev, "encoder HFI capture queue error: tag %#x errno %d\n",
+			pkt.output_tag, ret);
+	return ret;
 }
 
 static int venus_session_set_buffers(struct venus_inst *inst,
