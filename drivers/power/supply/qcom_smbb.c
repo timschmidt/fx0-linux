@@ -49,6 +49,8 @@
 #define SMBB_CHG_VIN_MIN	0x047
 #define SMBB_CHG_CTRL		0x049
 #define CTRL_EN			BIT(7)
+#define SMBB_CHG_FAILED		0x04a
+#define CHG_FAILED_LATCHED	BIT(7)
 #define SMBB_CHG_VBAT_WEAK	0x052
 #define SMBB_CHG_IBAT_TERM_CHG	0x05b
 #define IBAT_TERM_CHG_IEOC	BIT(7)
@@ -57,6 +59,9 @@
 #define SMBB_CHG_VBAT_DET	0x05d
 #define SMBB_CHG_TCHG_MAX_EN	0x060
 #define TCHG_MAX_EN		BIT(7)
+#define SMBB_CHG_TCHG_MAX	0x061
+#define TCHG_MAX_MASK		GENMASK(6, 0)
+#define TCHG_STEP_MINUTES	4
 #define SMBB_CHG_WDOG_TIME	0x062
 #define SMBB_CHG_WDOG_EN	0x065
 #define WDOG_EN			BIT(7)
@@ -162,6 +167,7 @@ struct smbb_charger {
 	struct mutex charge_lock;
 	unsigned int charge_inhibit;
 	bool software_control;
+	bool charge_timer_enabled;
 	bool battery_present_sampled;
 	unsigned int board_current, board_voltage;
 	unsigned int board_recharge_voltage;
@@ -795,22 +801,49 @@ static int smbb_usbin_writable_property(struct power_supply *psy,
 	return smbb_charger_writable_property(psy, psp);
 }
 
+static int smbb_read_charge_failure(struct smbb_charger *chg)
+{
+	unsigned int status;
+	int ret;
+
+	ret = regmap_read(chg->regmap, chg->addr + SMBB_CHG_FAILED, &status);
+	if (ret)
+		return ret;
+	if (status & CHG_FAILED_LATCHED) {
+		dev_err(chg->dev, "PMIC latched a charge failure\n");
+		return -EIO;
+	}
+
+	return 0;
+}
+
 /* Caller holds charge_lock. Never change forced-battery mode (bit 0). */
 static int smbb_charge_enable(struct smbb_charger *chg, bool enable)
 {
+	unsigned int reg = chg->addr + SMBB_CHG_CTRL;
 	unsigned int value = enable ? CTRL_EN : 0;
+	bool timed_enable = enable && chg->charge_timer_enabled;
 	unsigned int control;
 	int ret;
 
-	/* Force the bus write even after a previously uncertain transaction. */
-	ret = regmap_write_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
-				CTRL_EN, value);
+	if (timed_enable) {
+		ret = smbb_read_charge_failure(chg);
+		if (ret)
+			return ret;
+		/* Leave an already enabled charge session alone. */
+		ret = regmap_update_bits(chg->regmap, reg, CTRL_EN, value);
+	} else {
+		/* Force cutoff even after a previously uncertain transaction. */
+		ret = regmap_write_bits(chg->regmap, reg, CTRL_EN, value);
+	}
 	if (ret)
 		return ret;
-	ret = regmap_read(chg->regmap, chg->addr + SMBB_CHG_CTRL, &control);
+	ret = regmap_read(chg->regmap, reg, &control);
 	if (ret)
 		return ret;
-	return (control & CTRL_EN) == value ? 0 : -EIO;
+	if ((control & CTRL_EN) != value)
+		return -EIO;
+	return timed_enable ? smbb_read_charge_failure(chg) : 0;
 }
 
 static int smbb_charge_set_btc(struct smbb_charger *chg, unsigned int value)
@@ -1255,7 +1288,7 @@ static const struct reg_off_mask_default {
 	/* The bootloader is supposed to set this... make sure anyway. */
 	{ SMBB_MISC_BOOT_DONE, BOOT_DONE, BOOT_DONE },
 
-	/* Disable software timer */
+	/* Start with the charge-duration timer disabled. */
 	{ SMBB_CHG_TCHG_MAX_EN, TCHG_MAX_EN, 0 },
 
 	/* Clear and disable watchdog */
@@ -1454,6 +1487,54 @@ static int smbb_battery_init_voltage(struct smbb_charger *chg)
 	memcpy(chg->bat_properties, smbb_battery_properties, sizeof(smbb_battery_properties));
 	chg->bat_properties[chg->bat_desc.num_properties++] = POWER_SUPPLY_PROP_VOLTAGE_NOW;
 	chg->bat_desc.properties = chg->bat_properties;
+	return 0;
+}
+
+/* The common setup leaves the timer disabled and the INIT vote holds cutoff. */
+static int smbb_configure_charge_timer(struct smbb_charger *chg)
+{
+	struct device_node *node = chg->dev->of_node;
+	unsigned int enable_reg = chg->addr + SMBB_CHG_TCHG_MAX_EN;
+	unsigned int time_reg = chg->addr + SMBB_CHG_TCHG_MAX;
+	unsigned int value, setting;
+	u32 minutes;
+	int ret;
+
+	if (!of_property_present(node, "qcom,tchg-mins"))
+		return 0;
+	if (!chg->software_control || !of_device_is_compatible(node, "qcom,pm8226-charger"))
+		return -EINVAL;
+	ret = of_property_read_u32(node, "qcom,tchg-mins", &minutes);
+	if (ret)
+		return ret;
+	if (minutes < TCHG_STEP_MINUTES || minutes % TCHG_STEP_MINUTES ||
+	    minutes / TCHG_STEP_MINUTES - 1 > TCHG_MAX_MASK)
+		return -EINVAL;
+	setting = minutes / TCHG_STEP_MINUTES - 1;
+
+	ret = regmap_read(chg->regmap, enable_reg, &value);
+	if (ret)
+		return ret;
+	if (value & TCHG_MAX_EN)
+		return -EIO;
+	ret = regmap_update_bits(chg->regmap, time_reg, TCHG_MAX_MASK, setting);
+	if (ret)
+		return ret;
+	ret = regmap_read(chg->regmap, time_reg, &value);
+	if (ret)
+		return ret;
+	if ((value & TCHG_MAX_MASK) != setting)
+		return -EIO;
+	ret = regmap_update_bits(chg->regmap, enable_reg, TCHG_MAX_EN, TCHG_MAX_EN);
+	if (ret)
+		return ret;
+	ret = regmap_read(chg->regmap, enable_reg, &value);
+	if (ret)
+		return ret;
+	if (!(value & TCHG_MAX_EN))
+		return -EIO;
+
+	chg->charge_timer_enabled = true;
 	return 0;
 }
 
@@ -1660,6 +1741,14 @@ static int smbb_charger_probe(struct platform_device *pdev)
 			return rc;
 		}
 	}
+
+	mutex_lock(&chg->charge_lock);
+	rc = smbb_configure_charge_timer(chg);
+	if (rc) {
+		dev_err(chg->dev, "unable to configure charge timer: %d\n", rc);
+		smbb_charge_fault(chg);
+	}
+	mutex_unlock(&chg->charge_lock);
 
 	platform_set_drvdata(pdev, chg);
 
