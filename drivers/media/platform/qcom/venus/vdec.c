@@ -33,6 +33,11 @@ module_param(fx0_decoder_pause_initial, bool, 0400);
 MODULE_PARM_DESC(fx0_decoder_pause_initial,
 		 "Disable continued data transfer on the MSM8226 decoder");
 
+static bool fx0_decoder_resume_transfer;
+module_param(fx0_decoder_resume_transfer, bool, 0400);
+MODULE_PARM_DESC(fx0_decoder_resume_transfer,
+		 "Re-enable paused MSM8226 data transfer after the initial capture submissions");
+
 /*
  * Three resons to keep MPLANE formats (despite that the number of planes
  * currently is one):
@@ -1174,6 +1179,20 @@ static int vdec_start_capture(struct venus_inst *inst, struct vb2_queue *q)
 			"decoder queued preallocated capture with resources retained: %d\n", ret);
 		if (ret)
 			return ret;
+		if (fx0_decoder_pause_initial && fx0_decoder_resume_transfer) {
+			struct hfi_enable enable = { .enable = 1 };
+
+			ret = hfi_session_set_property(inst,
+						       HFI_PROPERTY_PARAM_VDEC_CONTINUE_DATA_TRANSFER,
+						       &enable);
+			dev_dbg(inst->core->dev_dec,
+				"decoder transfer re-enabled after capture submissions: %d\n", ret);
+			if (ret) {
+				if (hfi_session_flush(inst, HFI_FLUSH_ALL, true))
+					venus_helper_vb2_queue_error(inst);
+				return ret;
+			}
+		}
 		inst->codec_state = VENUS_DEC_STATE_DECODING;
 		inst->streamon_cap = 1;
 		return 0;
