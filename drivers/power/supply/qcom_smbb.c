@@ -1696,6 +1696,8 @@ static void smbb_policy_sample_work(struct work_struct *work)
 						struct smbb_policy, sample_work);
 	struct smbb_charger *chg = policy->chg;
 	int millivolts = 0, microvolts = 0, temperature = 0, ret;
+	unsigned int inhibit, charge_current;
+	bool notify;
 	u64 started = ktime_get_boottime_ns();
 
 	/* Do not hold the actuator lock while a supplier converts/calibrates. */
@@ -1705,12 +1707,18 @@ static void smbb_policy_sample_work(struct work_struct *work)
 	if (!ret)
 		ret = iio_read_channel_processed_scale(policy->voltage, &microvolts, 1000);
 	mutex_lock(&chg->charge_lock);
+	inhibit = chg->charge_inhibit;
+	charge_current = chg->attr[ATTR_BAT_IMAX];
 	smbb_policy_apply(policy, ret, temperature, microvolts, started);
+	notify = inhibit != chg->charge_inhibit || charge_current != chg->attr[ATTR_BAT_IMAX];
 	if (policy->running)
 		queue_delayed_work(system_wq, &policy->sample_work,
 				   msecs_to_jiffies(SMBB_POLICY_POLL_MS));
 	mutex_unlock(&chg->charge_lock);
-	power_supply_changed(chg->bat_psy);
+
+	/* Regular samples must not generate a battery wakeup event. */
+	if (notify)
+		power_supply_changed(chg->bat_psy);
 }
 
 static void smbb_policy_age_work(struct work_struct *work)
@@ -1725,13 +1733,15 @@ static void smbb_policy_age_work(struct work_struct *work)
 	if (policy->running) {
 		if (ktime_get_boottime_ns() - policy->last_valid_ns >
 		    (u64)SMBB_POLICY_MAX_AGE_MS * NSEC_PER_MSEC) {
+			unsigned int inhibit = chg->charge_inhibit;
+
 			chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
 			policy->last_error = -ESTALE;
 			policy->state = SMBB_POLICY_STOP;
 			ret = smbb_charge_verify(chg, false);
 			if (ret)
 				smbb_charge_fault(chg);
-			notify = true;
+			notify = inhibit != chg->charge_inhibit;
 		}
 		queue_delayed_work(system_highpri_wq, &policy->age_work,
 				   msecs_to_jiffies(SMBB_POLICY_POLL_MS));
