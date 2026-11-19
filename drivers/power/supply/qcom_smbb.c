@@ -41,6 +41,8 @@
 #include "qcom_smbb_policy.h"
 #endif
 
+#define SMBB_CHG_INT_RT_STS	0x010
+#define CHG_FAILED_IRQ		BIT(6)
 #define SMBB_CHG_VMAX		0x040
 #define SMBB_CHG_VSAFE		0x041
 #define SMBB_CHG_CFG		0x043
@@ -168,6 +170,8 @@ struct smbb_charger {
 	unsigned int charge_inhibit;
 	bool software_control;
 	bool charge_timer_enabled;
+	bool charge_timer_restore_pending;
+	unsigned int charge_timer_previous_period;
 	bool battery_present_sampled;
 	unsigned int board_current, board_voltage;
 	unsigned int board_recharge_voltage;
@@ -523,6 +527,17 @@ static irqreturn_t smbb_chg_done_handler(int irq, void *_data)
 	return IRQ_HANDLED;
 }
 
+static irqreturn_t smbb_chg_failed_handler(int irq, void *data)
+{
+	struct smbb_charger *chg = data;
+	int ret;
+
+	ret = smbb_charge_vote(chg, SMBB_INHIBIT_FAULT, true);
+	dev_err(chg->dev, "PMIC charge failure IRQ, cutoff status: %d\n", ret);
+	power_supply_changed(chg->bat_psy);
+	return IRQ_HANDLED;
+}
+
 static irqreturn_t smbb_chg_gone_handler(int irq, void *_data)
 {
 	struct smbb_charger *chg = _data;
@@ -803,14 +818,17 @@ static int smbb_usbin_writable_property(struct power_supply *psy,
 
 static int smbb_read_charge_failure(struct smbb_charger *chg)
 {
-	unsigned int status;
+	unsigned int irq_status, status;
 	int ret;
 
+	ret = regmap_read(chg->regmap, chg->addr + SMBB_CHG_INT_RT_STS, &irq_status);
+	if (ret)
+		return ret;
 	ret = regmap_read(chg->regmap, chg->addr + SMBB_CHG_FAILED, &status);
 	if (ret)
 		return ret;
-	if (status & CHG_FAILED_LATCHED) {
-		dev_err(chg->dev, "PMIC latched a charge failure\n");
+	if ((irq_status & CHG_FAILED_IRQ) || (status & CHG_FAILED_LATCHED)) {
+		dev_err(chg->dev, "PMIC reported a charge failure\n");
 		return -EIO;
 	}
 
@@ -1443,14 +1461,54 @@ static void smbb_policy_setup(struct smbb_charger *chg)
 	}
 }
 
+/* Caller holds charge_lock after verifying the initialization inhibit. */
+static int smbb_restore_charge_timer(struct smbb_charger *chg)
+{
+	unsigned int enable_reg = chg->addr + SMBB_CHG_TCHG_MAX_EN;
+	unsigned int time_reg = chg->addr + SMBB_CHG_TCHG_MAX;
+	unsigned int value;
+	int ret;
+
+	if (!chg->charge_timer_restore_pending)
+		return 0;
+	ret = regmap_update_bits(chg->regmap, enable_reg, TCHG_MAX_EN, 0);
+	if (ret)
+		return ret;
+	ret = regmap_read(chg->regmap, enable_reg, &value);
+	if (ret)
+		return ret;
+	if (value & TCHG_MAX_EN)
+		return -EIO;
+	ret = regmap_update_bits(chg->regmap, time_reg, TCHG_MAX_MASK,
+				 chg->charge_timer_previous_period);
+	if (ret)
+		return ret;
+	ret = regmap_read(chg->regmap, time_reg, &value);
+	if (ret)
+		return ret;
+	if ((value & TCHG_MAX_MASK) != chg->charge_timer_previous_period)
+		return -EIO;
+
+	chg->charge_timer_enabled = false;
+	chg->charge_timer_restore_pending = false;
+	return 0;
+}
+
 static void smbb_charge_cleanup(void *data)
 {
 	struct smbb_charger *chg = data;
 	int ret;
 
 	ret = smbb_charge_vote(chg, SMBB_INHIBIT_INIT, true);
-	if (ret)
+	if (ret) {
 		dev_err(chg->dev, "failed to inhibit charging at cleanup: %d\n", ret);
+		return;
+	}
+	mutex_lock(&chg->charge_lock);
+	ret = smbb_restore_charge_timer(chg);
+	mutex_unlock(&chg->charge_lock);
+	if (ret)
+		dev_err(chg->dev, "failed to restore the charge timer: %d\n", ret);
 }
 
 static int smbb_battery_init_voltage(struct smbb_charger *chg)
@@ -1517,6 +1575,12 @@ static int smbb_configure_charge_timer(struct smbb_charger *chg)
 		return ret;
 	if (value & TCHG_MAX_EN)
 		return -EIO;
+	ret = regmap_read(chg->regmap, time_reg, &value);
+	if (ret)
+		return ret;
+	chg->charge_timer_previous_period = value & TCHG_MAX_MASK;
+	/* A write can reach the PMIC even when the bus reports an error. */
+	chg->charge_timer_restore_pending = true;
 	ret = regmap_update_bits(chg->regmap, time_reg, TCHG_MAX_MASK, setting);
 	if (ret)
 		return ret;
@@ -1742,13 +1806,21 @@ static int smbb_charger_probe(struct platform_device *pdev)
 		}
 	}
 
-	mutex_lock(&chg->charge_lock);
-	rc = smbb_configure_charge_timer(chg);
-	if (rc) {
-		dev_err(chg->dev, "unable to configure charge timer: %d\n", rc);
-		smbb_charge_fault(chg);
+	if (of_property_present(chg->dev->of_node, "qcom,tchg-mins")) {
+		int irq = platform_get_irq_byname(pdev, "chg-failed");
+
+		rc = irq < 0 ? irq : devm_request_threaded_irq(chg->dev, irq, NULL,
+							     smbb_chg_failed_handler, IRQF_ONESHOT,
+							     "chg-failed", chg);
+		mutex_lock(&chg->charge_lock);
+		if (!rc)
+			rc = smbb_configure_charge_timer(chg);
+		if (rc) {
+			dev_err(chg->dev, "unable to configure charge timer: %d\n", rc);
+			smbb_charge_fault(chg);
+		}
+		mutex_unlock(&chg->charge_lock);
 	}
-	mutex_unlock(&chg->charge_lock);
 
 	platform_set_drvdata(pdev, chg);
 
@@ -2102,8 +2174,17 @@ static const struct of_device_id smbb_charger_id_table[] = {
 };
 MODULE_DEVICE_TABLE(of, smbb_charger_id_table);
 
+static void smbb_charger_shutdown(struct platform_device *pdev)
+{
+	struct smbb_charger *chg = platform_get_drvdata(pdev);
+
+	if (chg->charge_timer_restore_pending)
+		smbb_charge_cleanup(chg);
+}
+
 static struct platform_driver smbb_charger_driver = {
 	.probe = smbb_charger_probe,
+	.shutdown = smbb_charger_shutdown,
 	.driver = {
 		.name = "qcom-smbb",
 		.of_match_table = smbb_charger_id_table,
