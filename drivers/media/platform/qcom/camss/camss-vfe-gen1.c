@@ -44,7 +44,9 @@ static int vfe_disable_output(struct vfe_line *line)
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
-	output->gen1.wait_sof = 1;
+	output->gen1.disabling = true;
+	output->gen1.rearm_pending = false;
+	output->gen1.wait_sof = true;
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
 	time = wait_for_completion_timeout(&output->sof, msecs_to_jiffies(VFE_NEXT_SOF_MS));
@@ -152,6 +154,8 @@ static void vfe_output_frame_drop(struct vfe_device *vfe,
 	u8 drop_period;
 	unsigned int i;
 
+	output->gen1.rearm_pending = false;
+
 	/* We need to toggle update period to be valid on next frame */
 	output->drop_update_idx++;
 	output->drop_update_idx %= VFE_FRAME_DROP_UPDATES;
@@ -240,7 +244,8 @@ static int vfe_enable_output(struct vfe_line *line)
 	}
 
 	output->sequence = 0;
-	output->gen1.wait_sof = 0;
+	output->gen1.wait_sof = false;
+	output->gen1.disabling = false;
 	output->wait_reg_update = 0;
 	reinit_completion(&output->sof);
 	reinit_completion(&output->reg_update);
@@ -433,9 +438,15 @@ static void vfe_output_update_pong_addr(struct vfe_device *vfe,
 static void vfe_buf_update_wm_on_next(struct vfe_device *vfe,
 				      struct vfe_output *output)
 {
+	struct vfe_line *line = container_of(output, struct vfe_line, output);
+
 	switch (output->state) {
 	case VFE_OUTPUT_CONTINUOUS:
-		vfe_output_frame_drop(vfe, output, 3);
+		/* On MSM8226 RDI, allow a full frame for the update. */
+		if (vfe->res->rdi_rearm_at_sof && line->id != VFE_LINE_PIX)
+			output->gen1.rearm_pending = !output->gen1.disabling;
+		else
+			vfe_output_frame_drop(vfe, output, 3);
 		break;
 	case VFE_OUTPUT_SINGLE:
 	default:
@@ -539,8 +550,10 @@ static void vfe_isr_sof(struct vfe_device *vfe, enum vfe_line_id line_id)
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	output = &vfe->line[line_id].output;
 	if (output->gen1.wait_sof) {
-		output->gen1.wait_sof = 0;
+		output->gen1.wait_sof = false;
 		complete(&output->sof);
+	} else if (output->gen1.rearm_pending && output->state == VFE_OUTPUT_CONTINUOUS) {
+		vfe_output_frame_drop(vfe, output, 3);
 	}
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 }
