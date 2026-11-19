@@ -472,13 +472,11 @@ static irqreturn_t smbb_bat_temp_handler(int irq, void *_data)
 		return IRQ_HANDLED;
 
 	mutex_lock(&chg->statlock);
-	if (val & TEMP_STATUS_OK) {
+	chg->status &= ~(STATUS_BAT_OK | STATUS_BAT_HOT);
+	if (val & TEMP_STATUS_OK)
 		chg->status |= STATUS_BAT_OK;
-	} else {
-		chg->status &= ~STATUS_BAT_OK;
-		if (val & TEMP_STATUS_HOT)
-			chg->status |= STATUS_BAT_HOT;
-	}
+	else if (val & TEMP_STATUS_HOT)
+		chg->status |= STATUS_BAT_HOT;
 	mutex_unlock(&chg->statlock);
 
 	power_supply_changed(chg->bat_psy);
