@@ -33,6 +33,11 @@ module_param(fx0_decoder_capture_first, bool, 0400);
 MODULE_PARM_DESC(fx0_decoder_capture_first,
 		 "Submit prequeued MSM8226 capture buffers before the first coded input");
 
+static bool fx0_decoder_skip_source_flush;
+module_param(fx0_decoder_skip_source_flush, bool, 0400);
+MODULE_PARM_DESC(fx0_decoder_skip_source_flush,
+		 "Skip immediate output flush on a sufficient MSM8226 H.264 downshift");
+
 /*
  * Three resons to keep MPLANE formats (despite that the number of planes
  * currently is one):
@@ -1640,6 +1645,22 @@ static void vdec_buf_done(struct venus_inst *inst, unsigned int buf_type,
 	v4l2_m2m_buf_done(vbuf, state);
 }
 
+static bool vdec_skip_source_flush(struct venus_inst *inst,
+				  const struct hfi_event_data *event,
+				  bool sufficient)
+{
+	return fx0_decoder_skip_source_flush && sufficient &&
+		inst->codec_state == VENUS_DEC_STATE_DECODING &&
+		inst->streamon_out && inst->streamon_cap &&
+		inst->hfi_codec == HFI_VIDEO_CODEC_H264 &&
+		inst->opb_buftype == HFI_BUFFER_OUTPUT &&
+		vdec_use_msm8226_fw_capture_size(inst) &&
+		inst->bit_depth == event->bit_depth &&
+		event->width && event->height &&
+		event->width <= inst->out_width && event->height <= inst->out_height &&
+		(event->width < inst->out_width || event->height < inst->out_height);
+}
+
 static void vdec_event_change(struct venus_inst *inst,
 			      struct hfi_event_data *ev_data, bool sufficient)
 {
@@ -1648,9 +1669,11 @@ static void vdec_event_change(struct venus_inst *inst,
 		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION };
 	struct device *dev = inst->core->dev_dec;
 	struct v4l2_format format = {};
-	bool retain_resources;
+	bool retain_resources, skip_flush;
 
 	mutex_lock(&inst->lock);
+
+	skip_flush = vdec_skip_source_flush(inst, ev_data, sufficient);
 
 	/* Continue-data-transfer is active and the registered geometry still matches. */
 	retain_resources = sufficient && inst->codec_state == VENUS_DEC_STATE_INIT &&
@@ -1732,9 +1755,13 @@ static void vdec_event_change(struct venus_inst *inst,
 
 		inst->next_buf_last = true;
 
-		ret = hfi_session_flush(inst, HFI_FLUSH_OUTPUT, false);
-		if (ret)
-			dev_dbg(dev, VDBGH "flush output error %d\n", ret);
+		if (skip_flush) {
+			dev_dbg(dev, "decoder control: skipped source-change output flush\n");
+		} else {
+			ret = hfi_session_flush(inst, HFI_FLUSH_OUTPUT, false);
+			if (ret)
+				dev_dbg(dev, VDBGH "flush output error %d\n", ret);
+		}
 	}
 
 	inst->next_buf_last = !retain_resources;
