@@ -449,6 +449,7 @@
 
 &smbb {
 	qcom,software-charge-control;
+	qcom,tchg-mins = <480>;
 	qcom,usb-gadget-current-limit;
 	qcom,fast-charge-safe-current = <1500000>;
 	qcom,fast-charge-current-limit = <1200000>;
