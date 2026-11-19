@@ -448,9 +448,6 @@
 };
 
 &smbb {
-	io-channels = <&pm8226_vadc VADC_VBAT_SNS>;
-	io-channel-names = "battery-voltage";
-
 	qcom,software-charge-control;
 	qcom,usb-gadget-current-limit;
 	qcom,fast-charge-safe-current = <1500000>;

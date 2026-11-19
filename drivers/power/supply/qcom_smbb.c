@@ -1036,16 +1036,61 @@ out:
 	return ret;
 }
 
+static struct device_node *smbb_battery_voltage_node(struct device *dev)
+{
+	struct device_node *node;
+
+	node = of_get_compatible_child(dev->of_node, "lg,madai-charge-policy");
+	if (!node)
+		return NULL;
+	if (!of_device_is_available(node) ||
+	    of_property_match_string(node, "io-channel-names", "voltage") < 0) {
+		of_node_put(node);
+		return NULL;
+	}
+
+	return node;
+}
+
+static int smbb_battery_read_policy_voltage(struct smbb_charger *chg, int *value)
+{
+	struct device_node *node = smbb_battery_voltage_node(chg->dev);
+	struct iio_channel *channel;
+	enum iio_chan_type type;
+	int ret;
+
+	if (!node)
+		return -ENODATA;
+
+	channel = fwnode_iio_channel_get_by_name(of_fwnode_handle(node), "voltage");
+	of_node_put(node);
+	if (IS_ERR(channel))
+		return PTR_ERR(channel) == -EPROBE_DEFER ? -ENODATA : PTR_ERR(channel);
+
+	ret = iio_get_channel_type(channel, &type);
+	if (!ret) {
+		if (type == IIO_VOLTAGE)
+			ret = iio_read_channel_processed_scale(channel, value, 1000);
+		else
+			ret = -EINVAL;
+	}
+	iio_channel_release(channel);
+
+	return ret;
+}
+
 static int smbb_battery_get_voltage(struct smbb_charger *chg,
 				    unsigned long status, int *value)
 {
 	int ret, microvolts;
 
-	if (!IS_REACHABLE(CONFIG_IIO) || !chg->vbat ||
-	    !(status & STATUS_BAT_PRESENT))
+	if (!IS_REACHABLE(CONFIG_IIO) || !(status & STATUS_BAT_PRESENT))
 		return -ENODATA;
 
-	ret = iio_read_channel_processed_scale(chg->vbat, &microvolts, 1000);
+	if (chg->vbat)
+		ret = iio_read_channel_processed_scale(chg->vbat, &microvolts, 1000);
+	else
+		ret = smbb_battery_read_policy_voltage(chg, &microvolts);
 	if (ret < 0)
 		return ret;
 	if (microvolts <= 0 || !(READ_ONCE(chg->status) & STATUS_BAT_PRESENT))
@@ -1382,21 +1427,30 @@ static int smbb_battery_init_voltage(struct smbb_charger *chg)
 	struct iio_channel *channel;
 	int ret;
 
-	if (!IS_REACHABLE(CONFIG_IIO) ||
-	    !of_property_present(dev->of_node, "io-channels"))
+	if (!IS_REACHABLE(CONFIG_IIO))
 		return 0;
 
-	channel = devm_iio_channel_get(dev, "battery-voltage");
-	if (IS_ERR(channel))
-		return dev_err_probe(dev, PTR_ERR(channel),
-				     "battery voltage channel unavailable\n");
-	ret = iio_get_channel_type(channel, &type);
-	if (ret)
-		return dev_err_probe(dev, ret, "cannot read battery voltage channel type\n");
-	if (type != IIO_VOLTAGE)
-		return dev_err_probe(dev, -EINVAL, "expected a voltage channel\n");
+	if (of_property_present(dev->of_node, "io-channels")) {
+		channel = devm_iio_channel_get(dev, "battery-voltage");
+		if (IS_ERR(channel))
+			return dev_err_probe(dev, PTR_ERR(channel),
+					     "battery voltage channel unavailable\n");
+		ret = iio_get_channel_type(channel, &type);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "cannot read battery voltage channel type\n");
+		if (type != IIO_VOLTAGE)
+			return dev_err_probe(dev, -EINVAL, "expected a voltage channel\n");
 
-	chg->vbat = channel;
+		chg->vbat = channel;
+	} else {
+		struct device_node *node = smbb_battery_voltage_node(dev);
+
+		if (!node)
+			return 0;
+		of_node_put(node);
+	}
+
 	memcpy(chg->bat_properties, smbb_battery_properties, sizeof(smbb_battery_properties));
 	chg->bat_properties[chg->bat_desc.num_properties++] = POWER_SUPPLY_PROP_VOLTAGE_NOW;
 	chg->bat_desc.properties = chg->bat_properties;
