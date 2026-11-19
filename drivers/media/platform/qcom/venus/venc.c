@@ -4,8 +4,10 @@
  * Copyright (C) 2017 Linaro Ltd.
  */
 #include <linux/clk.h>
+#include <linux/dma-mapping.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
@@ -24,6 +26,12 @@
 
 #define NUM_B_FRAMES_MAX	4
 #define VENC_EOS_INPUT_TAG	U32_MAX
+
+struct venc_inst {
+	struct venus_inst base;
+	void *eos_buffer;
+	dma_addr_t eos_dma;
+};
 
 /*
  * Three resons to keep MPLANE formats (despite that the number of planes
@@ -524,6 +532,36 @@ static int venc_subscribe_event(struct v4l2_fh *fh,
 	}
 }
 
+static int venc_eos_address(struct venus_inst *inst, u32 *address)
+{
+	struct venc_inst *encoder = container_of(inst, struct venc_inst, base);
+	struct device *dev = inst->core->dev;
+
+	lockdep_assert_held(&inst->lock);
+
+	if (!of_device_is_compatible(dev->of_node, "qcom,msm8226-venus")) {
+		*address = 0xdeadb000;
+		return 0;
+	}
+
+	if (!encoder->eos_buffer) {
+		encoder->eos_buffer = dma_alloc_coherent(dev, PAGE_SIZE,
+							 &encoder->eos_dma, GFP_KERNEL);
+		if (!encoder->eos_buffer)
+			return -ENOMEM;
+
+		if (!encoder->eos_dma || upper_32_bits(encoder->eos_dma)) {
+			dma_free_coherent(dev, PAGE_SIZE, encoder->eos_buffer,
+					  encoder->eos_dma);
+			encoder->eos_buffer = NULL;
+			return -ERANGE;
+		}
+	}
+
+	*address = encoder->eos_dma;
+	return 0;
+}
+
 static int
 venc_encoder_cmd(struct file *file, void *fh, struct v4l2_encoder_cmd *cmd)
 {
@@ -548,7 +586,9 @@ venc_encoder_cmd(struct file *file, void *fh, struct v4l2_encoder_cmd *cmd)
 
 		fdata.buffer_type = HFI_BUFFER_INPUT;
 		fdata.flags |= HFI_BUFFERFLAG_EOS;
-		fdata.device_addr = 0xdeadb000;
+		ret = venc_eos_address(inst, &fdata.device_addr);
+		if (ret)
+			goto unlock;
 		/* Input buffer completions otherwise identify VB2 buffer indices. */
 		fdata.clnt_data = VENC_EOS_INPUT_TAG;
 
@@ -1470,12 +1510,14 @@ static void venc_inst_init(struct venus_inst *inst)
 static int venc_open(struct file *file)
 {
 	struct venus_core *core = video_drvdata(file);
+	struct venc_inst *encoder;
 	struct venus_inst *inst;
 	int ret;
 
-	inst = kzalloc(sizeof(*inst), GFP_KERNEL);
-	if (!inst)
+	encoder = kzalloc(sizeof(*encoder), GFP_KERNEL);
+	if (!encoder)
 		return -ENOMEM;
+	inst = &encoder->base;
 
 	INIT_LIST_HEAD(&inst->dpbbufs);
 	INIT_LIST_HEAD(&inst->registeredbufs);
@@ -1536,22 +1578,26 @@ err_m2m_dev_release:
 err_ctrl_deinit:
 	v4l2_ctrl_handler_free(&inst->ctrl_handler);
 err_free:
-	kfree(inst);
+	kfree(encoder);
 	return ret;
 }
 
 static int venc_close(struct file *file)
 {
 	struct venus_inst *inst = to_inst(file);
+	struct venc_inst *encoder = container_of(inst, struct venc_inst, base);
 	int pm_ret;
 
 	pm_ret = venc_pm_get(inst);
 	venus_close_common(inst, file);
 	inst->enc_state = VENUS_ENC_STATE_DEINIT;
+	if (encoder->eos_buffer)
+		dma_free_coherent(inst->core->dev, PAGE_SIZE, encoder->eos_buffer,
+				  encoder->eos_dma);
 	if (!pm_ret)
 		venc_pm_put(inst, false);
 
-	kfree(inst);
+	kfree(encoder);
 	return 0;
 }
 
