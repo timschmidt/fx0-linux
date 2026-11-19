@@ -1104,7 +1104,36 @@ static int vdec_set_buffer_counts(struct venus_inst *inst)
 	return ret;
 }
 
-static int vdec_start_capture(struct venus_inst *inst)
+static int vdec_check_preallocated_capture(struct venus_inst *inst,
+					   struct vb2_queue *q)
+{
+	struct hfi_buffer_requirements req;
+	unsigned int count = vb2_get_num_buffers(q);
+	unsigned int i, size;
+	int ret;
+
+	ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &req);
+	if (ret)
+		return ret;
+	if (!count || count < req.count_actual ||
+	    count < hfi_bufreq_get_count_min(&req, HFI_VERSION_1XX))
+		return -ENOSPC;
+
+	size = max(req.size, venus_helper_get_framesz(inst->fmt_cap->pixfmt,
+						     inst->width, inst->height));
+	for (i = 0; i < count; i++) {
+		struct vb2_buffer *vb = vb2_get_buffer(q, i);
+
+		if (!vb || vb->num_planes != 1 || vb2_plane_size(vb, 0) < size)
+			return -ENOSPC;
+	}
+
+	dev_dbg(inst->core->dev_dec, "decoder reusing %u capture buffers of at least %u bytes\n",
+		count, size);
+	return 0;
+}
+
+static int vdec_start_capture(struct venus_inst *inst, struct vb2_queue *q)
 {
 	int ret;
 
@@ -1119,6 +1148,16 @@ static int vdec_start_capture(struct venus_inst *inst)
 		venus_helper_process_initial_cap_bufs(inst);
 		inst->streamon_cap = 1;
 		return 0;
+	}
+
+	if (inst->codec_state == VENUS_DEC_STATE_CAPTURE_SETUP &&
+	    inst->reconfig && inst->sequence_cap == 0 &&
+	    inst->opb_buftype == HFI_BUFFER_OUTPUT &&
+	    vdec_use_msm8226_fw_capture_size(inst)) {
+		ret = vdec_check_preallocated_capture(inst, q);
+		if (ret)
+			return ret;
+		goto reconfigure;
 	}
 
 	if (inst->codec_state != VENUS_DEC_STATE_STOPPED)
@@ -1260,7 +1299,7 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	mutex_lock(&inst->lock);
 
 	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
-		ret = vdec_start_capture(inst);
+		ret = vdec_start_capture(inst, q);
 	} else {
 		ret = vdec_pm_get(inst);
 		if (ret)
