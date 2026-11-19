@@ -420,7 +420,8 @@ session_get_prop_profile_level(struct hfi_msg_session_property_info_pkt *pkt,
 
 static unsigned int
 session_get_prop_buf_req(struct hfi_msg_session_property_info_pkt *pkt,
-			 struct hfi_buffer_requirements *bufreq)
+			 struct hfi_buffer_requirements *bufreq,
+			 struct device *trace_dev)
 {
 	struct hfi_buffer_requirements *buf_req;
 	u32 req_bytes;
@@ -438,6 +439,11 @@ session_get_prop_buf_req(struct hfi_msg_session_property_info_pkt *pkt,
 
 	while (req_bytes) {
 		memcpy(&bufreq[idx], buf_req, sizeof(*bufreq));
+		if (trace_dev)
+			dev_dbg(trace_dev,
+				"decoder HFI buffer requirements entry %u: type %#x size %u count %u min %u\n",
+				idx, buf_req->type, buf_req->size,
+				buf_req->count_actual, buf_req->count_min);
 		idx++;
 
 		if (idx >= HFI_BUFFER_TYPE_MAX)
@@ -450,12 +456,18 @@ session_get_prop_buf_req(struct hfi_msg_session_property_info_pkt *pkt,
 	return HFI_ERR_NONE;
 }
 
+static bool trace_legacy_decoder(struct venus_inst *inst)
+{
+	return IS_V1(inst->core) && inst->session_type == VIDC_SESSION_TYPE_DEC;
+}
+
 static void hfi_session_prop_info(struct venus_core *core,
 				  struct venus_inst *inst, void *packet)
 {
 	struct hfi_msg_session_property_info_pkt *pkt = packet;
 	struct device *dev = core->dev;
 	union hfi_get_property *hprop = &inst->hprop;
+	bool trace = trace_legacy_decoder(inst);
 	unsigned int error = HFI_ERR_NONE;
 
 	if (!pkt->num_properties) {
@@ -467,7 +479,12 @@ static void hfi_session_prop_info(struct venus_core *core,
 	switch (pkt->property) {
 	case HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS:
 		memset(hprop->bufreq, 0, sizeof(hprop->bufreq));
-		error = session_get_prop_buf_req(pkt, hprop->bufreq);
+		error = session_get_prop_buf_req(pkt, hprop->bufreq,
+						 trace ? dev : NULL);
+		if (trace)
+			dev_dbg(dev,
+				"decoder HFI buffer requirements reply: bytes %u properties %u parser status %#x\n",
+				pkt->shdr.hdr.size, pkt->num_properties, error);
 		break;
 	case HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT:
 		memset(&hprop->profile_level, 0, sizeof(hprop->profile_level));
@@ -517,6 +534,9 @@ static void hfi_session_load_res_done(struct venus_core *core,
 {
 	struct hfi_msg_session_load_resources_done_pkt *pkt = packet;
 
+	if (trace_legacy_decoder(inst))
+		dev_dbg(core->dev, "decoder HFI load resources reply: status %#x\n",
+			pkt->error_type);
 	inst->error = pkt->error_type;
 	complete(&inst->done);
 }
@@ -628,6 +648,9 @@ static void hfi_session_start_done(struct venus_core *core,
 {
 	struct hfi_msg_session_start_done_pkt *pkt = packet;
 
+	if (trace_legacy_decoder(inst))
+		dev_dbg(core->dev, "decoder HFI session start reply: status %#x\n",
+			pkt->error_type);
 	inst->error = pkt->error_type;
 	complete(&inst->done);
 }
