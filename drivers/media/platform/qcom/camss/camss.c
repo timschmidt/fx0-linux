@@ -4622,6 +4622,29 @@ static const struct of_device_id camss_dt_match[] = {
 
 MODULE_DEVICE_TABLE(of, camss_dt_match);
 
+static int camss_prepare(struct device *dev)
+{
+	struct camss *camss = dev_get_drvdata(dev);
+	unsigned int i;
+
+	if (!of_device_is_compatible(dev->of_node, "qcom,msm8226-camss"))
+		return 0;
+
+	/* The MSM8226 system-sleep callbacks do not stop the VFE pipeline. */
+	for (i = 0; i < camss->res->vfe_num; i++) {
+		struct vfe_device *vfe = &camss->vfe[i];
+		bool streaming;
+
+		mutex_lock(&vfe->stream_lock);
+		streaming = vfe->stream_count != 0;
+		mutex_unlock(&vfe->stream_lock);
+		if (streaming)
+			return -EBUSY;
+	}
+
+	return 0;
+}
+
 static int __maybe_unused camss_runtime_suspend(struct device *dev)
 {
 	struct camss *camss = dev_get_drvdata(dev);
@@ -4656,6 +4679,7 @@ static int __maybe_unused camss_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops camss_pm_ops = {
+	.prepare = pm_sleep_ptr(camss_prepare),
 	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
 				pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(camss_runtime_suspend, camss_runtime_resume, NULL)
