@@ -1693,6 +1693,8 @@ EXPORT_SYMBOL_GPL(venus_helper_process_initial_out_bufs);
 
 int venus_helper_vb2_start_streaming(struct venus_inst *inst)
 {
+	struct venus_core *core = inst->core;
+	bool trace_decoder = IS_V1(core) && inst->session_type == VIDC_SESSION_TYPE_DEC;
 	int ret;
 
 	ret = venus_helper_intbufs_alloc(inst);
@@ -1706,10 +1708,14 @@ int venus_helper_vb2_start_streaming(struct venus_inst *inst)
 	venus_pm_load_scale(inst);
 
 	ret = hfi_session_load_res(inst);
+	if (trace_decoder)
+		dev_dbg(core->dev, "decoder HFI load resources returned %d\n", ret);
 	if (ret)
 		goto err_unreg_bufs;
 
 	ret = hfi_session_start(inst);
+	if (trace_decoder)
+		dev_dbg(core->dev, "decoder HFI session start returned %d\n", ret);
 	if (ret)
 		goto err_unload_res;
 
