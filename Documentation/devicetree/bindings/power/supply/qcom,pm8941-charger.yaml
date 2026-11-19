@@ -26,6 +26,10 @@ allOf:
       properties:
         compatible:
           const: qcom,pm8226-charger
+        interrupts:
+          minItems: 9
+        interrupt-names:
+          minItems: 9
       required:
         - qcom,software-charge-control
 
