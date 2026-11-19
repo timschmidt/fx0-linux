@@ -23,6 +23,7 @@
 #include "pm_helpers.h"
 
 #define NUM_B_FRAMES_MAX	4
+#define VENC_EOS_INPUT_TAG	U32_MAX
 
 /*
  * Three resons to keep MPLANE formats (despite that the number of planes
@@ -548,6 +549,8 @@ venc_encoder_cmd(struct file *file, void *fh, struct v4l2_encoder_cmd *cmd)
 		fdata.buffer_type = HFI_BUFFER_INPUT;
 		fdata.flags |= HFI_BUFFERFLAG_EOS;
 		fdata.device_addr = 0xdeadb000;
+		/* Input buffer completions otherwise identify VB2 buffer indices. */
+		fdata.clnt_data = VENC_EOS_INPUT_TAG;
 
 		ret = hfi_session_process_buf(inst, &fdata);
 
@@ -1357,6 +1360,9 @@ static void venc_buf_done(struct venus_inst *inst, unsigned int buf_type,
 	unsigned int type;
 
 	venc_pm_touch(inst);
+
+	if (buf_type == HFI_BUFFER_INPUT && tag == VENC_EOS_INPUT_TAG)
+		return;
 
 	if (buf_type == HFI_BUFFER_INPUT)
 		type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
