@@ -33,6 +33,11 @@ module_param(fx0_decoder_capture_first, bool, 0400);
 MODULE_PARM_DESC(fx0_decoder_capture_first,
 		 "Submit prequeued MSM8226 capture buffers before the first coded input");
 
+static bool fx0_decoder_parse_sequence;
+module_param(fx0_decoder_parse_sequence, bool, 0400);
+MODULE_PARM_DESC(fx0_decoder_parse_sequence,
+		 "Probe MSM8226 H.264 firmware sequence parsing before capture setup");
+
 /*
  * Three resons to keep MPLANE formats (despite that the number of planes
  * currently is one):
@@ -1234,6 +1239,35 @@ err:
 	return ret;
 }
 
+static int vdec_probe_sequence(struct venus_inst *inst)
+{
+	struct vb2_v4l2_buffer *vbuf = v4l2_m2m_next_src_buf(inst->m2m_ctx);
+	const struct hfi_ops *ops = inst->core->ops;
+	struct vb2_buffer *vb;
+	u32 offset, bytes;
+	u64 address;
+
+	if (!vbuf || !ops->session_parse_seq_hdr)
+		return -EINVAL;
+
+	vb = &vbuf->vb2_buf;
+	if (vb->num_planes != 1)
+		return -EINVAL;
+	bytes = vb2_get_plane_payload(vb, 0);
+	offset = vb->planes[0].data_offset;
+	if (bytes <= offset || bytes > vb2_plane_size(vb, 0))
+		return -EINVAL;
+
+	address = to_venus_buffer(vbuf)->dma_addr;
+	if (!address || address > U32_MAX || bytes - 1 > U32_MAX - address)
+		return -ERANGE;
+	if (test_bit(0, &inst->core->sys_error))
+		return -EIO;
+
+	/* Keep the coded buffer owned by vb2 until the diagnostic session ends. */
+	return ops->session_parse_seq_hdr(inst, address + offset, bytes - offset);
+}
+
 static int vdec_start_output(struct venus_inst *inst)
 {
 	struct device *dev = inst->core->dev_dec;
@@ -1308,6 +1342,17 @@ static int vdec_start_output(struct venus_inst *inst)
 	dev_dbg(dev, "decoder HFI start: %d\n", ret);
 	if (ret)
 		return ret;
+
+	if (fx0_decoder_parse_sequence && !vb2_get_num_buffers(cap_q) &&
+	    vdec_use_msm8226_fw_capture_size(inst) &&
+	    inst->hfi_codec == HFI_VIDEO_CODEC_H264) {
+		ret = vdec_probe_sequence(inst);
+		dev_dbg(dev, "decoder sequence parse submitted: %d\n", ret);
+		if (ret)
+			return ret;
+		inst->codec_state = VENUS_DEC_STATE_INIT;
+		goto done;
+	}
 
 	if (capture_first) {
 		ret = venus_helper_process_initial_cap_bufs(inst);

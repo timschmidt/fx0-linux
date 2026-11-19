@@ -5,6 +5,7 @@
  */
 #include <linux/hash.h>
 #include <linux/list.h>
+#include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/soc/qcom/smem.h>
 #include <media/videobuf2-v4l2.h>
@@ -717,6 +718,29 @@ struct hfi_done_handler {
 	bool is_sys_pkt;
 };
 
+static void hfi_msm8226_parse_sequence_done(struct venus_core *core,
+					  struct venus_inst *inst,
+					  void *packet)
+{
+	const struct hfi_msg_session_parse_sequence_header_done_pkt *pkt = packet;
+	const struct hfi_framesize *size;
+
+	if (!IS_V1(core) || !of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus") ||
+	    inst->session_type != VIDC_SESSION_TYPE_DEC || pkt->shdr.hdr.size < sizeof(*pkt))
+		return;
+
+	dev_dbg(core->dev, "decoder HFI sequence parse reply: status %#x properties %u bytes %u\n",
+		pkt->error_type, pkt->num_properties, pkt->shdr.hdr.size);
+	if (pkt->error_type || pkt->num_properties != 1 ||
+	    pkt->shdr.hdr.size < sizeof(*pkt) + sizeof(pkt->data[0]) + sizeof(*size) ||
+	    pkt->data[0] != HFI_PROPERTY_PARAM_FRAME_SIZE)
+		return;
+
+	size = (const struct hfi_framesize *)&pkt->data[1];
+	dev_dbg(core->dev, "decoder HFI sequence parse frame size: %ux%u buffer type %#x\n",
+		size->width, size->height, size->buffer_type);
+}
+
 static const struct hfi_done_handler handlers[] = {
 	{.pkt = HFI_MSG_EVENT_NOTIFY,
 	 .pkt_sz = sizeof(struct hfi_msg_event_notify_pkt),
@@ -800,6 +824,11 @@ static const struct hfi_done_handler handlers[] = {
 	{.pkt = HFI_MSG_SESSION_GET_SEQUENCE_HEADER,
 	 .pkt_sz = sizeof(struct hfi_msg_session_get_sequence_hdr_done_pkt),
 	 .done = hfi_session_get_seq_hdr_done,
+	},
+	{.pkt = HFI_MSG_SESSION_PARSE_SEQUENCE_HEADER,
+	 .pkt_sz = sizeof(struct hfi_msg_session_parse_sequence_header_done_pkt),
+	 .pkt_sz2 = sizeof(struct hfi_msg_session_parse_sequence_header_done_pkt),
+	 .done = hfi_msm8226_parse_sequence_done,
 	},
 	{.pkt = HFI_MSG_SESSION_RELEASE_BUFFERS,
 	 .pkt_sz = sizeof(struct hfi_msg_session_release_buffers_done_pkt),
