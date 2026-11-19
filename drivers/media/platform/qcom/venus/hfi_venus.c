@@ -1358,8 +1358,8 @@ static int venus_session_ftb(struct venus_inst *inst,
 		return ret;
 
 	if (trace)
-		dev_dbg(inst->core->dev, "encoder HFI queue capture: tag %#x allocation %u\n",
-			pkt.output_tag, pkt.alloc_len);
+		dev_dbg(inst->core->dev, "encoder HFI queue capture: tag %#x allocation %u IOVA %#x\n",
+			pkt.output_tag, pkt.alloc_len, pkt.packet_buffer);
 	ret = venus_iface_cmdq_write(hdev, &pkt, false);
 	if (ret && trace)
 		dev_dbg(inst->core->dev, "encoder HFI capture queue error: tag %#x errno %d\n",
