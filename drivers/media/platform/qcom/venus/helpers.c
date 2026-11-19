@@ -395,12 +395,56 @@ int venus_helper_intbufs_free(struct venus_inst *inst)
 }
 EXPORT_SYMBOL_GPL(venus_helper_intbufs_free);
 
+static bool fx0_decoder_retain_scratch;
+module_param(fx0_decoder_retain_scratch, bool, 0400);
+MODULE_PARM_DESC(fx0_decoder_retain_scratch,
+		 "Retain a matching single MSM8226 H.264 scratch buffer across reconfiguration");
+
+static bool intbufs_retain_scratch(struct venus_inst *inst)
+{
+	const enum hfi_version ver = HFI_VERSION_1XX;
+	struct hfi_buffer_requirements req;
+	struct venus_core *core = inst->core;
+	struct intbuf *scratch;
+
+	if (!fx0_decoder_retain_scratch || core->res->hfi_version != ver ||
+	    inst->session_type != VIDC_SESSION_TYPE_DEC ||
+	    inst->hfi_codec != HFI_VIDEO_CODEC_H264 ||
+	    inst->opb_buftype != HFI_BUFFER_OUTPUT || inst->dpb_buftype ||
+	    !inst->reconfig || !inst->streamon_out || inst->streamon_cap ||
+	    !of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus") ||
+	    !list_is_singular(&inst->internalbufs))
+		return false;
+
+	scratch = list_first_entry(&inst->internalbufs, struct intbuf, list);
+	if (scratch->type != HFI_BUFFER_INTERNAL_SCRATCH(ver) ||
+	    venus_helper_get_bufreq(inst, scratch->type, &req))
+		return false;
+
+	if (req.type != scratch->type || !req.size || req.size != scratch->size ||
+	    req.count_actual != 1 || req.count_min > 1 ||
+	    req.region_size || !req.contiguous || !is_power_of_2(req.alignment) ||
+	    !IS_ALIGNED(scratch->da, req.alignment))
+		return false;
+
+	if (venus_helper_get_bufreq(inst, HFI_BUFFER_INTERNAL_SCRATCH_1(ver), &req) != -EINVAL ||
+	    venus_helper_get_bufreq(inst, HFI_BUFFER_INTERNAL_SCRATCH_2(ver), &req) != -EINVAL)
+		return false;
+
+	return true;
+}
+
 int venus_helper_intbufs_realloc(struct venus_inst *inst)
 {
 	enum hfi_version ver = inst->core->res->hfi_version;
 	struct hfi_buffer_desc bd;
 	struct intbuf *buf, *n;
 	int ret;
+
+	if (intbufs_retain_scratch(inst)) {
+		dev_dbg(inst->core->dev, "decoder control: retained matching scratch allocation\n");
+		return 0;
+	}
 
 	list_for_each_entry_safe(buf, n, &inst->internalbufs, list) {
 		if (buf->type == HFI_BUFFER_INTERNAL_PERSIST ||
