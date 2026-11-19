@@ -46,6 +46,14 @@
 	interrupts-extended = <&mpm 62 IRQ_TYPE_LEVEL_HIGH>;
 };
 
+&usb {
+	compatible = "qcom,msm8226-ci-hdrc", "qcom,ci-hdrc";
+	/delete-property/ interrupts;
+	interrupts-extended = <&intc GIC_SPI 134 IRQ_TYPE_LEVEL_HIGH>,
+			      <&mpm 47 IRQ_TYPE_LEVEL_HIGH>;
+	interrupt-names = "core", "wakeup";
+};
+
 &mdss {
 	/delete-property/ interrupts;
 	interrupts-extended = <&mpm 53 IRQ_TYPE_LEVEL_HIGH>;
