@@ -652,6 +652,10 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 	}
 	output = &vfe->line[vfe->wm_output_map[wm]].output;
 
+	/* The register update owns the final buffer while the output stops. */
+	if (output->state == VFE_OUTPUT_STOPPING)
+		goto out_unlock;
+
 	if (output->gen1.active_buf == active_index && 0) {
 		dev_err_ratelimited(vfe->camss->dev,
 				    "Active buffer mismatch!\n");
@@ -688,12 +692,13 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 		for (i = 0; i < output->wm_num; i++)
 			vfe->ops_gen1->wm_set_pong_addr(vfe, output->wm_idx[i], new_addr[i]);
 
-	spin_unlock_irqrestore(&vfe->output_lock, flags);
-
-	if (output->state == VFE_OUTPUT_STOPPING)
+	if (output->state == VFE_OUTPUT_STOPPING) {
 		output->last_buffer = ready_buf;
-	else
-		vb2_buffer_done(&ready_buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+		goto out_unlock;
+	}
+
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+	vb2_buffer_done(&ready_buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
 
 	return;
 
