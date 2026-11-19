@@ -5,6 +5,7 @@
  */
 #include <linux/hash.h>
 #include <linux/list.h>
+#include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/soc/qcom/smem.h>
 #include <media/videobuf2-v4l2.h>
@@ -545,6 +546,16 @@ static void hfi_session_etb_done(struct venus_core *core,
 			    pkt->filled_len, pkt->offset, 0, 0, 0);
 }
 
+static bool hfi_enc_unbacked_eos_ack(struct venus_core *core,
+				     const struct hfi_msg_session_fbd_compressed_pkt *pkt)
+{
+	/* This reply acknowledges the synthetic input without returning a capture buffer. */
+	return IS_V1(core) && pkt->input_tag == HFI_ENCODER_EOS_INPUT_TAG &&
+	       !pkt->output_tag && !pkt->packet_buffer && !pkt->error_type &&
+	       !pkt->flags && !pkt->filled_len && !pkt->offset &&
+	       of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus");
+}
+
 static void hfi_session_ftb_done(struct venus_core *core,
 				 struct venus_inst *inst, void *packet)
 {
@@ -573,6 +584,8 @@ static void hfi_session_ftb_done(struct venus_core *core,
 				"encoder HFI capture done: tag %#x input %#x status %#x flags %#x size %u offset %u IOVA %#x\n",
 				output_tag, pkt->input_tag, error, hfi_flags, filled_len,
 				offset, pkt->packet_buffer);
+		if (hfi_enc_unbacked_eos_ack(core, pkt))
+			return;
 	} else if (session_type == VIDC_SESSION_TYPE_DEC) {
 		struct hfi_msg_session_fbd_uncompressed_plane0_pkt *pkt =
 			packet;

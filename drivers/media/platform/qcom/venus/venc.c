@@ -25,8 +25,6 @@
 #include "pm_helpers.h"
 
 #define NUM_B_FRAMES_MAX	4
-#define VENC_EOS_INPUT_TAG	U32_MAX
-
 struct venc_inst {
 	struct venus_inst base;
 	void *eos_buffer;
@@ -590,7 +588,7 @@ venc_encoder_cmd(struct file *file, void *fh, struct v4l2_encoder_cmd *cmd)
 		if (ret)
 			goto unlock;
 		/* Input buffer completions otherwise identify VB2 buffer indices. */
-		fdata.clnt_data = VENC_EOS_INPUT_TAG;
+		fdata.clnt_data = HFI_ENCODER_EOS_INPUT_TAG;
 
 		ret = hfi_session_process_buf(inst, &fdata);
 
@@ -1401,7 +1399,7 @@ static void venc_buf_done(struct venus_inst *inst, unsigned int buf_type,
 
 	venc_pm_touch(inst);
 
-	if (buf_type == HFI_BUFFER_INPUT && tag == VENC_EOS_INPUT_TAG)
+	if (buf_type == HFI_BUFFER_INPUT && tag == HFI_ENCODER_EOS_INPUT_TAG)
 		return;
 
 	if (buf_type == HFI_BUFFER_INPUT)
