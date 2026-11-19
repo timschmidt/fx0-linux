@@ -537,6 +537,9 @@ static void hfi_session_etb_done(struct venus_core *core,
 {
 	struct hfi_msg_session_empty_buffer_done_pkt *pkt = packet;
 
+	if (IS_V1(core) && inst->session_type == VIDC_SESSION_TYPE_ENC)
+		dev_dbg(core->dev, "encoder HFI input done: tag %#x status %#x size %u offset %u\n",
+			pkt->input_tag, pkt->error_type, pkt->filled_len, pkt->offset);
 	inst->error = pkt->error_type;
 	inst->ops->buf_done(inst, HFI_BUFFER_INPUT, pkt->input_tag,
 			    pkt->filled_len, pkt->offset, 0, 0, 0);
@@ -565,6 +568,10 @@ static void hfi_session_ftb_done(struct venus_core *core,
 		buffer_type = HFI_BUFFER_OUTPUT;
 
 		error = pkt->error_type;
+		if (IS_V1(core))
+			dev_dbg(core->dev,
+				"encoder HFI capture done: tag %#x input %#x status %#x flags %#x size %u offset %u\n",
+				output_tag, pkt->input_tag, error, hfi_flags, filled_len, offset);
 	} else if (session_type == VIDC_SESSION_TYPE_DEC) {
 		struct hfi_msg_session_fbd_uncompressed_plane0_pkt *pkt =
 			packet;
