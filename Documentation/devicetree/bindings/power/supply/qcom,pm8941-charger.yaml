@@ -83,6 +83,7 @@ properties:
     const: battery-voltage
 
   interrupts:
+    minItems: 8
     items:
       - description: charge done
       - description: charge fast mode
@@ -92,8 +93,10 @@ properties:
       - description: charger disconnected
       - description: USB-in valid
       - description: DC-in valid
+      - description: charge failure
 
   interrupt-names:
+    minItems: 8
     items:
       - const: chg-done
       - const: chg-fast
@@ -103,6 +106,7 @@ properties:
       - const: chg-gone
       - const: usb-valid
       - const: dc-valid
+      - const: chg-failed
 
   qcom,fast-charge-current-limit:
     $ref: /schemas/types.yaml#/definitions/uint32
