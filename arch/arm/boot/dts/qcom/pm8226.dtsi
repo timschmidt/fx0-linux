@@ -72,7 +72,8 @@
 				     <0x0 0x12 0 IRQ_TYPE_EDGE_BOTH>,
 				     <0x0 0x13 2 IRQ_TYPE_EDGE_BOTH>,
 				     <0x0 0x13 1 IRQ_TYPE_EDGE_BOTH>,
-				     <0x0 0x14 1 IRQ_TYPE_EDGE_BOTH>;
+				     <0x0 0x14 1 IRQ_TYPE_EDGE_BOTH>,
+				     <0x0 0x10 6 IRQ_TYPE_EDGE_RISING>;
 			interrupt-names = "chg-done",
 					  "chg-fast",
 					  "chg-trkl",
@@ -80,7 +81,8 @@
 					  "bat-present",
 					  "chg-gone",
 					  "usb-valid",
-					  "dc-valid";
+					  "dc-valid",
+					  "chg-failed";
 
 			status = "disabled";
 
