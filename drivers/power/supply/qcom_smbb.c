@@ -75,6 +75,9 @@
 #define BTC_CTRL_COMP_EN	BIT(7)
 #define BTC_CTRL_COLD_EXT	BIT(1)
 #define BTC_CTRL_HOT_EXT_N	BIT(0)
+#define BTC_CTRL_MASK		(BTC_CTRL_COMP_EN | BTC_CTRL_COLD_EXT | BTC_CTRL_HOT_EXT_N)
+#define BTC_CTRL_CONSERVATIVE	(BTC_CTRL_COMP_EN | BTC_CTRL_HOT_EXT_N)
+#define BTC_CTRL_STOCK		(BTC_CTRL_COMP_EN | BTC_CTRL_COLD_EXT)
 
 #define SMBB_USB_TYPE		0x304
 #define SMBB_USB_SUBTYPE	0x305
@@ -779,18 +782,12 @@ static int smbb_usbin_writable_property(struct power_supply *psy,
 }
 
 /* Caller holds charge_lock. Never change forced-battery mode (bit 0). */
-static int smbb_charge_verify(struct smbb_charger *chg, bool enable)
+static int smbb_charge_enable(struct smbb_charger *chg, bool enable)
 {
-	unsigned int value;
+	unsigned int value = enable ? CTRL_EN : 0;
 	unsigned int control;
 	int ret;
 
-	if (chg->software_control && enable &&
-	    ktime_get_boottime_ns() >= chg->policy_valid_until_ns) {
-		chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
-		enable = false;
-	}
-	value = enable ? CTRL_EN : 0;
 	/* Force the bus write even after a previously uncertain transaction. */
 	ret = regmap_write_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
 				CTRL_EN, value);
@@ -800,6 +797,68 @@ static int smbb_charge_verify(struct smbb_charger *chg, bool enable)
 	if (ret)
 		return ret;
 	return (control & CTRL_EN) == value ? 0 : -EIO;
+}
+
+static int smbb_charge_set_btc(struct smbb_charger *chg, unsigned int value)
+{
+	unsigned int reg = chg->addr + SMBB_BAT_BTC_CTRL;
+	unsigned int window;
+	int ret;
+
+	ret = regmap_write_bits(chg->regmap, reg, BTC_CTRL_MASK, value);
+	if (ret)
+		return ret;
+	ret = regmap_read(chg->regmap, reg, &window);
+	if (ret)
+		return ret;
+	return (window & BTC_CTRL_MASK) == value ? 0 : -EIO;
+}
+
+static bool smbb_charge_sample_fresh(struct smbb_charger *chg)
+{
+	if (ktime_get_boottime_ns() < chg->policy_valid_until_ns)
+		return true;
+	chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
+	return false;
+}
+
+/*
+ * Caller holds charge_lock. Only a fresh managed policy can
+ * request the wider stock window. The hardware comparator stays enabled.
+ */
+static int smbb_charge_verify(struct smbb_charger *chg, bool enable)
+{
+	unsigned int window;
+	int ret, btc_ret;
+
+	if (!chg->software_control)
+		return smbb_charge_enable(chg, enable);
+
+	if (enable && smbb_charge_sample_fresh(chg)) {
+		ret = regmap_read(chg->regmap, chg->addr + SMBB_BAT_BTC_CTRL, &window);
+		if (ret)
+			return ret;
+		if ((window & BTC_CTRL_MASK) != BTC_CTRL_STOCK) {
+			ret = smbb_charge_enable(chg, false);
+			if (ret)
+				return ret;
+			ret = smbb_charge_set_btc(chg, BTC_CTRL_STOCK);
+			if (ret)
+				return ret;
+		}
+		if (smbb_charge_sample_fresh(chg)) {
+			ret = smbb_charge_enable(chg, true);
+			if (ret || smbb_charge_sample_fresh(chg))
+				return ret;
+		}
+	}
+
+	ret = smbb_charge_enable(chg, false);
+	/* Still attempt to restore the narrower window if disabling fails. */
+	btc_ret = regmap_read(chg->regmap, chg->addr + SMBB_BAT_BTC_CTRL, &window);
+	if (!btc_ret && (window & BTC_CTRL_MASK) != BTC_CTRL_CONSERVATIVE)
+		btc_ret = smbb_charge_set_btc(chg, BTC_CTRL_CONSERVATIVE);
+	return ret ?: btc_ret;
 }
 
 /* A bus failure can be reported after a write has reached the PMIC. */
@@ -1219,7 +1278,8 @@ static int smbb_policy_handoff(struct smbb_charger *chg)
 	ret = regmap_read(chg->regmap, chg->addr + SMBB_BAT_BTC_CTRL, &btc);
 	if (ret)
 		return ret;
-	if (control & (CTRL_EN | BIT(0)) || (btc & 0x83) != 0x81)
+	if (control & (CTRL_EN | BIT(0)) ||
+	    (btc & BTC_CTRL_MASK) != BTC_CTRL_CONSERVATIVE)
 		return -EPROTO;
 	return 0;
 }
