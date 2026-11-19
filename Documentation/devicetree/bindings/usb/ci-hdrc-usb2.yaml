@@ -32,6 +32,9 @@ properties:
               - nvidia,tegra210-ehci
           - const: nvidia,tegra30-ehci
       - items:
+          - const: qcom,msm8226-ci-hdrc
+          - const: qcom,ci-hdrc
+      - items:
           - const: xlnx,zynq-usb-2.20a
           - const: chipidea,usb2
       - items:
@@ -99,6 +102,28 @@ allOf:
   - $ref: chipidea,usb2-common.yaml#
   - $ref: usb-hcd.yaml#
   - $ref: usb-drd.yaml#
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,msm8226-ci-hdrc
+    then:
+      properties:
+        dr_mode:
+          const: peripheral
+        interrupts:
+          items:
+            - description: USB controller interrupt
+            - description: Asynchronous PHY wake interrupt
+        interrupt-names:
+          items:
+            - const: core
+            - const: wakeup
+      required:
+        - dr_mode
+        - interrupts
+        - interrupt-names
 
   - if:
       required:
