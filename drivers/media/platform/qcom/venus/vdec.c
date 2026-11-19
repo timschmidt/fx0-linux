@@ -1151,13 +1151,23 @@ static int vdec_start_capture(struct venus_inst *inst, struct vb2_queue *q)
 	}
 
 	if (inst->codec_state == VENUS_DEC_STATE_CAPTURE_SETUP &&
-	    inst->reconfig && inst->sequence_cap == 0 &&
+	    inst->sequence_cap == 0 &&
 	    inst->opb_buftype == HFI_BUFFER_OUTPUT &&
 	    vdec_use_msm8226_fw_capture_size(inst)) {
 		ret = vdec_check_preallocated_capture(inst, q);
 		if (ret)
 			return ret;
-		goto reconfigure;
+		if (inst->reconfig)
+			goto reconfigure;
+
+		ret = venus_helper_process_initial_cap_bufs(inst);
+		dev_dbg(inst->core->dev_dec,
+			"decoder queued preallocated capture with resources retained: %d\n", ret);
+		if (ret)
+			return ret;
+		inst->codec_state = VENUS_DEC_STATE_DECODING;
+		inst->streamon_cap = 1;
+		return 0;
 	}
 
 	if (inst->codec_state != VENUS_DEC_STATE_STOPPED)
@@ -1592,8 +1602,15 @@ static void vdec_event_change(struct venus_inst *inst,
 		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION };
 	struct device *dev = inst->core->dev_dec;
 	struct v4l2_format format = {};
+	bool retain_resources;
 
 	mutex_lock(&inst->lock);
+
+	/* Continue-data-transfer is active and the registered geometry still matches. */
+	retain_resources = sufficient && inst->codec_state == VENUS_DEC_STATE_INIT &&
+		inst->opb_buftype == HFI_BUFFER_OUTPUT && vdec_use_msm8226_fw_capture_size(inst) &&
+		inst->out_width == ev_data->width && inst->out_height == ev_data->height &&
+		inst->bit_depth == ev_data->bit_depth;
 
 	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	format.fmt.pix_mp.pixelformat = inst->fmt_cap->pixfmt;
@@ -1670,8 +1687,8 @@ static void vdec_event_change(struct venus_inst *inst,
 			dev_dbg(dev, VDBGH "flush output error %d\n", ret);
 	}
 
-	inst->next_buf_last = true;
-	inst->reconfig = true;
+	inst->next_buf_last = !retain_resources;
+	inst->reconfig = !retain_resources;
 	v4l2_event_queue_fh(&inst->fh, &ev);
 	wake_up(&inst->reconf_wait);
 
