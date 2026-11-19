@@ -23,6 +23,11 @@
 #include "vdec.h"
 #include "pm_helpers.h"
 
+static bool fx0_decoder_fw_capture_size;
+module_param(fx0_decoder_fw_capture_size, bool, 0400);
+MODULE_PARM_DESC(fx0_decoder_fw_capture_size,
+		 "Use the firmware buffer size for primary MSM8226 NV12 capture allocation");
+
 /*
  * Three resons to keep MPLANE formats (despite that the number of planes
  * currently is one):
@@ -917,7 +922,7 @@ deinit:
 }
 
 static int vdec_num_buffers(struct venus_inst *inst, unsigned int *in_num,
-			    unsigned int *out_num)
+			    unsigned int *out_num, unsigned int *out_size)
 {
 	enum hfi_version ver = inst->core->res->hfi_version;
 	struct hfi_buffer_requirements bufreq;
@@ -936,8 +941,19 @@ static int vdec_num_buffers(struct venus_inst *inst, unsigned int *in_num,
 		return ret;
 
 	*out_num = hfi_bufreq_get_count_min(&bufreq, ver);
+	*out_size = bufreq.size;
 
 	return 0;
+}
+
+static bool vdec_use_msm8226_fw_capture_size(struct venus_inst *inst)
+{
+	struct venus_core *core = inst->core;
+
+	return fx0_decoder_fw_capture_size && IS_V1(core) &&
+	       inst->fmt_cap->pixfmt == V4L2_PIX_FMT_NV12 &&
+	       !inst->dpb_buftype &&
+	       of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus");
 }
 
 static int vdec_queue_setup(struct vb2_queue *q,
@@ -946,7 +962,7 @@ static int vdec_queue_setup(struct vb2_queue *q,
 {
 	struct venus_inst *inst = vb2_get_drv_priv(q);
 	struct venus_core *core = inst->core;
-	unsigned int in_num, out_num;
+	unsigned int in_num, out_num, out_size;
 	int ret = 0;
 
 	if (*num_planes) {
@@ -989,7 +1005,7 @@ static int vdec_queue_setup(struct vb2_queue *q,
 	if (ret)
 		goto put_power;
 
-	ret = vdec_num_buffers(inst, &in_num, &out_num);
+	ret = vdec_num_buffers(inst, &in_num, &out_num, &out_size);
 	if (ret)
 		goto put_power;
 
@@ -1014,6 +1030,14 @@ static int vdec_queue_setup(struct vb2_queue *q,
 		sizes[0] = venus_helper_get_framesz(inst->fmt_cap->pixfmt,
 						    inst->width,
 						    inst->height);
+		if (vdec_use_msm8226_fw_capture_size(inst)) {
+			unsigned int size = max(sizes[0], out_size);
+
+			dev_dbg(core->dev_dec,
+				"decoder capture allocation: calculated %u firmware %u selected %u\n",
+				sizes[0], out_size, size);
+			sizes[0] = size;
+		}
 		inst->output_buf_size = sizes[0];
 		*num_buffers = max(*num_buffers, out_num);
 		inst->num_output_bufs = *num_buffers;
