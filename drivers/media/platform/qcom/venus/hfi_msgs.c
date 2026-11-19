@@ -570,8 +570,9 @@ static void hfi_session_ftb_done(struct venus_core *core,
 		error = pkt->error_type;
 		if (IS_V1(core))
 			dev_dbg(core->dev,
-				"encoder HFI capture done: tag %#x input %#x status %#x flags %#x size %u offset %u\n",
-				output_tag, pkt->input_tag, error, hfi_flags, filled_len, offset);
+				"encoder HFI capture done: tag %#x input %#x status %#x flags %#x size %u offset %u IOVA %#x\n",
+				output_tag, pkt->input_tag, error, hfi_flags, filled_len,
+				offset, pkt->packet_buffer);
 	} else if (session_type == VIDC_SESSION_TYPE_DEC) {
 		struct hfi_msg_session_fbd_uncompressed_plane0_pkt *pkt =
 			packet;
