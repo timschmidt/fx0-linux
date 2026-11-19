@@ -6,7 +6,9 @@
 #include <linux/idr.h>
 #include <linux/list.h>
 #include <linux/log2.h>
+#include <linux/moduleparam.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <media/videobuf2-dma-contig.h>
@@ -560,10 +562,25 @@ session_process_buf(struct venus_inst *inst, struct vb2_v4l2_buffer *vbuf)
 	return hfi_session_process_buf(inst, &fdata);
 }
 
+static bool fx0_decoder_static_capture;
+module_param(fx0_decoder_static_capture, bool, 0400);
+MODULE_PARM_DESC(fx0_decoder_static_capture, "Use static capture buffers on the MSM8226 decoder");
+
+static bool use_msm8226_static_capture(struct venus_inst *inst)
+{
+	return fx0_decoder_static_capture && IS_V1(inst->core) &&
+	       inst->session_type == VIDC_SESSION_TYPE_DEC &&
+	       inst->opb_buftype == HFI_BUFFER_OUTPUT && !inst->dpb_buftype &&
+	       of_device_is_compatible(inst->core->dev->of_node, "qcom,msm8226-venus");
+}
+
 static bool is_dynamic_bufmode(struct venus_inst *inst)
 {
 	struct venus_core *core = inst->core;
 	struct hfi_plat_caps *caps;
+
+	if (use_msm8226_static_capture(inst))
+		return false;
 
 	/*
 	 * v4 doesn't send BUFFER_ALLOC_MODE_SUPPORTED property and supports
@@ -604,6 +621,7 @@ static int session_register_bufs(struct venus_inst *inst)
 	struct device *dev = core->dev;
 	struct hfi_buffer_desc bd;
 	struct venus_buffer *buf;
+	unsigned int registered = 0;
 	int ret = 0;
 
 	if (is_dynamic_bufmode(inst))
@@ -616,7 +634,12 @@ static int session_register_bufs(struct venus_inst *inst)
 			dev_err(dev, "%s: set buffer failed\n", __func__);
 			break;
 		}
+		registered++;
 	}
+
+	if (use_msm8226_static_capture(inst))
+		dev_dbg(dev, "decoder registered %u static capture buffers before start: %d\n",
+			registered, ret);
 
 	return ret;
 }
@@ -1330,6 +1353,15 @@ int venus_helper_set_dyn_bufmode(struct venus_inst *inst)
 	const u32 ptype = HFI_PROPERTY_PARAM_BUFFER_ALLOC_MODE;
 	struct hfi_buffer_alloc_mode mode;
 	int ret;
+
+	if (use_msm8226_static_capture(inst)) {
+		mode.type = HFI_BUFFER_OUTPUT;
+		mode.mode = HFI_BUFFER_MODE_STATIC;
+		ret = hfi_session_set_property(inst, ptype, &mode);
+		dev_dbg(inst->core->dev,
+			"decoder primary capture static allocation mode: %d\n", ret);
+		return ret;
+	}
 
 	if (!is_dynamic_bufmode(inst))
 		return 0;
