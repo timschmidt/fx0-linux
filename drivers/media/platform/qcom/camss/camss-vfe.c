@@ -1175,7 +1175,9 @@ int vfe_flush_buffers(struct camss_video *vid,
 	struct vfe_line *line = container_of(vid, struct vfe_line, video_out);
 	struct vfe_device *vfe = to_vfe(line);
 	struct vfe_output *output;
+	struct camss_buffer *buf;
 	unsigned long flags;
+	unsigned int i;
 
 	output = &line->output;
 
@@ -1183,16 +1185,17 @@ int vfe_flush_buffers(struct camss_video *vid,
 
 	vfe_buf_flush_pending(output, state);
 
-	if (output->buf[0])
-		vb2_buffer_done(&output->buf[0]->vb.vb2_buf, state);
-
-	if (output->buf[1])
-		vb2_buffer_done(&output->buf[1]->vb.vb2_buf, state);
-
-	if (output->last_buffer) {
-		vb2_buffer_done(&output->last_buffer->vb.vb2_buf, state);
-		output->last_buffer = NULL;
+	for (i = 0; i < ARRAY_SIZE(output->buf); i++) {
+		buf = output->buf[i];
+		output->buf[i] = NULL;
+		if (buf)
+			vb2_buffer_done(&buf->vb.vb2_buf, state);
 	}
+
+	buf = output->last_buffer;
+	output->last_buffer = NULL;
+	if (buf)
+		vb2_buffer_done(&buf->vb.vb2_buf, state);
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
