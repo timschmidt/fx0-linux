@@ -11,6 +11,7 @@
 #define QC_MSM_CAMSS_H
 
 #include <linux/device.h>
+#include <linux/mutex.h>
 #include <linux/types.h>
 #include <media/v4l2-async.h>
 #include <media/v4l2-device.h>
@@ -113,6 +114,8 @@ struct camss_resources {
 };
 
 struct camss {
+	/* Serializes legacy s_stream state across capture nodes. */
+	struct mutex pipeline_lock;
 	struct v4l2_device v4l2_dev;
 	struct v4l2_async_notifier notifier;
 	struct media_device media_dev;

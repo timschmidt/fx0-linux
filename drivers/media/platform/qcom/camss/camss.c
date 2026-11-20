@@ -4275,6 +4275,7 @@ static int camss_probe(struct platform_device *pdev)
 	camss->res = of_device_get_match_data(dev);
 
 	atomic_set(&camss->ref_count, 0);
+	mutex_init(&camss->pipeline_lock);
 	camss->dev = dev;
 	platform_set_drvdata(pdev, camss);
 
