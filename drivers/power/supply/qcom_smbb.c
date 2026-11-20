@@ -166,6 +166,9 @@ struct smbb_charger {
 	unsigned int user_current;
 	unsigned int thermal_current;
 	u64 policy_valid_until_ns;
+	int policy_temperature;
+	bool capacity_valid;
+	int last_capacity;
 
 	unsigned int attr[_ATTR_CNT];
 
@@ -173,7 +176,7 @@ struct smbb_charger {
 	bool usb_budget_managed;
 	struct power_supply_desc usb_desc;
 	struct power_supply_desc bat_desc;
-	enum power_supply_property bat_properties[ARRAY_SIZE(smbb_battery_properties) + 1];
+	enum power_supply_property bat_properties[ARRAY_SIZE(smbb_battery_properties) + 2];
 	struct iio_channel *vbat;
 	struct power_supply *usb_psy;
 	struct power_supply *dc_psy;
@@ -1042,6 +1045,64 @@ static int smbb_battery_get_voltage(struct smbb_charger *chg,
 	return 0;
 }
 
+/*
+ * Estimate state of charge from the battery voltage and the firmware-provided
+ * OCV tables. Use the managed policy's fresh thermistor reading when available
+ * and 25 C otherwise. A transient voltage read failure repeats the last
+ * estimate so userspace never sees a spurious empty battery. While charging
+ * the terminal voltage is above OCV, so never report 100 % before the charger
+ * is idle.
+ */
+static int smbb_battery_get_capacity(struct smbb_charger *chg,
+				     unsigned long status, int *value)
+{
+	struct power_supply_battery_info *info = chg->bat_psy->battery_info;
+	int microvolts, temperature = 250, capacity = 0, ret;
+
+	if (!info || info->ocv_table_size[0] <= 0)
+		return -ENODATA;
+	mutex_lock(&chg->charge_lock);
+	if (ktime_get_boottime_ns() < chg->policy_valid_until_ns)
+		temperature = chg->policy_temperature;
+	mutex_unlock(&chg->charge_lock);
+
+	ret = smbb_battery_get_voltage(chg, status, &microvolts);
+	if (!ret) {
+		capacity = power_supply_batinfo_ocv2cap(info, microvolts, temperature / 10);
+		ret = capacity < 0 ? capacity : 0;
+	}
+	mutex_lock(&chg->statlock);
+	if (!ret) {
+		if (status & (STATUS_CHG_FAST | STATUS_CHG_TRKL))
+			capacity = min(capacity, 99);
+		chg->last_capacity = clamp(capacity, 0, 100);
+		chg->capacity_valid = true;
+	}
+	if (chg->capacity_valid) {
+		*value = chg->last_capacity;
+		ret = 0;
+	}
+	mutex_unlock(&chg->statlock);
+	return ret;
+}
+
+/*
+ * PM8226 ends a charge cycle without raising chg-done. With input present,
+ * charging allowed and the charger idle, a battery at or above the recharge
+ * threshold is full: the charger will not restart until it drops below it.
+ */
+static bool smbb_battery_idle_full(struct smbb_charger *chg, unsigned long status)
+{
+	int microvolts;
+
+	/* The caller already established that charging is not inhibited. */
+	if (!chg->software_control)
+		return false;
+	if (smbb_battery_get_voltage(chg, status, &microvolts))
+		return false;
+	return microvolts >= READ_ONCE(chg->attr[ATTR_CHG_VDET]);
+}
+
 static int smbb_battery_get_property(struct power_supply *psy,
 		enum power_supply_property psp,
 		union power_supply_propval *val)
@@ -1072,6 +1133,8 @@ static int smbb_battery_get_property(struct power_supply *psy,
 				val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
 			else if (status & (STATUS_CHG_FAST | STATUS_CHG_TRKL))
 				val->intval = POWER_SUPPLY_STATUS_CHARGING;
+			else if (smbb_battery_idle_full(chg, status))
+				val->intval = POWER_SUPPLY_STATUS_FULL;
 			else
 				val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
 		}
@@ -1100,6 +1163,9 @@ static int smbb_battery_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		rc = smbb_battery_get_voltage(chg, status, &val->intval);
+		break;
+	case POWER_SUPPLY_PROP_CAPACITY:
+		rc = smbb_battery_get_capacity(chg, status, &val->intval);
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		mutex_lock(&chg->charge_lock);
@@ -1386,6 +1452,11 @@ static int smbb_battery_init_voltage(struct smbb_charger *chg)
 	chg->vbat = channel;
 	memcpy(chg->bat_properties, smbb_battery_properties, sizeof(smbb_battery_properties));
 	chg->bat_properties[chg->bat_desc.num_properties++] = POWER_SUPPLY_PROP_VOLTAGE_NOW;
+	/* Only a firmware-identified pack provides OCV tables for an estimate. */
+	if (IS_ENABLED(CONFIG_CHARGER_QCOM_SMBB_POLICY) && chg->software_control &&
+	    !(chg->charge_inhibit & SMBB_INHIBIT_HANDOFF) &&
+	    of_property_present(dev->of_node, "monitored-battery"))
+		chg->bat_properties[chg->bat_desc.num_properties++] = POWER_SUPPLY_PROP_CAPACITY;
 	chg->bat_desc.properties = chg->bat_properties;
 	return 0;
 }
@@ -1677,6 +1748,7 @@ static int smbb_policy_apply(struct smbb_policy *policy, int error,
 				 SMBB_INHIBIT_SUSPEND);
 	policy->last_valid_ns = started;
 	chg->policy_valid_until_ns = started + (u64)SMBB_POLICY_MAX_AGE_MS * NSEC_PER_MSEC;
+	chg->policy_temperature = temperature;
 apply:
 	ret = smbb_charge_verify(chg, !chg->charge_inhibit);
 	if (!ret) {
