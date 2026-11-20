@@ -1681,6 +1681,8 @@ static int smbb_charger_probe(struct platform_device *pdev)
 
 #if IS_ENABLED(CONFIG_CHARGER_QCOM_SMBB_POLICY)
 #define SMBB_POLICY_POLL_MS 1000
+/* Periodic refresh for voltage and capacity readers without per-sample uevents. */
+#define SMBB_POLICY_NOTIFY_MS 60000
 #define SMBB_POLICY_MAX_AGE_MS 3000
 
 struct smbb_policy {
@@ -1692,6 +1694,11 @@ struct smbb_policy {
 	bool running;
 	u64 last_valid_ns;
 	int temperature, microvolts, last_error;
+	/* Last state reported through power_supply_changed(). */
+	u64 last_notify_ns;
+	unsigned int notified_inhibit;
+	enum smbb_policy_state notified_state;
+	int notified_error;
 };
 
 /* Caller holds charge_lock. Never release user, pack, handoff or fault votes. */
@@ -1773,6 +1780,7 @@ static void smbb_policy_sample_work(struct work_struct *work)
 	struct smbb_charger *chg = policy->chg;
 	int millivolts = 0, microvolts = 0, temperature = 0, ret;
 	u64 started = ktime_get_boottime_ns();
+	bool notify;
 
 	/* Do not hold the actuator lock while a supplier converts/calibrates. */
 	ret = iio_read_channel_processed(policy->thermistor, &millivolts);
@@ -1785,8 +1793,26 @@ static void smbb_policy_sample_work(struct work_struct *work)
 	if (policy->running)
 		queue_delayed_work(system_wq, &policy->sample_work,
 				   msecs_to_jiffies(SMBB_POLICY_POLL_MS));
+	/*
+	 * Each notification holds the supply's wakeup source until userspace is
+	 * informed, so a once-per-second notification races system sleep and
+	 * wakes UPower needlessly. Notify on state changes and periodically.
+	 */
+	notify = !policy->last_notify_ns ||
+		 policy->notified_state != policy->state ||
+		 policy->notified_error != policy->last_error ||
+		 policy->notified_inhibit != chg->charge_inhibit ||
+		 started - policy->last_notify_ns >=
+		 (u64)SMBB_POLICY_NOTIFY_MS * NSEC_PER_MSEC;
+	if (notify) {
+		policy->last_notify_ns = started;
+		policy->notified_state = policy->state;
+		policy->notified_error = policy->last_error;
+		policy->notified_inhibit = chg->charge_inhibit;
+	}
 	mutex_unlock(&chg->charge_lock);
-	power_supply_changed(chg->bat_psy);
+	if (notify)
+		power_supply_changed(chg->bat_psy);
 }
 
 static void smbb_policy_age_work(struct work_struct *work)
@@ -1943,6 +1969,7 @@ static int smbb_policy_resume(struct device *dev)
 	mutex_lock(&chg->charge_lock);
 	policy->running = true;
 	policy->last_valid_ns = 0;
+	policy->last_notify_ns = 0;
 	chg->charge_inhibit |= SMBB_INHIBIT_SAMPLE;
 	queue_delayed_work(system_wq, &policy->sample_work, 0);
 	queue_delayed_work(system_highpri_wq, &policy->age_work,
