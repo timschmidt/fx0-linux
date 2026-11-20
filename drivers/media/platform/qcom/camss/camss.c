@@ -3643,17 +3643,18 @@ void camss_pm_domain_off(struct camss *camss, int id)
 	}
 }
 
+/*
+ * A CSID powers the VFE with the same index first, which SDM845 and later
+ * require. SoCs such as MSM8916 and MSM8226 have more CSIDs than VFEs and
+ * route every CSID through ISPIF, so a CSID without a same-index VFE has no
+ * parent to power.
+ */
 static int vfe_parent_dev_ops_get(struct camss *camss, int id)
 {
-	int ret = -EINVAL;
+	if (id >= camss->res->vfe_num)
+		return camss->ispif ? 0 : -EINVAL;
 
-	if (id < camss->res->vfe_num) {
-		struct vfe_device *vfe = &camss->vfe[id];
-
-		ret = vfe_get(vfe);
-	}
-
-	return ret;
+	return vfe_get(&camss->vfe[id]);
 }
 
 static int vfe_parent_dev_ops_put(struct camss *camss, int id)
