@@ -413,6 +413,27 @@ static void video_suspend_hold_buffers(struct vfe_line *line)
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 }
 
+/*
+ * Count the VFE power references a single route holds: one for the VFE
+ * line and one for each CSID in the route that powers this VFE as its parent.
+ */
+static unsigned int video_route_vfe_power_refs(struct camss_video *video,
+					       struct vfe_device *vfe)
+{
+	struct camss *camss = video->camss;
+	struct v4l2_subdev *subdev;
+	unsigned int i, refs = 1;
+
+	for (subdev = video_pipeline_upstream(&video->vdev.entity);
+	     subdev; subdev = video_pipeline_upstream(&subdev->entity))
+		for (i = 0; i < camss->res->csid_num; i++)
+			if (subdev == &camss->csid[i].subdev &&
+			    camss->csid[i].id == vfe->id)
+				refs++;
+
+	return refs;
+}
+
 int msm_video_suspend(struct vfe_line *line)
 {
 	struct camss_video *video = &line->video_out;
@@ -420,6 +441,7 @@ int msm_video_suspend(struct vfe_line *line)
 	struct camss *camss = video->camss;
 	struct media_device *mdev = &camss->media_dev;
 	bool exclusive_power, sole_stream;
+	unsigned int refs;
 	int ret;
 
 	lockdep_assert_held(&video->q_lock);
@@ -428,8 +450,9 @@ int msm_video_suspend(struct vfe_line *line)
 	mutex_lock(&mdev->graph_mutex);
 	exclusive_power = line->subdev.entity.use_count == 1;
 	mutex_unlock(&mdev->graph_mutex);
+	refs = video_route_vfe_power_refs(video, vfe);
 	mutex_lock(&vfe->power_lock);
-	exclusive_power = exclusive_power && vfe->power_count == 1;
+	exclusive_power = exclusive_power && vfe->power_count == refs;
 	mutex_unlock(&vfe->power_lock);
 	mutex_lock(&vfe->stream_lock);
 	sole_stream = vfe->stream_count == 1;
