@@ -1548,6 +1548,12 @@ static int smbb_charger_probe(struct platform_device *pdev)
 
 	bat_cfg.drv_data = chg;
 	bat_cfg.fwnode = dev_fwnode(&pdev->dev);
+	/*
+	 * Under software control the policy changes the charger state while
+	 * the system suspends; a battery notification must not count as a
+	 * wakeup event then. USB and DC insertion keep their wakeup sources.
+	 */
+	bat_cfg.no_wakeup_source = chg->software_control;
 	chg->bat_psy = devm_power_supply_register(&pdev->dev,
 						  &chg->bat_desc,
 						  &bat_cfg);
