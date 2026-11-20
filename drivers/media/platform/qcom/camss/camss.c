@@ -4624,27 +4624,69 @@ static const struct of_device_id camss_dt_match[] = {
 
 MODULE_DEVICE_TABLE(of, camss_dt_match);
 
+static int camss_find_sleep_line(struct camss *camss, struct vfe_line **line)
+{
+	unsigned int i, j;
+
+	lockdep_assert_held(&camss->pipeline_lock);
+	*line = NULL;
+	for (i = 0; i < camss->res->vfe_num; i++) {
+		struct vfe_device *vfe = &camss->vfe[i];
+
+		for (j = 0; j < vfe->res->line_num; j++) {
+			struct vfe_line *active = &vfe->line[j];
+
+			if (!active->subdev.s_stream_enabled)
+				continue;
+			/* MSM8226 uses a Gen1 VFE. Retain one raw route at a time. */
+			if (*line || active->id == VFE_LINE_PIX)
+				return -EBUSY;
+			*line = active;
+		}
+	}
+	return 0;
+}
+
 static int camss_prepare(struct device *dev)
 {
 	struct camss *camss = dev_get_drvdata(dev);
-	unsigned int i;
+	struct vfe_line *line, *current_line;
+	int ret;
 
 	if (!of_device_is_compatible(dev->of_node, "qcom,msm8226-camss"))
 		return 0;
 
-	/* The MSM8226 system-sleep callbacks do not stop the VFE pipeline. */
-	for (i = 0; i < camss->res->vfe_num; i++) {
-		struct vfe_device *vfe = &camss->vfe[i];
-		bool streaming;
+	mutex_lock(&camss->pipeline_lock);
+	ret = camss_find_sleep_line(camss, &line);
+	mutex_unlock(&camss->pipeline_lock);
+	if (ret || !line)
+		return ret;
 
-		mutex_lock(&vfe->stream_lock);
-		streaming = vfe->stream_count != 0;
-		mutex_unlock(&vfe->stream_lock);
-		if (streaming)
-			return -EBUSY;
-	}
+	/* Follow the lock order used by STREAMON and STREAMOFF. */
+	mutex_lock(&line->video_out.q_lock);
+	mutex_lock(&camss->pipeline_lock);
+	ret = camss_find_sleep_line(camss, &current_line);
+	if (!ret)
+		ret = line == current_line ? msm_video_suspend(line) : -EBUSY;
+	mutex_unlock(&camss->pipeline_lock);
+	mutex_unlock(&line->video_out.q_lock);
+	return ret;
+}
 
-	return 0;
+static void camss_complete(struct device *dev)
+{
+	struct camss *camss = dev_get_drvdata(dev);
+	struct vfe_line *line = camss->sleep_line;
+
+	if (!line)
+		return;
+
+	/* The sensor and bus suppliers have completed their resume callbacks. */
+	mutex_lock(&line->video_out.q_lock);
+	mutex_lock(&camss->pipeline_lock);
+	msm_video_resume(line);
+	mutex_unlock(&camss->pipeline_lock);
+	mutex_unlock(&line->video_out.q_lock);
 }
 
 static int __maybe_unused camss_runtime_suspend(struct device *dev)
@@ -4682,6 +4724,7 @@ static int __maybe_unused camss_runtime_resume(struct device *dev)
 
 static const struct dev_pm_ops camss_pm_ops = {
 	.prepare = pm_sleep_ptr(camss_prepare),
+	.complete = pm_sleep_ptr(camss_complete),
 	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
 				pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(camss_runtime_suspend, camss_runtime_resume, NULL)

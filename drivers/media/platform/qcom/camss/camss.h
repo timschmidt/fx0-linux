@@ -116,6 +116,9 @@ struct camss_resources {
 struct camss {
 	/* Serializes legacy s_stream state across capture nodes. */
 	struct mutex pipeline_lock;
+	struct vfe_line *sleep_line;
+	struct list_head sleep_buffers;
+	unsigned int sleep_sequence;
 	struct v4l2_device v4l2_dev;
 	struct v4l2_async_notifier notifier;
 	struct media_device media_dev;

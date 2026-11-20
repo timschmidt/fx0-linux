@@ -243,7 +243,8 @@ static int vfe_enable_output(struct vfe_line *line)
 		break;
 	}
 
-	output->sequence = 0;
+	output->sequence = vfe->camss->sleep_line == line ?
+			   vfe->camss->sleep_sequence : 0;
 	output->gen1.wait_sof = false;
 	output->gen1.disabling = false;
 	output->wait_reg_update = 0;

@@ -7,6 +7,7 @@
  * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  * Copyright (C) 2015-2018 Linaro Ltd.
  */
+#include <linux/interrupt.h>
 #include <linux/slab.h>
 #include <media/media-entity.h>
 #include <media/v4l2-dev.h>
@@ -15,6 +16,7 @@
 #include <media/v4l2-mc.h>
 #include <media/videobuf2-dma-sg.h>
 
+#include "camss-vfe-gen1.h"
 #include "camss-video.h"
 #include "camss.h"
 
@@ -253,10 +255,11 @@ static int video_prepare_streaming(struct vb2_queue *q)
 	int ret;
 
 	ret = v4l2_pipeline_pm_get(&vdev->entity);
-	if (ret < 0) {
+	if (ret < 0)
 		dev_err(video->camss->dev, "Failed to power up pipeline: %d\n",
 			ret);
-	}
+	else
+		video->pipeline_powered = true;
 
 	return ret;
 }
@@ -297,11 +300,45 @@ static void video_pipeline_stop_subdevs(struct camss_video *video,
 	}
 }
 
+static int video_pipeline_start_subdevs(struct camss_video *video)
+{
+	struct v4l2_subdev *subdev;
+	int ret;
+
+	lockdep_assert_held(&video->camss->pipeline_lock);
+
+	for (subdev = video_pipeline_upstream(&video->vdev.entity);
+	     subdev; subdev = video_pipeline_upstream(&subdev->entity)) {
+		/* Legacy s_stream has one enable state for each subdevice. */
+		if (subdev->s_stream_enabled) {
+			ret = -EBUSY;
+			goto unwind;
+		}
+
+		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
+		if (ret < 0 && ret != -ENOIOCTLCMD)
+			goto unwind;
+	}
+
+	return 0;
+
+unwind:
+	video_pipeline_stop_subdevs(video, subdev);
+	return ret;
+}
+
+static void video_pipeline_power_put(struct camss_video *video)
+{
+	if (video->pipeline_powered) {
+		v4l2_pipeline_pm_put(&video->vdev.entity);
+		video->pipeline_powered = false;
+	}
+}
+
 static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 {
 	struct camss_video *video = vb2_get_drv_priv(q);
 	struct video_device *vdev = &video->vdev;
-	struct v4l2_subdev *subdev;
 	int ret;
 
 	mutex_lock(&video->camss->pipeline_lock);
@@ -316,27 +353,12 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	if (ret < 0)
 		goto stop_pipeline;
 
-	for (subdev = video_pipeline_upstream(&vdev->entity);
-	     subdev; subdev = video_pipeline_upstream(&subdev->entity)) {
-		/*
-		 * Legacy s_stream has one enable state for each subdevice.
-		 * Leave any subdevice owned by another route running.
-		 */
-		if (subdev->s_stream_enabled) {
-			ret = -EBUSY;
-			goto stop_subdevs;
-		}
+	ret = video_pipeline_start_subdevs(video);
+	if (ret)
+		goto stop_pipeline;
 
-		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
-		if (ret < 0 && ret != -ENOIOCTLCMD)
-			goto stop_subdevs;
-	}
-
-	ret = 0;
 	goto unlock;
 
-stop_subdevs:
-	video_pipeline_stop_subdevs(video, subdev);
 stop_pipeline:
 	video_device_pipeline_stop(vdev);
 flush_buffers:
@@ -360,10 +382,112 @@ static void video_stop_streaming(struct vb2_queue *q)
 
 static void video_unprepare_streaming(struct vb2_queue *q)
 {
-	struct camss_video *video = vb2_get_drv_priv(q);
-	struct video_device *vdev = &video->vdev;
+	video_pipeline_power_put(vb2_get_drv_priv(q));
+}
 
-	v4l2_pipeline_pm_put(&vdev->entity);
+static void video_suspend_hold_buffers(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	struct camss *camss = vfe->camss;
+	struct vfe_output *output = &line->output;
+	unsigned long flags;
+	unsigned int active;
+
+	/* The bus is halted and no IRQ handler can still return a buffer. */
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	INIT_LIST_HEAD(&camss->sleep_buffers);
+	list_splice_init(&output->pending_bufs, &camss->sleep_buffers);
+	active = output->gen1.active_buf;
+	if (output->buf[!active])
+		list_add(&output->buf[!active]->queue, &camss->sleep_buffers);
+	if (output->buf[active])
+		list_add(&output->buf[active]->queue, &camss->sleep_buffers);
+	output->buf[0] = NULL;
+	output->buf[1] = NULL;
+	camss->sleep_sequence = output->sequence;
+	if (output->last_buffer) {
+		list_add(&output->last_buffer->queue, &camss->sleep_buffers);
+		camss->sleep_sequence = output->last_buffer->vb.sequence;
+		output->last_buffer = NULL;
+	}
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+}
+
+int msm_video_suspend(struct vfe_line *line)
+{
+	struct camss_video *video = &line->video_out;
+	struct vfe_device *vfe = to_vfe(line);
+	struct camss *camss = video->camss;
+	struct media_device *mdev = &camss->media_dev;
+	bool exclusive_power, sole_stream;
+	int ret;
+
+	lockdep_assert_held(&video->q_lock);
+	lockdep_assert_held(&camss->pipeline_lock);
+
+	mutex_lock(&mdev->graph_mutex);
+	exclusive_power = line->subdev.entity.use_count == 1;
+	mutex_unlock(&mdev->graph_mutex);
+	mutex_lock(&vfe->power_lock);
+	exclusive_power = exclusive_power && vfe->power_count == 1;
+	mutex_unlock(&vfe->power_lock);
+	mutex_lock(&vfe->stream_lock);
+	sole_stream = vfe->stream_count == 1;
+	mutex_unlock(&vfe->stream_lock);
+	if (!video->pipeline_powered || !video->vb2_q.start_streaming_called ||
+	    !exclusive_power || !sole_stream)
+		return -EBUSY;
+
+	video_pipeline_stop_subdevs(video, NULL);
+	ret = vfe_gen1_halt(vfe);
+	if (ret) {
+		/* Drop the pipeline's power reference before releasing buffers. */
+		video_pipeline_power_put(video);
+		synchronize_irq(vfe->irq);
+		video->ops->flush_buffers(video, VB2_BUF_STATE_ERROR);
+		vb2_queue_error(&video->vb2_q);
+		return ret;
+	}
+	synchronize_irq(vfe->irq);
+	video_suspend_hold_buffers(line);
+	camss->sleep_line = line;
+
+	/* The bus already acknowledged halt, so power down without another. */
+	mutex_lock(&vfe->power_lock);
+	vfe->was_streaming = false;
+	mutex_unlock(&vfe->power_lock);
+	video_pipeline_power_put(video);
+	return 0;
+}
+
+void msm_video_resume(struct vfe_line *line)
+{
+	struct camss_video *video = &line->video_out;
+	struct vfe_device *vfe = to_vfe(line);
+	struct camss *camss = video->camss;
+	unsigned long flags;
+	int ret;
+
+	lockdep_assert_held(&video->q_lock);
+	lockdep_assert_held(&camss->pipeline_lock);
+
+	ret = v4l2_pipeline_pm_get(&video->vdev.entity);
+	video->pipeline_powered = !ret;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	list_splice_init(&camss->sleep_buffers, &line->output.pending_bufs);
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	if (!ret)
+		ret = video_pipeline_start_subdevs(video);
+	camss->sleep_line = NULL;
+	if (ret) {
+		dev_err(camss->dev, "Failed to restart capture after sleep: %d\n", ret);
+		video_pipeline_power_put(video);
+		synchronize_irq(vfe->irq);
+		video->ops->flush_buffers(video, VB2_BUF_STATE_ERROR);
+		vb2_queue_error(&video->vb2_q);
+	}
 }
 
 static const struct vb2_ops msm_video_vb2_q_ops = {

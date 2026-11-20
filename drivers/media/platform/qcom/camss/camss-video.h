@@ -26,6 +26,7 @@ struct camss_buffer {
 };
 
 struct camss_video;
+struct vfe_line;
 
 struct camss_video_ops {
 	int (*queue_buffer)(struct camss_video *vid, struct camss_buffer *buf);
@@ -44,6 +45,7 @@ struct camss_video {
 	const struct camss_video_ops *ops;
 	struct mutex lock;
 	struct mutex q_lock;
+	bool pipeline_powered;
 	unsigned int bpl_alignment;
 	unsigned int line_based;
 	unsigned int max_height;
@@ -55,5 +57,8 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 		       const char *name);
 
 void msm_video_unregister(struct camss_video *video);
+
+int msm_video_suspend(struct vfe_line *line);
+void msm_video_resume(struct vfe_line *line);
 
 #endif /* QC_MSM_CAMSS_VIDEO_H */
