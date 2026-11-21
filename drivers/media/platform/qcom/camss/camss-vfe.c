@@ -1109,6 +1109,9 @@ int vfe_get(struct vfe_device *vfe)
 		vfe->res->hw_ops->hw_version(vfe);
 	} else {
 		ret = vfe_check_clock_rates(vfe);
+		/* A route added to a running VFE may need a faster clock. */
+		if (ret == -EBUSY)
+			ret = vfe_set_clock_rates(vfe);
 		if (ret < 0)
 			goto error_pm_domain;
 	}
