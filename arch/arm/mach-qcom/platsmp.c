@@ -445,7 +445,17 @@ static int msm8226_restart_secondary(unsigned int cpu, atomic_t *restart)
 	    MSM8226_RESTART_OFFLINE)
 		return -EBUSY;
 
-	ret = gic_send_cpu_wakeup_sgi(cpu, MSM8226_WAKE_SGI);
+	/*
+	 * After system sleep collapsed the cluster, the parked core and its
+	 * banked wake SGI enable are gone: power it up through its ACC instead.
+	 * Firmware then enters the warm vector, which claims this request.
+	 */
+	if (qcom_msm8226_cpu_power_lost(cpu)) {
+		pr_info("CPU%u: MSM8226 power lost in system sleep, ACC power-up\n", cpu);
+		ret = cortex_a7_release_secondary(cpu);
+	} else {
+		ret = gic_send_cpu_wakeup_sgi(cpu, MSM8226_WAKE_SGI);
+	}
 	if (ret && !msm8226_cancel_secondary_boot(cpu))
 		return 0;
 	return ret;

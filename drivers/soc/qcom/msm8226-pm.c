@@ -47,6 +47,14 @@ struct msm8226_pm {
 };
 
 static struct msm8226_pm *msm8226_pm;
+
+/* Secondaries whose power and banked GIC state did not survive system sleep. */
+static unsigned long msm8226_power_lost;
+
+bool qcom_msm8226_cpu_power_lost(unsigned int cpu)
+{
+	return cpu < MSM8226_CPUS && test_and_clear_bit(cpu, &msm8226_power_lost);
+}
 /* SPM is built in, has no unregister path and suppresses manual unbinding. */
 static struct spm_driver_data *msm8226_cpu_spm[MSM8226_CPUS];
 
@@ -155,8 +163,16 @@ static int msm8226_suspend_enter(suspend_state_t state)
 	if (ret)
 		goto cluster_exit;
 	ret = spm_set_low_power_mode(msm8226_cpu_spm[0], PM_SLEEP_MODE_PC);
-	if (!ret)
+	if (!ret) {
 		ret = cpu_suspend((unsigned long)pm, msm8226_system_finisher);
+		/* A zero return means the cluster really collapsed and resumed. */
+		if (!ret) {
+			int cpu;
+
+			for (cpu = 1; cpu < MSM8226_CPUS; cpu++)
+				set_bit(cpu, &msm8226_power_lost);
+		}
+	}
 
 	/* Both wake and failed entry must disarm before generic WFI/notifiers. */
 	cpu_restore = spm_set_low_power_mode(msm8226_cpu_spm[0], PM_SLEEP_MODE_STBY);
