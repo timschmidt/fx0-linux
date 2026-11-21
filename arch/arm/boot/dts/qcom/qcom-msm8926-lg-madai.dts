@@ -158,10 +158,17 @@
 	};
 
 	reserved-memory {
-		/* Stock firmware excludes 5 MiB here; the first MiB is SMEM. */
+		/* Preserve the stock exclusion up to its RMTFS shared region. */
 		reserved@fb00000 {
-			reg = <0x0fb00000 0x400000>;
+			reg = <0x0fb00000 0x280000>;
 			no-map;
+		};
+
+		rmtfs@fd80000 {
+			compatible = "qcom,rmtfs-mem";
+			reg = <0x0fd80000 0x180000>;
+			no-map;
+			qcom,client-id = <1>;
 		};
 
 		smem_region: smem@fa00000 {
@@ -282,6 +289,18 @@
 	status = "okay";
 };
 
+&modem {
+	compatible = "qcom,msm8926-mss-pil";
+
+	/delete-property/ qcom,ext-bhs-reg;
+
+	mx-supply = <&pm8226_l3>;
+	pll-supply = <&pm8226_l8>;
+	mss-supply = <&pm8226_s5>;
+
+	status = "okay";
+};
+
 &pm8226_vadc {
 	channel@6 {
 		reg = <VADC_VBAT_SNS>;
@@ -324,6 +343,13 @@
 &rpm_requests {
 	regulators {
 		compatible = "qcom,rpm-pm8226-regulators";
+
+		pm8226_s5: s5 {
+			regulator-min-microvolt = <1150000>;
+			regulator-max-microvolt = <1150000>;
+			regulator-allow-set-load;
+
+		};
 
 		pm8226_s4: s4 {
 			regulator-min-microvolt = <1800000>;
