@@ -494,7 +494,13 @@ static bool qcom_mpm_wake_covered(struct qcom_mpm_priv *priv)
 			if (data->domain == priv->domain->parent && data->hwirq < 32)
 				continue;
 			for (action = desc->action; action; action = action->next)
-				if (action->flags & IRQF_NO_SUSPEND)
+				/*
+				 * Clock event timers (IRQF_TIMER implies NO_SUSPEND) are shut
+				 * down by tick/timekeeping suspend; system RAM sleep wakes on
+				 * device and RTC interrupts, not on a Linux tick.
+				 */
+				if ((action->flags & IRQF_NO_SUSPEND) &&
+				    !(action->flags & __IRQF_TIMER))
 					required = true;
 		}
 		if (required && !qcom_mpm_irq_covered(priv, data)) {
