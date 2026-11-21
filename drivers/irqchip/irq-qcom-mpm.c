@@ -499,7 +499,12 @@ static bool qcom_mpm_wake_covered(struct qcom_mpm_priv *priv)
 		}
 		if (required && !qcom_mpm_irq_covered(priv, data)) {
 			covered = false;
-			break;
+			/* FX0 DIAGNOSTIC: name every interrupt that blocks system sleep. */
+			pr_info("FX0_MPM_UNCOVERED irq=%u hwirq=%lu domain=%s armed=%d disabled=%d flags=0x%x name=%s\n",
+				irq, data->hwirq, data->domain ? data->domain->name : "-",
+				irqd_is_wakeup_armed(data), irqd_irq_disabled(data),
+				desc->action ? desc->action->flags : 0,
+				desc->action && desc->action->name ? desc->action->name : "-");
 		}
 	}
 	rcu_read_unlock();
