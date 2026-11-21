@@ -545,6 +545,31 @@ int gic_cpu_quiesce_ppis(unsigned int gic_nr)
 	return 0;
 }
 
+int gic_cpu_enable_wake_sgi(unsigned int gic_nr, unsigned int sgi)
+{
+	struct gic_chip_data *gic;
+	void __iomem *dist, *cpu_if;
+	u32 before, after;
+
+	if (gic_nr >= CONFIG_ARM_GIC_MAX_NR || sgi > 7 || !irqs_disabled())
+		return -EINVAL;
+	gic = &gic_data[gic_nr];
+	dist = gic_data_dist_base(gic);
+	cpu_if = gic_data_cpu_base(gic);
+	if (!dist || !cpu_if)
+		return -ENODEV;
+
+	before = readl_relaxed(dist + GIC_DIST_ENABLE_SET);
+	if (!(before & BIT(sgi)))
+		writel_relaxed(BIT(sgi), dist + GIC_DIST_ENABLE_SET);
+	after = readl(dist + GIC_DIST_ENABLE_SET);
+	pr_info("GIC: CPU%u wake SGI%u enable %d->%d ctrl=%#x pmr=%#x\n",
+		raw_smp_processor_id(), sgi, !!(before & BIT(sgi)), !!(after & BIT(sgi)),
+		readl_relaxed(cpu_if + GIC_CPU_CTRL), readl_relaxed(cpu_if + GIC_CPU_PRIMASK));
+
+	return after & BIT(sgi) ? 0 : -EIO;
+}
+
 int gic_cpu_if_down(unsigned int gic_nr)
 {
 	void __iomem *cpu_base;

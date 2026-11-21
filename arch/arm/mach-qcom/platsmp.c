@@ -379,6 +379,8 @@ static const struct smp_operations smp_msm8660_ops __initconst = {
 CPU_METHOD_OF_DECLARE(qcom_smp, "qcom,gcc-msm8660", &smp_msm8660_ops);
 
 #ifdef CONFIG_HOTPLUG_CPU
+#define MSM8226_CPU3_WAKE_SGI	1
+
 static DEFINE_PER_CPU(bool, msm8226_boot_requested);
 
 static int msm8226_cpu_disable(unsigned int cpu)
@@ -404,8 +406,12 @@ static void msm8226_cpu_die(unsigned int cpu)
 	}
 	quiesced = !gic_cpu_quiesce_ppis(0);
 	if (cpu == QCOM_MSM8226_HOTPLUG_PROBE_CPU &&
-	    qcom_msm8226_hotplug_probe_active())
+	    qcom_msm8226_hotplug_probe_active()) {
+		/* The architecture's IPI teardown may have masked this SGI. */
+		if (quiesced)
+			quiesced = !gic_cpu_enable_wake_sgi(0, MSM8226_CPU3_WAKE_SGI);
 		qcom_msm8226_hotplug_probe(quiesced);
+	}
 	/* Recheck after SGI cleanup so a concurrent boot request cannot be lost. */
 	while (!smp_load_acquire(&per_cpu(msm8226_boot_requested, cpu))) {
 		ret = quiesced ? qcom_msm8226_cpu_collapse(cpu) : -EIO;
@@ -423,7 +429,7 @@ static int msm8226_boot_secondary(unsigned int cpu, struct task_struct *idle)
 	/* The downstream firmware wake path uses hardware SGI 1. */
 	if (cpu == QCOM_MSM8226_HOTPLUG_PROBE_CPU &&
 	    per_cpu(cold_boot_done, cpu) && qcom_msm8226_hotplug_probe_active())
-		return gic_send_cpu_wakeup_sgi(cpu, 1);
+		return gic_send_cpu_wakeup_sgi(cpu, MSM8226_CPU3_WAKE_SGI);
 #endif
 	return cortex_a7_boot_secondary(cpu, idle);
 }
