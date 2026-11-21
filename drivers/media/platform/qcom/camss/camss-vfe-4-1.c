@@ -74,6 +74,7 @@
 #define VFE_0_IRQ_STATUS_1		0x03c
 #define VFE_0_IRQ_STATUS_1_VIOLATION			BIT(7)
 #define VFE_0_IRQ_STATUS_1_BUS_BDG_HALT_ACK		BIT(8)
+#define VFE_0_IRQ_STATUS_1_BUS_OVERFLOW_ALL		GENMASK(15, 9)
 #define VFE_0_IRQ_STATUS_1_RDIn_SOF(n)			BIT((n) + 29)
 
 #define VFE_0_IRQ_COMPOSITE_MASK_0	0x40
@@ -916,6 +917,28 @@ static void vfe_violation_read(struct vfe_device *vfe)
  *
  * Return IRQ_HANDLED on success
  */
+/*
+ * vfe_wm_bus_overflow - Report a write master bus overflow
+ * @vfe: VFE device
+ * @wm: Write master index
+ *
+ * The overflow status of a write master re-asserts as soon as it is cleared
+ * while the condition lasts, which can keep the CPU in this handler. Report
+ * it and mask it until the write master is enabled again for a new stream.
+ */
+static void vfe_wm_bus_overflow(struct vfe_device *vfe, u8 wm)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	vfe_reg_clr(vfe, VFE_0_IRQ_MASK_1,
+		    VFE_0_IRQ_MASK_1_IMAGE_MASTER_n_BUS_OVERFLOW(wm));
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	dev_err_ratelimited(vfe->camss->dev,
+			    "VFE%u: write master %u bus overflow\n", vfe->id, wm);
+}
+
 static irqreturn_t vfe_isr(int irq, void *dev)
 {
 	struct vfe_device *vfe = dev;
@@ -937,6 +960,16 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	if (value1 & VFE_0_IRQ_STATUS_1_BUS_BDG_HALT_ACK)
 		vfe->isr_ops.halt_ack(vfe);
+
+	/* The status reports a masked overflow too: act on enabled ones only. */
+	if (value1 & VFE_0_IRQ_STATUS_1_BUS_OVERFLOW_ALL) {
+		u32 enabled = readl_relaxed(vfe->base + VFE_0_IRQ_MASK_1);
+
+		for (i = 0; i < MSM_VFE_IMAGE_MASTERS_NUM; i++)
+			if (value1 & enabled &
+			    VFE_0_IRQ_MASK_1_IMAGE_MASTER_n_BUS_OVERFLOW(i))
+				vfe_wm_bus_overflow(vfe, i);
+	}
 
 	for (i = VFE_LINE_RDI0; i <= VFE_LINE_PIX; i++)
 		if (value0 & VFE_0_IRQ_STATUS_0_line_n_REG_UPDATE(i)) {
