@@ -242,6 +242,7 @@ struct cpr_msm8926_data {
 	bool suspend_irq_disabled;
 	bool suspend_was_applied;
 	bool suspend_loop_was_enabled;
+	bool suspend_nack_sent;
 	u8 suspend_busy_steps;
 	struct cpr_msm8926_calibration calibration;
 	struct cpr_msm8926_voltage_plan plan;
@@ -371,8 +372,10 @@ static void cpr_record_busy(struct cpr_drv *drv, u8 *steps, unsigned int step)
 		*steps |= BIT(step);
 }
 
-static void cpr_ctl_disable(struct cpr_drv *drv, u8 *busy_steps)
+static bool cpr_ctl_disable(struct cpr_drv *drv, u8 *busy_steps)
 {
+	bool nack;
+
 	cpr_record_busy(drv, busy_steps, 0);
 	cpr_irq_set(drv, 0);
 	cpr_record_busy(drv, busy_steps, 1);
@@ -387,10 +390,19 @@ static void cpr_ctl_disable(struct cpr_drv *drv, u8 *busy_steps)
 	cpr_record_busy(drv, busy_steps, 4);
 	cpr_write(drv, REG_RBIF_CONT_ACK_CMD, 1);
 	cpr_record_busy(drv, busy_steps, 5);
-	cpr_write(drv, REG_RBIF_CONT_NACK_CMD, 1);
+	/*
+	 * Test whether the extra NACK reasserts BUSY after a completed
+	 * ACK. Preserve the existing sequence when an operation is busy
+	 * or when this is not the deep-suspend diagnostic.
+	 */
+	nack = !busy_steps || (*busy_steps & BIT(5));
+	if (nack)
+		cpr_write(drv, REG_RBIF_CONT_NACK_CMD, 1);
 	cpr_record_busy(drv, busy_steps, 6);
 	cpr_ctl_modify(drv, RBCPR_CTL_LOOP_EN, 0);
 	cpr_record_busy(drv, busy_steps, 7);
+
+	return nack;
 }
 
 static bool cpr_ctl_is_enabled(struct cpr_drv *drv)
@@ -2332,6 +2344,7 @@ int qcom_cpr_msm8926_suspend_prepare(struct device *dev, struct device *owner)
 		 !!(data->suspend_busy_steps & BIT(2)), !!(data->suspend_busy_steps & BIT(3)),
 		 !!(data->suspend_busy_steps & BIT(4)), !!(data->suspend_busy_steps & BIT(5)),
 		 !!(data->suspend_busy_steps & BIT(6)), !!(data->suspend_busy_steps & BIT(7)));
+	dev_info(drv->dev, "CPR suspend NACK sent=%u\n", data->suspend_nack_sent);
 	if (ret)
 		goto out;
 	ret = cpr_msm8926_check_cpu_rate(drv, drv->corner->freq);
@@ -2411,7 +2424,8 @@ static int cpr_pm_suspend(struct device *dev)
 	if (deep)
 		drv->msm8926->suspend_loop_was_enabled = cpr_ctl_is_enabled(drv);
 	drv->msm8926->suspend_busy_steps = 0;
-	cpr_ctl_disable(drv, deep ? &drv->msm8926->suspend_busy_steps : NULL);
+	drv->msm8926->suspend_nack_sent =
+		cpr_ctl_disable(drv, deep ? &drv->msm8926->suspend_busy_steps : NULL);
 	drv->msm8926->suspend_was_applied = drv->msm8926->applied;
 	drv->suspended = true;
 	/* Do not run feedback on assumed boot/resume voltage. */
