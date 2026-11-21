@@ -93,6 +93,7 @@ int qcom_scm_shm_bridge_enable(struct device *scm_dev);
 #define QCOM_SCM_BOOT_SET_ADDR_MC	0x11
 #define QCOM_SCM_BOOT_SET_REMOTE_STATE	0x0a
 #define QCOM_SCM_FLUSH_FLAG_MASK	0x3
+#define QCOM_SCM_CORE_HOTPLUGGED	0x10
 #define QCOM_SCM_BOOT_MAX_CPUS		4
 #define QCOM_SCM_BOOT_MC_FLAG_AARCH64	BIT(0)
 #define QCOM_SCM_BOOT_MC_FLAG_COLDBOOT	BIT(1)

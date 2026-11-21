@@ -65,6 +65,7 @@ int qcom_scm_legacy_fuse_read(u32 address, u64 *value);
 int qcom_scm_set_cold_boot_addr(void *entry);
 int qcom_scm_set_warm_boot_addr(void *entry);
 void qcom_scm_cpu_power_down(u32 flags);
+void qcom_scm_cpu_hotplug_power_down(void);
 int qcom_scm_set_remote_state(u32 state, u32 id);
 
 struct qcom_scm_pas_metadata {

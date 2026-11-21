@@ -455,6 +455,19 @@ int qcom_scm_set_cold_boot_addr(void *entry)
 }
 EXPORT_SYMBOL_GPL(qcom_scm_set_cold_boot_addr);
 
+static void qcom_scm_terminate_pc(u32 flags)
+{
+	struct qcom_scm_desc desc = {
+		.svc = QCOM_SCM_SVC_BOOT,
+		.cmd = QCOM_SCM_BOOT_TERMINATE_PC,
+		.args[0] = flags,
+		.arginfo = QCOM_SCM_ARGS(1),
+		.owner = ARM_SMCCC_OWNER_SIP,
+	};
+
+	qcom_scm_call_atomic(__scm ? __scm->dev : NULL, &desc, NULL);
+}
+
 /**
  * qcom_scm_cpu_power_down() - Power down the cpu
  * @flags:	Flags to flush cache
@@ -465,17 +478,15 @@ EXPORT_SYMBOL_GPL(qcom_scm_set_cold_boot_addr);
  */
 void qcom_scm_cpu_power_down(u32 flags)
 {
-	struct qcom_scm_desc desc = {
-		.svc = QCOM_SCM_SVC_BOOT,
-		.cmd = QCOM_SCM_BOOT_TERMINATE_PC,
-		.args[0] = flags & QCOM_SCM_FLUSH_FLAG_MASK,
-		.arginfo = QCOM_SCM_ARGS(1),
-		.owner = ARM_SMCCC_OWNER_SIP,
-	};
-
-	qcom_scm_call_atomic(__scm ? __scm->dev : NULL, &desc, NULL);
+	qcom_scm_terminate_pc(flags & QCOM_SCM_FLUSH_FLAG_MASK);
 }
 EXPORT_SYMBOL_GPL(qcom_scm_cpu_power_down);
+
+void qcom_scm_cpu_hotplug_power_down(void)
+{
+	qcom_scm_terminate_pc(QCOM_SCM_CORE_HOTPLUGGED);
+}
+EXPORT_SYMBOL_GPL(qcom_scm_cpu_hotplug_power_down);
 
 int qcom_scm_set_remote_state(u32 state, u32 id)
 {
