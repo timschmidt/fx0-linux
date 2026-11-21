@@ -911,8 +911,17 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	vfe->res->hw_ops->isr_read(vfe, &value0, &value1);
 
-	dev_dbg(vfe->camss->dev, "VFE: status0 = 0x%08x, status1 = 0x%08x\n",
-		value0, value1);
+	{
+		static atomic_t fx0_vfe_irqs = ATOMIC_INIT(0);
+		static u32 fx0_or0, fx0_or1;
+
+		fx0_or0 |= value0;
+		fx0_or1 |= value1;
+		if (!(atomic_inc_return(&fx0_vfe_irqs) & 0xffff))
+			dev_info(vfe->camss->dev,
+				 "FX0_VFE_STORM n=%d status0=0x%08x status1=0x%08x or0=0x%08x or1=0x%08x\n",
+				 atomic_read(&fx0_vfe_irqs), value0, value1, fx0_or0, fx0_or1);
+	}
 
 	if (value0 & VFE_0_IRQ_STATUS_0_RESET_ACK)
 		vfe->isr_ops.reset_ack(vfe);
