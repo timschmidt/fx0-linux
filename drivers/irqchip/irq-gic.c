@@ -838,14 +838,14 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	return IRQ_SET_MASK_OK_DONE;
 }
 
-static void gic_ipi_send_mask(struct irq_data *d, const struct cpumask *mask)
+static void gic_send_sgi_mask(unsigned int sgi, const struct cpumask *mask)
 {
 	int cpu;
 	unsigned long flags, map = 0;
 
 	if (unlikely(nr_cpu_ids == 1)) {
 		/* Only one CPU? let's do a self-IPI... */
-		writel_relaxed(2 << 24 | d->hwirq,
+		writel_relaxed(2 << 24 | sgi,
 			       gic_data_dist_base(&gic_data[0]) + GIC_DIST_SOFTINT);
 		return;
 	}
@@ -863,9 +863,24 @@ static void gic_ipi_send_mask(struct irq_data *d, const struct cpumask *mask)
 	dmb(ishst);
 
 	/* this always happens on GIC0 */
-	writel_relaxed(map << 16 | d->hwirq, gic_data_dist_base(&gic_data[0]) + GIC_DIST_SOFTINT);
+	writel_relaxed(map << 16 | sgi, gic_data_dist_base(&gic_data[0]) + GIC_DIST_SOFTINT);
 
 	gic_unlock_irqrestore(flags);
+}
+
+static void gic_ipi_send_mask(struct irq_data *d, const struct cpumask *mask)
+{
+	gic_send_sgi_mask(d->hwirq, mask);
+}
+
+int gic_send_cpu_wakeup_sgi(unsigned int cpu, unsigned int sgi)
+{
+	if (cpu >= nr_cpu_ids || cpu >= NR_GIC_CPU_IF || sgi > 7 ||
+	    !gic_data_dist_base(&gic_data[0]) || !READ_ONCE(gic_cpu_map[cpu]))
+		return -EINVAL;
+
+	gic_send_sgi_mask(sgi, cpumask_of(cpu));
+	return 0;
 }
 
 static int gic_starting_cpu(unsigned int cpu)

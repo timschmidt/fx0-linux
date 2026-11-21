@@ -420,6 +420,10 @@ static int msm8226_boot_secondary(unsigned int cpu, struct task_struct *idle)
 #ifdef CONFIG_HOTPLUG_CPU
 	/* Publish the request before the bring-up path sends its boot SGI. */
 	smp_store_release(&per_cpu(msm8226_boot_requested, cpu), true);
+	/* The downstream firmware wake path uses hardware SGI 1. */
+	if (cpu == QCOM_MSM8226_HOTPLUG_PROBE_CPU &&
+	    per_cpu(cold_boot_done, cpu) && qcom_msm8226_hotplug_probe_active())
+		return gic_send_cpu_wakeup_sgi(cpu, 1);
 #endif
 	return cortex_a7_boot_secondary(cpu, idle);
 }
