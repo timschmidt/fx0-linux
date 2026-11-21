@@ -830,3 +830,23 @@
 		};
 	};
 };
+
+/*
+ * FX0 DIAGNOSTIC: the multimedia clock controller and the USB HS PHY only
+ * need the crystal while the application processor runs. Use the active-only
+ * RPM XO so their votes do not keep XO on in the RPM sleep set.
+ */
+&mmcc {
+	clocks = <&rpmcc RPM_SMD_XO_A_CLK_SRC>,
+		 <&gcc GCC_MMSS_GPLL0_CLK_SRC>,
+		 <&gcc GPLL0_VOTE>,
+		 <&gcc GPLL1_VOTE>,
+		 <&rpmcc RPM_SMD_GFX3D_CLK_SRC>,
+		 <&mdss_dsi0_phy DSI_PIXEL_PLL_CLK>,
+		 <&mdss_dsi0_phy DSI_BYTE_PLL_CLK>;
+};
+
+&usb_hs_phy {
+	clocks = <&rpmcc RPM_SMD_XO_A_CLK_SRC>,
+		 <&gcc GCC_USB2A_PHY_SLEEP_CLK>;
+};
