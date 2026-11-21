@@ -12,6 +12,7 @@ struct cpr_msm8926_voltage_plan {
 	int ceiling_uV[3];
 	int initial_uV[3];
 	int mx_min_uV[3];
+	int apc_ceiling_uV;
 	int bootstrap_mx_uV;
 };
 
@@ -104,7 +105,8 @@ cpr_msm8926_plan_voltages(const struct cpr_msm8926_calibration *calibration,
 			return ret;
 		bootstrap_apc_uV = max(bootstrap_apc_uV, result.ceiling_uV[i]);
 	}
-	result.bootstrap_mx_uV = DIV_ROUND_UP(bootstrap_apc_uV, 12500) * 12500;
+	result.apc_ceiling_uV = bootstrap_apc_uV;
+	result.bootstrap_mx_uV = DIV_ROUND_UP(result.apc_ceiling_uV, 12500) * 12500;
 	if (result.bootstrap_mx_uV > mx_max_uV)
 		return -ERANGE;
 	ret = cpr_msm8926_check_voltage(mx, mx_count, result.bootstrap_mx_uV);

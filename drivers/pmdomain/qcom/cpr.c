@@ -2294,6 +2294,7 @@ int qcom_cpr_msm8926_suspend_attach(struct device *dev, struct device *owner)
 		.aux = data->aux_clk,
 		.pll = data->pll_clk,
 		.apcs = data->apcs,
+		.cover_apc_uv = data->plan.apc_ceiling_uV,
 	};
 	data->suspend_owner = owner;
 	return 0;
