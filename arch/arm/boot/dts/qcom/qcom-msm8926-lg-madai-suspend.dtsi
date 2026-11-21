@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-/* Experimental full-system suspend target; physical acceptance is separate. */
-#include "qcom-msm8926-lg-madai-cpr.dts"
+/* MSM8226 system sleep: MPM wake routing and the system-sleep coordinator. */
 
 &rpm {
 	mpm: interrupt-controller {
