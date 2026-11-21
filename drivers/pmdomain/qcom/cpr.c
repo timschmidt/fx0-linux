@@ -10,6 +10,7 @@
 #include <linux/debugfs.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/limits.h>
 #include <linux/list.h>
 #include <linux/init.h>
@@ -240,6 +241,9 @@ struct cpr_msm8926_data {
 	struct device *suspend_owner;
 	bool suspend_irq_disabled;
 	bool suspend_was_applied;
+	bool suspend_loop_was_enabled;
+	bool suspend_busy_before_disable;
+	bool suspend_busy_after_disable;
 	struct cpr_msm8926_calibration calibration;
 	struct cpr_msm8926_voltage_plan plan;
 	bool apc_enabled;
@@ -2279,6 +2283,9 @@ int qcom_cpr_msm8926_suspend_prepare(struct device *dev, struct device *owner)
 {
 	struct cpr_drv *drv = dev_get_drvdata(dev);
 	struct cpr_msm8926_data *data = drv->msm8926;
+	unsigned int timeout_us = 2 * drv->desc->timer_delay_us;
+	bool busy_on_entry;
+	ktime_t start;
 	u32 value;
 	int ret;
 
@@ -2295,8 +2302,17 @@ int qcom_cpr_msm8926_suspend_prepare(struct device *dev, struct device *owner)
 		ret = -EIO;
 		goto out;
 	}
+	/* Allow two measurement intervals for a pending CPR result to drain. */
+	busy_on_entry = cpr_ctl_is_busy(drv);
+	start = ktime_get();
 	ret = readl_poll_timeout(drv->base + REG_RBCPR_RESULT_0, value,
-				 !(value & RBCPR_RESULT0_BUSY_MASK), 1, 1000);
+				 !(value & RBCPR_RESULT0_BUSY_MASK), 1, timeout_us);
+	dev_info(drv->dev,
+		 "CPR suspend drain: loop=%u busy before_disable=%u after_disable=%u late_entry=%u late_exit=%u elapsed_us=%lld limit_us=%u ret=%d\n",
+		 data->suspend_loop_was_enabled, data->suspend_busy_before_disable,
+		 data->suspend_busy_after_disable, busy_on_entry,
+		 !!(value & RBCPR_RESULT0_BUSY_MASK),
+		 ktime_us_delta(ktime_get(), start), timeout_us, ret);
 	if (ret)
 		goto out;
 	ret = cpr_msm8926_check_cpu_rate(drv, drv->corner->freq);
@@ -2366,13 +2382,20 @@ static int cpr_pm_prepare(struct device *dev)
 static int cpr_pm_suspend(struct device *dev)
 {
 	struct cpr_drv *drv = dev_get_drvdata(dev);
+	bool deep = pm_suspend_target_state == PM_SUSPEND_MEM;
 
 	if (!drv->msm8926)
 		return 0;
 	guard(mutex)(&drv->lock);
 	if (drv->corner && cpr_is_allowed(drv))
 		cpr_corner_save(drv, drv->corner);
+	if (deep) {
+		drv->msm8926->suspend_loop_was_enabled = cpr_ctl_is_enabled(drv);
+		drv->msm8926->suspend_busy_before_disable = cpr_ctl_is_busy(drv);
+	}
 	cpr_ctl_disable(drv);
+	if (deep)
+		drv->msm8926->suspend_busy_after_disable = cpr_ctl_is_busy(drv);
 	drv->msm8926->suspend_was_applied = drv->msm8926->applied;
 	drv->suspended = true;
 	/* Do not run feedback on assumed boot/resume voltage. */
