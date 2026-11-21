@@ -229,12 +229,12 @@
 
 		pm8226_l3_ao: l3-ao {
 			regulator-min-microvolt = <750000>;
-			regulator-max-microvolt = <1337500>;
+			regulator-max-microvolt = <1287500>;
 		};
 
 		pm8226_l3_so: l3-so {
 			regulator-min-microvolt = <750000>;
-			regulator-max-microvolt = <1337500>;
+			regulator-max-microvolt = <1287500>;
 		};
 	};
 };
