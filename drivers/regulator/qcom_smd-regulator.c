@@ -99,6 +99,13 @@ static struct rpm_reg_vote rpm_reg_pair_sleep_vote(struct rpm_reg_pair *pair,
 	const struct rpm_reg_vote *sleep_only = &pair->votes[2];
 	u64 load = (u64)vote.load + sleep_only->load;
 
+	/*
+	 * A disabled both-set voter keeps its cached voltage for its next
+	 * enable, but the RPM ignores the voltage of a disabled request. It must
+	 * not raise the request that the sleep-only voter keeps enabled.
+	 */
+	if (!vote.enabled)
+		vote.uV = 0;
 	if (pair->sleep_enable_valid)
 		vote.enabled = pair->sleep_enabled;
 	if (pair->sleep_voltage_valid)
