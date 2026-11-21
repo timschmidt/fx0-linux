@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* MSM8226 system sleep: device preparation, transport handoff and CPU/L2 entry. */
-#include <linux/cache.h>
 #include <linux/cpu.h>
 #include <linux/cpu_pm.h>
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -25,8 +23,6 @@
 #include <asm/outercache.h>
 #include <asm/smp_plat.h>
 #include <asm/suspend.h>
-
-#include "msm8226-hotplug-probe.h"
 
 #define MSM8226_CPUS 4
 #define MSM8226_SLEEP_STATUS 0x8
@@ -54,81 +50,14 @@ static struct msm8226_pm *msm8226_pm;
 /* SPM is built in, has no unregister path and suppresses manual unbinding. */
 static struct spm_driver_data *msm8226_cpu_spm[MSM8226_CPUS];
 
-static bool hotplug_probe;
-module_param(hotplug_probe, bool, 0400);
-MODULE_PARM_DESC(hotplug_probe, "Park CPU3 at the firmware warm vector until reboot");
-
-/* Firmware enters with the MMU off and writes the probe word directly. */
-u32 msm8226_warm_probe_state __cacheline_aligned;
-
-static int msm8226_get_probe_state(char *buf, const struct kernel_param *param)
-{
-	sync_cache_r(&msm8226_warm_probe_state);
-	return sprintf(buf, "%u\n", READ_ONCE(msm8226_warm_probe_state));
-}
-
-static const struct kernel_param_ops msm8226_probe_state_ops = {
-	.get = msm8226_get_probe_state,
-};
-module_param_cb(hotplug_probe_state, &msm8226_probe_state_ops, NULL, 0400);
-
-int qcom_msm8226_set_warm_boot_addr(void *resume)
-{
-	struct device_node *node;
-
-	/* Both the idle driver and the coordinator can register this vector. */
-	if (hotplug_probe) {
-		node = of_find_compatible_node(NULL, NULL, "qcom,msm8226-system-pm");
-		if (of_device_is_available(node))
-			resume = msm8226_warm_probe_entry;
-		of_node_put(node);
-	}
-
-	return qcom_scm_set_warm_boot_addr(resume);
-}
-
 bool qcom_msm8226_pm_active(void)
 {
 	return !!READ_ONCE(msm8226_pm);
 }
 
-bool qcom_msm8226_hotplug_probe_active(void)
-{
-	return hotplug_probe && qcom_msm8226_pm_active();
-}
-
-static void msm8226_publish_probe_state(u32 state)
-{
-	WRITE_ONCE(msm8226_warm_probe_state, state);
-	sync_cache_w(&msm8226_warm_probe_state);
-	dsb(sy);
-}
-
-void __noreturn qcom_msm8226_hotplug_probe(bool quiesced)
-{
-	struct spm_driver_data *spm =
-		READ_ONCE(msm8226_cpu_spm[QCOM_MSM8226_HOTPLUG_PROBE_CPU]);
-	u32 failure = MSM8226_PROBE_GIC_ERROR;
-
-	if (quiesced) {
-		failure = MSM8226_PROBE_SPM_ERROR;
-		if (!spm_msm8226_cpu_ready(spm) &&
-		    !spm_set_low_power_mode(spm, PM_SLEEP_MODE_SPC)) {
-			msm8226_publish_probe_state(MSM8226_PROBE_ARMED);
-			flush_cache_louis();
-			qcom_scm_cpu_hotplug_power_down();
-			spm_set_low_power_mode(spm, PM_SLEEP_MODE_STBY);
-			failure = MSM8226_PROBE_SCM_RETURNED;
-		}
-	}
-	msm8226_publish_probe_state(failure);
-	for (;;)
-		asm volatile("wfi" ::: "memory");
-}
-
 static int msm8226_core_finisher(unsigned long arg)
 {
-	qcom_scm_cpu_power_down(QCOM_SCM_CPU_PWR_DOWN_L2_ON);
+	qcom_scm_cpu_hotplug_power_down();
 	return -EAGAIN;
 }
 
@@ -151,6 +80,8 @@ int qcom_msm8226_cpu_collapse(unsigned int cpu)
 		ret = cpu_suspend(0, msm8226_core_finisher);
 	restore = spm_set_low_power_mode(spm, PM_SLEEP_MODE_STBY);
 	cpu_pm_exit();
+	if (!ret && !restore)
+		pr_info("CPU%u: MSM8226 hotplug suspend context restored\n", cpu);
 	return ret ?: restore;
 }
 
@@ -474,7 +405,7 @@ static int msm8226_pm_probe(struct platform_device *pdev)
 	ret = qcom_cpr_msm8926_suspend_attach(&pm->cpr->dev, dev);
 	if (ret)
 		goto unregister_rpm;
-	ret = qcom_msm8226_set_warm_boot_addr(cpu_resume_arm);
+	ret = qcom_scm_set_warm_boot_addr(cpu_resume_arm);
 	if (ret)
 		goto detach_cpr;
 	cpus_write_lock();
@@ -488,8 +419,7 @@ static int msm8226_pm_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, pm);
 	WRITE_ONCE(msm8226_pm, pm);
 	cpus_write_unlock();
-	if (!hotplug_probe)
-		schedule_work(&pm->install_work);
+	schedule_work(&pm->install_work);
 	return 0;
 
 detach_cpr:

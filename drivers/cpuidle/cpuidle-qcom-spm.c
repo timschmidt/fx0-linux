@@ -17,7 +17,6 @@
 #include <linux/cpuidle.h>
 #include <linux/cpu_pm.h>
 #include <linux/firmware/qcom/qcom_scm.h>
-#include <soc/qcom/msm8226-pm.h>
 #include <soc/qcom/spm.h>
 
 #include <asm/proc-fns.h>
@@ -157,7 +156,7 @@ static int spm_cpuidle_drv_probe(struct platform_device *pdev)
 			return PTR_ERR(spm);
 	}
 
-	ret = qcom_msm8226_set_warm_boot_addr(cpu_resume_arm);
+	ret = qcom_scm_set_warm_boot_addr(cpu_resume_arm);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "set warm boot addr failed");
 

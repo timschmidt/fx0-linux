@@ -164,8 +164,16 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
 		 * CPU was successfully started, wait for it
 		 * to come online or time out.
 		 */
-		wait_for_completion_timeout(&cpu_running,
-						 msecs_to_jiffies(1000));
+		if (!wait_for_completion_timeout(&cpu_running, msecs_to_jiffies(1000)) &&
+		    smp_ops.smp_cancel_secondary_boot &&
+		    !smp_ops.smp_cancel_secondary_boot(cpu)) {
+			/*
+			 * The secondary owns startup. A normal error return
+			 * could let it come online after hotplug unwinds.
+			 */
+			if (!wait_for_completion_timeout(&cpu_running, msecs_to_jiffies(5000)))
+				panic("CPU%u: secondary stalled after accepting startup\n", cpu);
+		}
 
 		if (!cpu_online(cpu)) {
 			pr_crit("CPU%u: failed to come online\n", cpu);
@@ -315,6 +323,21 @@ void arch_cpuhp_cleanup_dead_cpu(unsigned int cpu)
  * of the other hotplug-cpu capable cores, so presumably coming
  * out of idle fixes this.
  */
+void __noreturn arm_secondary_restart(void)
+{
+	/*
+	 * Resume the idle task with a fresh stack and run the secondary
+	 * initialization, including the CPU hotplug starting callbacks.
+	 */
+	__asm__("mov	sp, %0\n"
+	"	mov	fp, #0\n"
+	"	b	secondary_start_kernel"
+		:
+		: "r" (task_stack_page(current) + THREAD_SIZE - 8));
+
+	unreachable();
+}
+
 void __noreturn arch_cpu_idle_dead(void)
 {
 	unsigned int cpu = smp_processor_id();
@@ -364,18 +387,7 @@ void __noreturn arch_cpu_idle_dead(void)
 	pr_warn("CPU%u: smp_ops.cpu_die() returned, trying to resuscitate\n",
 		cpu);
 
-	/*
-	 * Do not return to the idle loop - jump back to the secondary
-	 * cpu initialisation.  There's some initialisation which needs
-	 * to be repeated to undo the effects of taking the CPU offline.
-	 */
-	__asm__("mov	sp, %0\n"
-	"	mov	fp, #0\n"
-	"	b	secondary_start_kernel"
-		:
-		: "r" (task_stack_page(current) + THREAD_SIZE - 8));
-
-	unreachable();
+	arm_secondary_restart();
 }
 #endif /* CONFIG_HOTPLUG_CPU */
 
