@@ -4625,12 +4625,15 @@ static const struct of_device_id camss_dt_match[] = {
 
 MODULE_DEVICE_TABLE(of, camss_dt_match);
 
-static int camss_find_sleep_line(struct camss *camss, struct vfe_line **line)
+/* Lockdep subclasses bound the capture queues locked together for sleep. */
+#define CAMSS_SLEEP_LINES_MAX	8
+
+static int camss_find_sleep_lines(struct camss *camss, struct vfe_line **lines)
 {
 	unsigned int i, j;
+	int num = 0;
 
 	lockdep_assert_held(&camss->pipeline_lock);
-	*line = NULL;
 	for (i = 0; i < camss->res->vfe_num; i++) {
 		struct vfe_device *vfe = &camss->vfe[i];
 
@@ -4639,55 +4642,102 @@ static int camss_find_sleep_line(struct camss *camss, struct vfe_line **line)
 
 			if (!active->subdev.s_stream_enabled)
 				continue;
-			/* MSM8226 uses a Gen1 VFE. Retain one raw route at a time. */
-			if (*line || active->id == VFE_LINE_PIX)
+			/* MSM8226 uses a Gen1 VFE. Retain raw routes only. */
+			if (active->id == VFE_LINE_PIX ||
+			    num == CAMSS_SLEEP_LINES_MAX)
 				return -EBUSY;
-			*line = active;
+			lines[num++] = active;
 		}
 	}
-	return 0;
+	return num;
+}
+
+static void camss_lock_sleep_lines(struct vfe_line **lines, unsigned int num)
+{
+	unsigned int i;
+
+	for (i = 0; i < num; i++)
+		mutex_lock_nested(&lines[i]->video_out.q_lock, i);
+}
+
+static void camss_unlock_sleep_lines(struct vfe_line **lines, unsigned int num)
+{
+	while (num--)
+		mutex_unlock(&lines[num]->video_out.q_lock);
+}
+
+static void camss_resume_lines(struct vfe_line **lines, unsigned int num)
+{
+	unsigned int i;
+
+	for (i = 0; i < num; i++)
+		if (lines[i]->sleeping)
+			msm_video_resume(lines[i]);
 }
 
 static int camss_prepare(struct device *dev)
 {
 	struct camss *camss = dev_get_drvdata(dev);
-	struct vfe_line *line, *current_line;
-	int ret;
+	struct vfe_line *lines[CAMSS_SLEEP_LINES_MAX];
+	struct vfe_line *current_lines[CAMSS_SLEEP_LINES_MAX];
+	unsigned int first, last;
+	int num, ret;
 
 	if (!of_device_is_compatible(dev->of_node, "qcom,msm8226-camss"))
 		return 0;
 
 	mutex_lock(&camss->pipeline_lock);
-	ret = camss_find_sleep_line(camss, &line);
+	num = camss_find_sleep_lines(camss, lines);
 	mutex_unlock(&camss->pipeline_lock);
-	if (ret || !line)
-		return ret;
+	if (num <= 0)
+		return num;
 
 	/* Follow the lock order used by STREAMON and STREAMOFF. */
-	mutex_lock(&line->video_out.q_lock);
+	camss_lock_sleep_lines(lines, num);
 	mutex_lock(&camss->pipeline_lock);
-	ret = camss_find_sleep_line(camss, &current_line);
-	if (!ret)
-		ret = line == current_line ? msm_video_suspend(line) : -EBUSY;
+	ret = camss_find_sleep_lines(camss, current_lines);
+	if (ret == num && !memcmp(lines, current_lines, num * sizeof(*lines)))
+		ret = 0;
+	else if (ret >= 0)
+		ret = -EBUSY;
+
+	/* The lines are in VFE order, so the routes of each VFE are adjacent. */
+	for (first = 0; !ret && first < num; first = last) {
+		struct vfe_device *vfe = to_vfe(lines[first]);
+
+		for (last = first + 1; last < num; last++)
+			if (to_vfe(lines[last]) != vfe)
+				break;
+		ret = msm_video_suspend(vfe, &lines[first], last - first);
+	}
+	/* The PM core does not complete a device whose prepare failed. */
+	if (ret)
+		camss_resume_lines(lines, num);
 	mutex_unlock(&camss->pipeline_lock);
-	mutex_unlock(&line->video_out.q_lock);
+	camss_unlock_sleep_lines(lines, num);
 	return ret;
 }
 
 static void camss_complete(struct device *dev)
 {
 	struct camss *camss = dev_get_drvdata(dev);
-	struct vfe_line *line = camss->sleep_line;
+	struct vfe_line *lines[CAMSS_SLEEP_LINES_MAX];
+	unsigned int i, j, num = 0;
 
-	if (!line)
+	for (i = 0; i < camss->res->vfe_num; i++)
+		for (j = 0; j < camss->vfe[i].res->line_num; j++)
+			if (camss->vfe[i].line[j].sleeping &&
+			    num < CAMSS_SLEEP_LINES_MAX)
+				lines[num++] = &camss->vfe[i].line[j];
+	if (!num)
 		return;
 
 	/* The sensor and bus suppliers have completed their resume callbacks. */
-	mutex_lock(&line->video_out.q_lock);
+	camss_lock_sleep_lines(lines, num);
 	mutex_lock(&camss->pipeline_lock);
-	msm_video_resume(line);
+	camss_resume_lines(lines, num);
 	mutex_unlock(&camss->pipeline_lock);
-	mutex_unlock(&line->video_out.q_lock);
+	camss_unlock_sleep_lines(lines, num);
 }
 
 static int __maybe_unused camss_runtime_suspend(struct device *dev)

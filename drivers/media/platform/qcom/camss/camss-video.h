@@ -26,6 +26,7 @@ struct camss_buffer {
 };
 
 struct camss_video;
+struct vfe_device;
 struct vfe_line;
 
 struct camss_video_ops {
@@ -58,7 +59,8 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 
 void msm_video_unregister(struct camss_video *video);
 
-int msm_video_suspend(struct vfe_line *line);
+int msm_video_suspend(struct vfe_device *vfe, struct vfe_line **lines,
+		      unsigned int num);
 void msm_video_resume(struct vfe_line *line);
 
 #endif /* QC_MSM_CAMSS_VIDEO_H */

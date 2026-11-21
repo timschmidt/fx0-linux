@@ -96,6 +96,10 @@ struct vfe_line {
 	struct vfe_output output;
 	const struct camss_format_info *formats;
 	unsigned int nformats;
+	/* Capture retained across system sleep, see camss_prepare(). */
+	struct list_head sleep_buffers;
+	unsigned int sleep_sequence;
+	bool sleeping;
 };
 
 struct vfe_device;

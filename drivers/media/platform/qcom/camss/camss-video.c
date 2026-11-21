@@ -388,28 +388,28 @@ static void video_unprepare_streaming(struct vb2_queue *q)
 static void video_suspend_hold_buffers(struct vfe_line *line)
 {
 	struct vfe_device *vfe = to_vfe(line);
-	struct camss *camss = vfe->camss;
 	struct vfe_output *output = &line->output;
 	unsigned long flags;
 	unsigned int active;
 
 	/* The bus is halted and no IRQ handler can still return a buffer. */
 	spin_lock_irqsave(&vfe->output_lock, flags);
-	INIT_LIST_HEAD(&camss->sleep_buffers);
-	list_splice_init(&output->pending_bufs, &camss->sleep_buffers);
+	INIT_LIST_HEAD(&line->sleep_buffers);
+	list_splice_init(&output->pending_bufs, &line->sleep_buffers);
 	active = output->gen1.active_buf;
 	if (output->buf[!active])
-		list_add(&output->buf[!active]->queue, &camss->sleep_buffers);
+		list_add(&output->buf[!active]->queue, &line->sleep_buffers);
 	if (output->buf[active])
-		list_add(&output->buf[active]->queue, &camss->sleep_buffers);
+		list_add(&output->buf[active]->queue, &line->sleep_buffers);
 	output->buf[0] = NULL;
 	output->buf[1] = NULL;
-	camss->sleep_sequence = output->sequence;
+	line->sleep_sequence = output->sequence;
 	if (output->last_buffer) {
-		list_add(&output->last_buffer->queue, &camss->sleep_buffers);
-		camss->sleep_sequence = output->last_buffer->vb.sequence;
+		list_add(&output->last_buffer->queue, &line->sleep_buffers);
+		line->sleep_sequence = output->last_buffer->vb.sequence;
 		output->last_buffer = NULL;
 	}
+	line->sleeping = true;
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 }
 
@@ -434,52 +434,84 @@ static unsigned int video_route_vfe_power_refs(struct camss_video *video,
 	return refs;
 }
 
-int msm_video_suspend(struct vfe_line *line)
+/*
+ * Check that @line is a streaming route whose pipeline holds no extra users
+ * and return the VFE power references the route holds.
+ */
+static int video_suspend_route_refs(struct vfe_line *line)
 {
 	struct camss_video *video = &line->video_out;
-	struct vfe_device *vfe = to_vfe(line);
-	struct camss *camss = video->camss;
-	struct media_device *mdev = &camss->media_dev;
-	bool exclusive_power, sole_stream;
-	unsigned int refs;
-	int ret;
+	struct media_device *mdev = &video->camss->media_dev;
+	bool exclusive;
 
 	lockdep_assert_held(&video->q_lock);
-	lockdep_assert_held(&camss->pipeline_lock);
 
 	mutex_lock(&mdev->graph_mutex);
-	exclusive_power = line->subdev.entity.use_count == 1;
+	exclusive = line->subdev.entity.use_count == 1;
 	mutex_unlock(&mdev->graph_mutex);
-	refs = video_route_vfe_power_refs(video, vfe);
-	mutex_lock(&vfe->power_lock);
-	exclusive_power = exclusive_power && vfe->power_count == refs;
-	mutex_unlock(&vfe->power_lock);
-	mutex_lock(&vfe->stream_lock);
-	sole_stream = vfe->stream_count == 1;
-	mutex_unlock(&vfe->stream_lock);
-	if (!video->pipeline_powered || !video->vb2_q.start_streaming_called ||
-	    !exclusive_power || !sole_stream)
+	if (!exclusive || !video->pipeline_powered ||
+	    !video->vb2_q.start_streaming_called)
 		return -EBUSY;
 
-	video_pipeline_stop_subdevs(video, NULL);
+	return video_route_vfe_power_refs(video, to_vfe(line));
+}
+
+/*
+ * Stop every streaming route of @vfe, halt the VFE once and hold the queued
+ * buffers of each route until msm_video_resume(). @lines must hold all the
+ * streaming lines of @vfe.
+ */
+int msm_video_suspend(struct vfe_device *vfe, struct vfe_line **lines,
+		      unsigned int num)
+{
+	unsigned int i, refs = 0;
+	bool exclusive;
+	int ret;
+
+	lockdep_assert_held(&vfe->camss->pipeline_lock);
+
+	for (i = 0; i < num; i++) {
+		ret = video_suspend_route_refs(lines[i]);
+		if (ret < 0)
+			return ret;
+		refs += ret;
+	}
+
+	mutex_lock(&vfe->power_lock);
+	exclusive = vfe->power_count == refs;
+	mutex_unlock(&vfe->power_lock);
+	mutex_lock(&vfe->stream_lock);
+	exclusive = exclusive && vfe->stream_count == num;
+	mutex_unlock(&vfe->stream_lock);
+	if (!exclusive)
+		return -EBUSY;
+
+	for (i = 0; i < num; i++)
+		video_pipeline_stop_subdevs(&lines[i]->video_out, NULL);
 	ret = vfe_gen1_halt(vfe);
 	if (ret) {
-		/* Drop the pipeline's power reference before releasing buffers. */
-		video_pipeline_power_put(video);
+		/* Drop the pipeline power references before releasing buffers. */
+		for (i = 0; i < num; i++)
+			video_pipeline_power_put(&lines[i]->video_out);
 		synchronize_irq(vfe->irq);
-		video->ops->flush_buffers(video, VB2_BUF_STATE_ERROR);
-		vb2_queue_error(&video->vb2_q);
+		for (i = 0; i < num; i++) {
+			struct camss_video *video = &lines[i]->video_out;
+
+			video->ops->flush_buffers(video, VB2_BUF_STATE_ERROR);
+			vb2_queue_error(&video->vb2_q);
+		}
 		return ret;
 	}
 	synchronize_irq(vfe->irq);
-	video_suspend_hold_buffers(line);
-	camss->sleep_line = line;
+	for (i = 0; i < num; i++)
+		video_suspend_hold_buffers(lines[i]);
 
 	/* The bus already acknowledged halt, so power down without another. */
 	mutex_lock(&vfe->power_lock);
 	vfe->was_streaming = false;
 	mutex_unlock(&vfe->power_lock);
-	video_pipeline_power_put(video);
+	for (i = 0; i < num; i++)
+		video_pipeline_power_put(&lines[i]->video_out);
 	return 0;
 }
 
@@ -498,12 +530,12 @@ void msm_video_resume(struct vfe_line *line)
 	video->pipeline_powered = !ret;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
-	list_splice_init(&camss->sleep_buffers, &line->output.pending_bufs);
+	list_splice_init(&line->sleep_buffers, &line->output.pending_bufs);
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
 	if (!ret)
 		ret = video_pipeline_start_subdevs(video);
-	camss->sleep_line = NULL;
+	line->sleeping = false;
 	if (ret) {
 		dev_err(camss->dev, "Failed to restart capture after sleep: %d\n", ret);
 		video_pipeline_power_put(video);
