@@ -425,7 +425,7 @@ static bool intbufs_retain_scratch(struct venus_inst *inst)
 	dev_dbg(core->dev, "decoder scratch kept? type %#x size %zu vs req %d type %#x size %u count %u\n",
 		scratch->type, scratch->size, ret, req.type, req.size, req.count_actual);
 	return !ret && scratch->type == HFI_BUFFER_INTERNAL_SCRATCH(ver) &&
-		req.type == scratch->type && req.size == scratch->size && req.count_actual == 1;
+		req.type == scratch->type && req.size <= scratch->size && req.count_actual == 1;
 }
 
 int venus_helper_intbufs_realloc(struct venus_inst *inst)
