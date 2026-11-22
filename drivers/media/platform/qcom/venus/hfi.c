@@ -3,7 +3,6 @@
  * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  * Copyright (C) 2017 Linaro Ltd.
  */
-#include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
 #include <linux/list.h>
@@ -331,10 +330,7 @@ int hfi_session_continue(struct venus_inst *inst)
 	if (test_bit(0, &inst->core->sys_error))
 		return -EIO;
 
-	/* MSM8226 decodes without continue-data-transfer and pauses at a sequence change. */
-	if (core->res->hfi_version == HFI_VERSION_1XX &&
-	    !(inst->session_type == VIDC_SESSION_TYPE_DEC &&
-	      of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus")))
+	if (core->res->hfi_version == HFI_VERSION_1XX)
 		return 0;
 
 	return core->ops->session_continue(inst);
