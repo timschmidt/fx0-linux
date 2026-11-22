@@ -1167,6 +1167,8 @@ static int vdec_start_capture(struct venus_inst *inst, struct vb2_queue *q)
 			return ret;
 		inst->codec_state = VENUS_DEC_STATE_DECODING;
 		inst->streamon_cap = 1;
+		if (inst->hold_coded_input)
+			return venus_helper_release_held_input(inst);
 		return 0;
 	}
 
@@ -1215,6 +1217,9 @@ reconfigure:
 	inst->sequence_cap = 0;
 	inst->reconfig = false;
 	inst->drain_active = false;
+
+	if (inst->hold_coded_input)
+		return venus_helper_release_held_input(inst);
 
 	return 0;
 
@@ -1406,6 +1411,9 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 	vdec_pm_get_put(inst);
 
 	mutex_lock(&inst->lock);
+
+	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+		inst->hold_coded_input = false;
 
 	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
 		ret = vdec_stop_capture(inst);
@@ -1695,6 +1703,14 @@ static void vdec_event_change(struct venus_inst *inst,
 	switch (inst->codec_state) {
 	case VENUS_DEC_STATE_INIT:
 		inst->codec_state = VENUS_DEC_STATE_CAPTURE_SETUP;
+		/*
+		 * The MSM8226 firmware faults when it receives more coded data
+		 * after the first sequence event but before any capture buffer
+		 * is registered. Hold coded input until capture has started.
+		 */
+		if (IS_V1(inst->core) &&
+		    of_device_is_compatible(inst->core->dev->of_node, "qcom,msm8226-venus"))
+			inst->hold_coded_input = true;
 		break;
 	case VENUS_DEC_STATE_DECODING:
 	case VENUS_DEC_STATE_DRAIN:

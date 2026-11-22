@@ -1567,6 +1567,14 @@ void venus_helper_vb2_buf_queue(struct vb2_buffer *vb)
 
 	cache_payload(inst, vb);
 
+	if (inst->session_type == VIDC_SESSION_TYPE_DEC && V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type)) {
+		struct venus_buffer *buf = to_venus_buffer(vbuf);
+
+		buf->held_input = inst->hold_coded_input;
+		if (buf->held_input)
+			return;
+	}
+
 	if (inst->session_type == VIDC_SESSION_TYPE_ENC &&
 	    !(inst->streamon_out && inst->streamon_cap))
 		return;
@@ -1582,6 +1590,31 @@ void venus_helper_vb2_buf_queue(struct vb2_buffer *vb)
 	}
 }
 EXPORT_SYMBOL_GPL(venus_helper_vb2_buf_queue);
+
+/* Submit coded buffers that were held while the capture queue was set up. */
+int venus_helper_release_held_input(struct venus_inst *inst)
+{
+	struct v4l2_m2m_buffer *buf, *n;
+	int ret = 0, count = 0;
+
+	inst->hold_coded_input = false;
+	v4l2_m2m_for_each_src_buf_safe(inst->m2m_ctx, buf, n) {
+		struct venus_buffer *vbuf = to_venus_buffer(&buf->vb);
+
+		if (!vbuf->held_input)
+			continue;
+		vbuf->held_input = false;
+		ret = session_process_buf(inst, &buf->vb);
+		if (ret) {
+			return_buf_error(inst, &buf->vb);
+			break;
+		}
+		count++;
+	}
+	dev_dbg(inst->core->dev, "released %d held coded buffers: %d\n", count, ret);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(venus_helper_release_held_input);
 
 void venus_helper_buffers_done(struct venus_inst *inst, unsigned int type,
 			       enum vb2_buffer_state state)
