@@ -532,6 +532,7 @@ struct venus_inst {
 	unsigned int pic_struct;
 	bool next_buf_last;
 	bool hold_coded_input;
+	bool capture_first;
 	bool drain_active;
 	enum venus_inst_modes flags;
 	struct ida dpb_ids;

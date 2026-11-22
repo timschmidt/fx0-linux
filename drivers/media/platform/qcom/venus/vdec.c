@@ -1140,6 +1140,17 @@ static int vdec_start_capture(struct venus_inst *inst, struct vb2_queue *q)
 	if (!inst->streamon_out)
 		return 0;
 
+	if (inst->capture_first && inst->codec_state == VENUS_DEC_STATE_CAPTURE_SETUP &&
+	    !inst->reconfig) {
+		ret = venus_helper_process_initial_cap_bufs(inst);
+		dev_dbg(inst->core->dev_dec, "decoder capture-first buffers: %d\n", ret);
+		if (ret)
+			return ret;
+		inst->codec_state = VENUS_DEC_STATE_DECODING;
+		inst->streamon_cap = 1;
+		return venus_helper_release_held_input(inst);
+	}
+
 	if (inst->codec_state == VENUS_DEC_STATE_DECODING) {
 		if (inst->reconfig)
 			goto reconfigure;
@@ -1294,6 +1305,30 @@ static int vdec_start_output(struct venus_inst *inst)
 	if (ret)
 		return ret;
 
+	/*
+	 * The MSM8226 firmware faults if it decodes a picture before any
+	 * capture buffer is registered, which is the order of a stateful
+	 * client that waits for the first source change. Report the
+	 * negotiated geometry at once and hold coded input until capture
+	 * streams, so capture buffers always reach the firmware first.
+	 */
+	if (IS_V1(inst->core) && inst->out_width && inst->out_height &&
+	    of_device_is_compatible(inst->core->dev->of_node, "qcom,msm8226-venus")) {
+		static const struct v4l2_event ev = {
+			.type = V4L2_EVENT_SOURCE_CHANGE,
+			.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION };
+		struct v4l2_m2m_buffer *mbuf;
+
+		v4l2_m2m_for_each_src_buf(inst->m2m_ctx, mbuf)
+			to_venus_buffer(&mbuf->vb)->held_input = true;
+		inst->hold_coded_input = true;
+		inst->capture_first = true;
+		inst->codec_state = VENUS_DEC_STATE_CAPTURE_SETUP;
+		v4l2_event_queue_fh(&inst->fh, &ev);
+		dev_dbg(dev, "decoder capture first at %ux%u\n", inst->out_width, inst->out_height);
+		goto done;
+	}
+
 	ret = venus_helper_process_initial_out_bufs(inst);
 	dev_dbg(dev, "decoder initial coded buffers: %d\n", ret);
 	if (ret)
@@ -1412,8 +1447,10 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 
 	mutex_lock(&inst->lock);
 
-	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		inst->hold_coded_input = false;
+		inst->capture_first = false;
+	}
 
 	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
 		ret = vdec_stop_capture(inst);
@@ -1646,6 +1683,17 @@ static void vdec_event_change(struct venus_inst *inst,
 	bool retain_resources;
 
 	mutex_lock(&inst->lock);
+
+	/* The firmware confirming the geometry reported at capture-first startup. */
+	if (inst->capture_first && sufficient &&
+	    inst->codec_state == VENUS_DEC_STATE_DECODING &&
+	    ev_data->width == inst->out_width && ev_data->height == inst->out_height &&
+	    ev_data->bit_depth == inst->bit_depth) {
+		dev_dbg(dev, "decoder capture first: firmware confirmed %ux%u\n",
+			ev_data->width, ev_data->height);
+		mutex_unlock(&inst->lock);
+		return;
+	}
 
 	/* Continue-data-transfer is active and the registered geometry still matches. */
 	retain_resources = sufficient && inst->codec_state == VENUS_DEC_STATE_INIT &&
