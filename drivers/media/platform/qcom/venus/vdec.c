@@ -1434,6 +1434,28 @@ static const struct vb2_ops vdec_vb2_ops = {
 	.buf_queue = vdec_vb2_buf_queue,
 };
 
+/*
+ * The MSM8226 (HFI 1xx) firmware does not return the input timestamp with a
+ * decoded picture. Pictures leave the decoder in display order, where
+ * timestamps increase, so the earliest still-pending input timestamp belongs
+ * to this picture, also when the stream reorders B-pictures.
+ */
+static bool vdec_msm8226_earliest_ts(struct venus_inst *inst, u64 *ts_us)
+{
+	int i, best = -1;
+
+	for (i = 0; i < ARRAY_SIZE(inst->tss); i++) {
+		if (!inst->tss[i].used)
+			continue;
+		if (best < 0 || inst->tss[i].ts_us < inst->tss[best].ts_us)
+			best = i;
+	}
+	if (best < 0)
+		return false;
+	*ts_us = inst->tss[best].ts_us;
+	return true;
+}
+
 static void vdec_buf_done(struct venus_inst *inst, unsigned int buf_type,
 			  u32 tag, u32 bytesused, u32 data_offset, u32 flags,
 			  u32 hfi_flags, u64 timestamp_us)
@@ -1459,6 +1481,17 @@ static void vdec_buf_done(struct venus_inst *inst, unsigned int buf_type,
 	vbuf->flags = flags;
 	vbuf->field = V4L2_FIELD_NONE;
 	vb = &vbuf->vb2_buf;
+
+	if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE && IS_V1(inst->core) && bytesused &&
+	    !timestamp_us && !(flags & V4L2_BUF_FLAG_LAST) &&
+	    of_device_is_compatible(inst->core->dev->of_node, "qcom,msm8226-venus")) {
+		u64 earliest;
+
+		dev_dbg(inst->core->dev_dec, "decoder capture tag %u without firmware timestamp, hfi flags %#x\n",
+			tag, hfi_flags);
+		if (vdec_msm8226_earliest_ts(inst, &earliest))
+			timestamp_us = earliest;
+	}
 
 	if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		vb2_set_plane_payload(vb, 0, bytesused);
