@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#include "qcom-msm8926-lg-madai.dts"
+/* MSM8226 Venus video codec, its IOMMU and its memory route. */
 #include <dt-bindings/interconnect/qcom,msm8226.h>
 
 &{/reserved-memory} {

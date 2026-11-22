@@ -857,3 +857,6 @@
 /* CPR-managed CPU voltage and MSM8226 system sleep. */
 #include "qcom-msm8926-lg-madai-cpr.dtsi"
 #include "qcom-msm8926-lg-madai-suspend.dtsi"
+
+/* Venus video codec. */
+#include "qcom-msm8926-lg-madai-venus.dtsi"
