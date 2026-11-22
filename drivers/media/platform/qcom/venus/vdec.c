@@ -770,8 +770,14 @@ static int vdec_output_conf(struct venus_inst *inst, bool reconfigure)
 	if (ret)
 		return ret;
 
-	/* MSM8226 firmware retains these session properties across a DRC. */
-	if (core->res->hfi_version == HFI_VERSION_1XX && !legacy_reconfigure) {
+	/*
+	 * MSM8226 firmware retains these session properties across a DRC.
+	 * Without capture buffers it faults when it continues decoding past
+	 * the first sequence event, so let it pause there for the port
+	 * reconfiguration (session continue) instead.
+	 */
+	if (core->res->hfi_version == HFI_VERSION_1XX && !legacy_reconfigure &&
+	    !of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus")) {
 		ptype = HFI_PROPERTY_PARAM_VDEC_CONTINUE_DATA_TRANSFER;
 		ret = hfi_session_set_property(inst, ptype, &en);
 		dev_dbg(core->dev_dec, "decoder continue-data-transfer: %d\n", ret);
