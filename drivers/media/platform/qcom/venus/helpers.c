@@ -395,7 +395,7 @@ int venus_helper_intbufs_free(struct venus_inst *inst)
 }
 EXPORT_SYMBOL_GPL(venus_helper_intbufs_free);
 
-static bool fx0_decoder_retain_scratch;
+static bool fx0_decoder_retain_scratch = true;
 module_param(fx0_decoder_retain_scratch, bool, 0400);
 MODULE_PARM_DESC(fx0_decoder_retain_scratch,
 		 "Retain a matching single MSM8226 H.264 scratch buffer across reconfiguration");
