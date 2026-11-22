@@ -403,35 +403,29 @@ MODULE_PARM_DESC(fx0_decoder_retain_scratch,
 static bool intbufs_retain_scratch(struct venus_inst *inst)
 {
 	const enum hfi_version ver = HFI_VERSION_1XX;
-	struct hfi_buffer_requirements req;
+	struct hfi_buffer_requirements req = {};
 	struct venus_core *core = inst->core;
 	struct intbuf *scratch;
+	int ret, entries = 0;
 
 	if (!fx0_decoder_retain_scratch || core->res->hfi_version != ver ||
 	    inst->session_type != VIDC_SESSION_TYPE_DEC ||
-	    inst->hfi_codec != HFI_VIDEO_CODEC_H264 ||
-	    inst->opb_buftype != HFI_BUFFER_OUTPUT || inst->dpb_buftype ||
-	    !inst->reconfig || !inst->streamon_out || inst->streamon_cap ||
-	    !of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus") ||
-	    !list_is_singular(&inst->internalbufs))
+	    !of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus"))
 		return false;
+
+	list_for_each_entry(scratch, &inst->internalbufs, list)
+		entries++;
+	if (entries != 1) {
+		dev_dbg(core->dev, "decoder scratch kept? no: %d internal buffers\n", entries);
+		return false;
+	}
 
 	scratch = list_first_entry(&inst->internalbufs, struct intbuf, list);
-	if (scratch->type != HFI_BUFFER_INTERNAL_SCRATCH(ver) ||
-	    venus_helper_get_bufreq(inst, scratch->type, &req))
-		return false;
-
-	if (req.type != scratch->type || !req.size || req.size != scratch->size ||
-	    req.count_actual != 1 || req.count_min > 1 ||
-	    req.region_size || !req.contiguous || !is_power_of_2(req.alignment) ||
-	    !IS_ALIGNED(scratch->da, req.alignment))
-		return false;
-
-	if (venus_helper_get_bufreq(inst, HFI_BUFFER_INTERNAL_SCRATCH_1(ver), &req) != -EINVAL ||
-	    venus_helper_get_bufreq(inst, HFI_BUFFER_INTERNAL_SCRATCH_2(ver), &req) != -EINVAL)
-		return false;
-
-	return true;
+	ret = venus_helper_get_bufreq(inst, scratch->type, &req);
+	dev_dbg(core->dev, "decoder scratch kept? type %#x size %zu vs req %d type %#x size %u count %u\n",
+		scratch->type, scratch->size, ret, req.type, req.size, req.count_actual);
+	return !ret && scratch->type == HFI_BUFFER_INTERNAL_SCRATCH(ver) &&
+		req.type == scratch->type && req.size == scratch->size && req.count_actual == 1;
 }
 
 int venus_helper_intbufs_realloc(struct venus_inst *inst)
