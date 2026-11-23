@@ -5,7 +5,10 @@
  */
 #include <linux/idr.h>
 #include <linux/list.h>
+#include <linux/log2.h>
+#include <linux/moduleparam.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <media/videobuf2-dma-contig.h>
@@ -237,12 +240,23 @@ static int intbufs_set_buffer(struct venus_inst *inst, u32 type)
 	struct hfi_buffer_requirements bufreq;
 	struct hfi_buffer_desc bd;
 	struct intbuf *buf;
+	bool trace_decoder = IS_V1(core) && inst->session_type == VIDC_SESSION_TYPE_DEC;
 	unsigned int i;
 	int ret;
 
 	ret = venus_helper_get_bufreq(inst, type, &bufreq);
-	if (ret)
+	if (ret) {
+		if (trace_decoder)
+			dev_dbg(dev, "decoder internal buffer %#x query failed: %d\n",
+				type, ret);
 		return 0;
+	}
+
+	if (trace_decoder)
+		dev_dbg(dev,
+			"decoder internal buffer %#x: size %u region %u count %u min %u alignment %u contiguous %u\n",
+			type, bufreq.size, bufreq.region_size, bufreq.count_actual,
+			bufreq.count_min, bufreq.alignment, bufreq.contiguous);
 
 	if (!bufreq.size)
 		return 0;
@@ -272,6 +286,13 @@ static int intbufs_set_buffer(struct venus_inst *inst, u32 type)
 		bd.device_addr = buf->da;
 
 		ret = hfi_session_set_buffers(inst, &bd);
+		if (trace_decoder)
+			dev_dbg(dev, "decoder internal buffer %#x index %u aligned %d register %d\n",
+				type, i,
+				!bufreq.alignment ||
+				(is_power_of_2(bufreq.alignment) &&
+				 IS_ALIGNED(buf->da, bufreq.alignment)),
+				ret);
 		if (ret) {
 			dev_err(dev, "set session buffers failed\n");
 			goto dma_free;
@@ -374,12 +395,50 @@ int venus_helper_intbufs_free(struct venus_inst *inst)
 }
 EXPORT_SYMBOL_GPL(venus_helper_intbufs_free);
 
+static bool fx0_decoder_retain_scratch = true;
+module_param(fx0_decoder_retain_scratch, bool, 0400);
+MODULE_PARM_DESC(fx0_decoder_retain_scratch,
+		 "Retain a matching single MSM8226 H.264 scratch buffer across reconfiguration");
+
+static bool intbufs_retain_scratch(struct venus_inst *inst)
+{
+	const enum hfi_version ver = HFI_VERSION_1XX;
+	struct hfi_buffer_requirements req = {};
+	struct venus_core *core = inst->core;
+	struct intbuf *scratch;
+	int ret, entries = 0;
+
+	if (!fx0_decoder_retain_scratch || core->res->hfi_version != ver ||
+	    inst->session_type != VIDC_SESSION_TYPE_DEC ||
+	    !of_device_is_compatible(core->dev->of_node, "qcom,msm8226-venus"))
+		return false;
+
+	list_for_each_entry(scratch, &inst->internalbufs, list)
+		entries++;
+	if (entries != 1) {
+		dev_dbg(core->dev, "decoder scratch kept? no: %d internal buffers\n", entries);
+		return false;
+	}
+
+	scratch = list_first_entry(&inst->internalbufs, struct intbuf, list);
+	ret = venus_helper_get_bufreq(inst, scratch->type, &req);
+	dev_dbg(core->dev, "decoder scratch kept? type %#x size %zu vs req %d type %#x size %u count %u\n",
+		scratch->type, scratch->size, ret, req.type, req.size, req.count_actual);
+	return !ret && scratch->type == HFI_BUFFER_INTERNAL_SCRATCH(ver) &&
+		req.type == scratch->type && req.size <= scratch->size && req.count_actual == 1;
+}
+
 int venus_helper_intbufs_realloc(struct venus_inst *inst)
 {
 	enum hfi_version ver = inst->core->res->hfi_version;
 	struct hfi_buffer_desc bd;
 	struct intbuf *buf, *n;
 	int ret;
+
+	if (intbufs_retain_scratch(inst)) {
+		dev_dbg(inst->core->dev, "decoder control: retained matching scratch allocation\n");
+		return 0;
+	}
 
 	list_for_each_entry_safe(buf, n, &inst->internalbufs, list) {
 		if (buf->type == HFI_BUFFER_INTERNAL_PERSIST ||
@@ -522,6 +581,12 @@ session_process_buf(struct venus_inst *inst, struct vb2_v4l2_buffer *vbuf)
 		if (inst->session_type == VIDC_SESSION_TYPE_DEC)
 			put_ts_metadata(inst, vbuf);
 
+		if (IS_V1(inst->core) && inst->session_type == VIDC_SESSION_TYPE_DEC)
+			dev_dbg(inst->core->dev,
+				"decoder input buffer: alloc %u payload %u offset %u flags %#x\n",
+				fdata.alloc_len, fdata.filled_len, fdata.offset,
+				fdata.flags);
+
 		venus_pm_load_scale(inst);
 	} else if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		if (inst->session_type == VIDC_SESSION_TYPE_ENC)
@@ -535,10 +600,25 @@ session_process_buf(struct venus_inst *inst, struct vb2_v4l2_buffer *vbuf)
 	return hfi_session_process_buf(inst, &fdata);
 }
 
+static bool fx0_decoder_static_capture;
+module_param(fx0_decoder_static_capture, bool, 0400);
+MODULE_PARM_DESC(fx0_decoder_static_capture, "Use static capture buffers on the MSM8226 decoder");
+
+static bool use_msm8226_static_capture(struct venus_inst *inst)
+{
+	return fx0_decoder_static_capture && IS_V1(inst->core) &&
+	       inst->session_type == VIDC_SESSION_TYPE_DEC &&
+	       inst->opb_buftype == HFI_BUFFER_OUTPUT && !inst->dpb_buftype &&
+	       of_device_is_compatible(inst->core->dev->of_node, "qcom,msm8226-venus");
+}
+
 static bool is_dynamic_bufmode(struct venus_inst *inst)
 {
 	struct venus_core *core = inst->core;
 	struct hfi_plat_caps *caps;
+
+	if (use_msm8226_static_capture(inst))
+		return false;
 
 	/*
 	 * v4 doesn't send BUFFER_ALLOC_MODE_SUPPORTED property and supports
@@ -579,6 +659,7 @@ static int session_register_bufs(struct venus_inst *inst)
 	struct device *dev = core->dev;
 	struct hfi_buffer_desc bd;
 	struct venus_buffer *buf;
+	unsigned int registered = 0;
 	int ret = 0;
 
 	if (is_dynamic_bufmode(inst))
@@ -591,7 +672,12 @@ static int session_register_bufs(struct venus_inst *inst)
 			dev_err(dev, "%s: set buffer failed\n", __func__);
 			break;
 		}
+		registered++;
 	}
+
+	if (use_msm8226_static_capture(inst))
+		dev_dbg(dev, "decoder registered %u static capture buffers before start: %d\n",
+			registered, ret);
 
 	return ret;
 }
@@ -1306,6 +1392,15 @@ int venus_helper_set_dyn_bufmode(struct venus_inst *inst)
 	struct hfi_buffer_alloc_mode mode;
 	int ret;
 
+	if (use_msm8226_static_capture(inst)) {
+		mode.type = HFI_BUFFER_OUTPUT;
+		mode.mode = HFI_BUFFER_MODE_STATIC;
+		ret = hfi_session_set_property(inst, ptype, &mode);
+		dev_dbg(inst->core->dev,
+			"decoder primary capture static allocation mode: %d\n", ret);
+		return ret;
+	}
+
 	if (!is_dynamic_bufmode(inst))
 		return 0;
 
@@ -1510,6 +1605,14 @@ void venus_helper_vb2_buf_queue(struct vb2_buffer *vb)
 
 	cache_payload(inst, vb);
 
+	if (inst->session_type == VIDC_SESSION_TYPE_DEC && V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type)) {
+		struct venus_buffer *buf = to_venus_buffer(vbuf);
+
+		buf->held_input = inst->hold_coded_input;
+		if (buf->held_input)
+			return;
+	}
+
 	if (inst->session_type == VIDC_SESSION_TYPE_ENC &&
 	    !(inst->streamon_out && inst->streamon_cap))
 		return;
@@ -1525,6 +1628,31 @@ void venus_helper_vb2_buf_queue(struct vb2_buffer *vb)
 	}
 }
 EXPORT_SYMBOL_GPL(venus_helper_vb2_buf_queue);
+
+/* Submit coded buffers that were held while the capture queue was set up. */
+int venus_helper_release_held_input(struct venus_inst *inst)
+{
+	struct v4l2_m2m_buffer *buf, *n;
+	int ret = 0, count = 0;
+
+	inst->hold_coded_input = false;
+	v4l2_m2m_for_each_src_buf_safe(inst->m2m_ctx, buf, n) {
+		struct venus_buffer *vbuf = to_venus_buffer(&buf->vb);
+
+		if (!vbuf->held_input)
+			continue;
+		vbuf->held_input = false;
+		ret = session_process_buf(inst, &buf->vb);
+		if (ret) {
+			return_buf_error(inst, &buf->vb);
+			break;
+		}
+		count++;
+	}
+	dev_dbg(inst->core->dev, "released %d held coded buffers: %d\n", count, ret);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(venus_helper_release_held_input);
 
 void venus_helper_buffers_done(struct venus_inst *inst, unsigned int type,
 			       enum vb2_buffer_state state)
@@ -1636,6 +1764,8 @@ EXPORT_SYMBOL_GPL(venus_helper_process_initial_out_bufs);
 
 int venus_helper_vb2_start_streaming(struct venus_inst *inst)
 {
+	struct venus_core *core = inst->core;
+	bool trace_decoder = IS_V1(core) && inst->session_type == VIDC_SESSION_TYPE_DEC;
 	int ret;
 
 	ret = venus_helper_intbufs_alloc(inst);
@@ -1649,10 +1779,14 @@ int venus_helper_vb2_start_streaming(struct venus_inst *inst)
 	venus_pm_load_scale(inst);
 
 	ret = hfi_session_load_res(inst);
+	if (trace_decoder)
+		dev_dbg(core->dev, "decoder HFI load resources returned %d\n", ret);
 	if (ret)
 		goto err_unreg_bufs;
 
 	ret = hfi_session_start(inst);
+	if (trace_decoder)
+		dev_dbg(core->dev, "decoder HFI session start returned %d\n", ret);
 	if (ret)
 		goto err_unload_res;
 

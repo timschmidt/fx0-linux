@@ -350,6 +350,7 @@ struct venus_buffer {
 	struct list_head reg_list;
 	u32 flags;
 	struct list_head ref_list;
+	bool held_input;
 };
 
 struct clock_data {
@@ -530,6 +531,8 @@ struct venus_inst {
 	unsigned int bit_depth;
 	unsigned int pic_struct;
 	bool next_buf_last;
+	bool hold_coded_input;
+	bool capture_first;
 	bool drain_active;
 	enum venus_inst_modes flags;
 	struct ida dpb_ids;
