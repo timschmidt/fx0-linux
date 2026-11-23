@@ -1655,7 +1655,13 @@ static void vdec_buf_done(struct venus_inst *inst, unsigned int buf_type,
 		vbuf->sequence = inst->sequence_out++;
 	}
 
-	venus_helper_get_ts_metadata(inst, timestamp_us, vbuf);
+	/*
+	 * MSM8226 input completions carry no timestamp; a lookup would free
+	 * the pending entry of the picture whose input timestamp is zero.
+	 */
+	if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE || !IS_V1(inst->core) ||
+	    !of_device_is_compatible(inst->core->dev->of_node, "qcom,msm8226-venus"))
+		venus_helper_get_ts_metadata(inst, timestamp_us, vbuf);
 
 	if (hfi_flags & HFI_BUFFERFLAG_READONLY)
 		venus_helper_acquire_buf_ref(vbuf);
